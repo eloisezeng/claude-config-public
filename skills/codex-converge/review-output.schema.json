@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Vendored from the codex plugin's review-output.schema.json, extended with a required `reviewed` manifest so a clean verdict can be checked against the range it actually covered. Use with codex-converge's own `codex exec` prompts; the built-in `codex exec review` subcommand emits its own contract and must not be given this file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reviewed",
+    "verdict",
+    "summary",
+    "findings",
+    "next_steps"
+  ],
+  "properties": {
+    "reviewed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base",
+        "head",
+        "files"
+      ],
+      "properties": {
+        "base": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The base ref/SHA the reviewer actually diffed against. Must be a real SHA for diff reviews (pipeline step 7); null for document reviews of a spec or plan. Nullable rather than optional because OpenAI structured outputs reject any property missing from `required`."
+        },
+        "head": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The HEAD SHA the reviewer actually read. Must be a real SHA for diff reviews; null for document reviews."
+        },
+        "files": {
+          "type": "array",
+          "description": "Every file the reviewer actually examined. At the diff stage, compared against git diff --name-only base...head plus untracked files; at document stages, compared against the paths named in the prompt. A mismatch, or an empty list, fails the round.",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "approve",
+        "needs-attention"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "title",
+          "body",
+          "file",
+          "line_start",
+          "line_end",
+          "confidence",
+          "recommendation"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1
+          },
+          "file": {
+            "type": "string",
+            "minLength": 1
+          },
+          "line_start": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "line_end": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "recommendation": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "next_steps": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

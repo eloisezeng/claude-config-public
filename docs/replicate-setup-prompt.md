@@ -1,0 +1,31 @@
+# Replicating this Claude Code setup
+
+Give a collaborator access to this repo (or have them fork it), then have them paste the prompt below into a fresh Claude Code session on their machine.
+It reproduces the harness setup (symlinked config, memory architecture, hooks, auto-sync, plugins, CLI tools) while stripping you-personal content.
+This prompt is for collaborators only: step 2 deletes the repo's memories, which a collaborator doesn't want but you do.
+To set up another machine of your own — keeping and merging that machine's existing memories — use `second-machine-setup-prompt.md` instead.
+
+```text
+Set up my Claude Code environment to match your-org/claude-config. Work step by step; verify each step against its artifact before moving on, and ask me whenever a choice is mine to make.
+
+1. FORK FIRST — never point at the upstream repo. This config auto-commits and auto-pushes every local change via a file watcher, so it must target MY fork: `gh repo fork your-org/claude-config --clone ~/dotfiles/claude` (ask me for access or a URL if that fails), and confirm `git remote -v` shows my fork.
+
+2. PERSONALIZE MY FORK BEFORE INSTALLING (the repo carries your personal config; commit these changes to my fork):
+   - memories/: these are your memories, not mine. Unless I say otherwise: delete the memories/claude/ and memories/claude1/ trees entirely (per-project memory backups that install.sh would otherwise symlink onto my machine), delete all bodies in memories/global/, and reduce memories/global/MEMORY.md to its header comment. Also remove MIGRATION-MANIFEST.md.
+   - CLAUDE.md: keep the General Guidelines section; walk me through the Working directives one by one and delete the ones I don't adopt (each `[[slug]]` needs a matching body in memories/global/, so write bodies for the ones I keep, or strip the links). Update the Tools section — you use a personal fork of your-review-tool; I'll use the upstream npm package unless I say otherwise. Update tests/claudemd.test.sh so its pinned strings match my edited CLAUDE.md.
+   - skills/email-drafter is your personal email voice: delete it and remove it from ITEMS in install.sh, unless I want to write my own voice profile in its place.
+   - settings.json (macOS) or settings.linux.json: hook paths are `$HOME`-based, so there is nothing to rewrite as long as the clone sits where the hooks point — ~/dotfiles/claude on macOS; on Linux settings.linux.json points at ~/claude-config, so either clone there or update those paths. Note the macOS notification hooks only fire if ~/.claude/.enable-stop-notif / ~/.claude/.enable-response-ready-notif exist — create those flag files if I want the sounds.
+
+3. Run ./install.sh from ~/dotfiles/claude (macOS/Linux; Windows uses the PowerShell path in the README). Verify: ~/.claude/CLAUDE.md, AGENTS.md, settings.json and the tracked skills are symlinks into the repo, and the SessionStart global-memory hook is present in the active settings.json.
+
+4. Install plugins (marketplace details are in plugins/known_marketplaces.json):
+   - claude-plugins-official: superpowers, skill-creator, frontend-design
+   - context-mode marketplace: context-mode (then run its ctx-upgrade/doctor to confirm the version is current)
+   - Do NOT install claude-mem (listed in the manifest but disabled in settings — its background observer sessions burn tokens) and do NOT install anything gsd-* (retired from this setup).
+
+5. Install the CLI tools CLAUDE.md references, with Node >= 20: `npm i -g your-review-tool gh chrome-devtools` (plus `no-mistakes` if I keep that skill; skip any I told you to drop in step 2).
+
+6. VERIFY end to end: `bash tests/*.test.sh` in the repo all PASS; `git -C ~/dotfiles/claude status` is clean and a test commit auto-pushes to my fork within ~1 minute; a brand-new Claude Code session starts with no hook errors and injects my (possibly empty) global memory index.
+
+7. When done, tell me about docs/trim-local-memories-prompt.md in this repo: once my projects accumulate local memories, pasting it into a project session distills an overgrown memory index (the CLAUDE.md memory-hygiene rule keeps new writes lean; that prompt cleans up growth after the fact).
+```

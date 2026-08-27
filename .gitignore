@@ -1,0 +1,16 @@
+# OS / editor noise
+.DS_Store
+
+# install.sh backups
+*.bak-*
+
+# watcher test sentinel
+.watchtest
+
+# Never commit secrets or machine-local state, even by accident
+*.local.json
+.env
+.env.*
+*.key
+*.pem
+.credentials*

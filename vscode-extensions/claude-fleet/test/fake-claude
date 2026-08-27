@@ -1,0 +1,93 @@
+#!/usr/bin/python3
+# Stands in for `claude agents` so the writable path can be driven end to end without
+# opening a real session or spending any usage. It records what it was handed AND what
+# kind of stdin it inherited, because "the pane opened" and "the pane can be typed
+# into" are different claims: `exec claude agents --cwd "$cwd" </dev/null` satisfies
+# the first and destroys the second, and the earlier fake could not tell them apart.
+#
+# ROUND 6: this is deliberately NOT a shell script, and the shebang is load-bearing.
+# It used to be Bash, which made it runnable through a WRAPPER the real binary would
+# reject: `exec /bin/bash "$CLAUDE" agents --cwd "$cwd"` preserved this fixture's argv,
+# cwd, both TTYs and the sentinel and passed every assertion below, while the resolved
+# ~/.local/bin/claude on this machine is a `Mach-O 64-bit executable arm64` (measured
+# 2026-08-21) that Bash cannot run at all. Every real writable pane would have died
+# instantly with the suite green. A fixture has to make the WRONG implementation give a
+# DIFFERENT answer: put a shell in front of this file and it produces command-not-found
+# noise, never writes FAKE_ARGV, and the test fails. `fleet-open-pty.py` asserts the
+# shebang is non-shell so nobody quietly changes it back.
+import os
+import select
+import sys
+import time
+
+ARGV = os.environ['FAKE_ARGV']
+PROBE = os.environ['FAKE_PROBE']
+
+with open(ARGV, 'w') as fh:
+    # Byte-identical to the `printf '%s\n' "$@"` this replaces, down to the lone
+    # newline for an empty argv -- the reader strips exactly one trailing field.
+    fh.write(''.join(a + '\n' for a in sys.argv[1:]) or '\n')
+
+# Sample the descriptors BEFORE anything else touches them. The Bash original had to,
+# because a `> file` block makes `[ -t 1 ]` false no matter what the pane handed us, so
+# the stdout assertion could never pass -- for correct code or broken. It measured the
+# harness. Nothing here redirects, but the order is kept so the reason stays visible.
+si = 1 if os.isatty(0) else 0
+so = 1 if os.isatty(1) else 0
+
+_buf = b''
+
+
+def readline(timeout):
+    """One line from fd 0 within `timeout` seconds, or None if it stays quiet.
+
+    Deliberately os.read, not sys.stdin: a buffered reader can pull a second line into
+    userspace, after which select() calls the pty quiet while a complete line is
+    already in hand -- and `early` would report nothing where the Bash `read -r -t 1`
+    loop reported two. The buffer is drained before every wait for exactly that reason.
+    No \\r handling, matching `read -r`: the pty maps CR to LF on input, so a stray \\r
+    in the probe means the driver changed, which is worth failing over.
+    """
+    global _buf
+    deadline = time.time() + timeout
+    while True:
+        i = _buf.find(b'\n')
+        if i >= 0:
+            line, _buf = _buf[:i], _buf[i + 1:]
+            return line.decode('utf8', 'replace')
+        left = deadline - time.time()
+        if left <= 0:
+            return None
+        if not select.select([0], [], [], left)[0]:
+            return None
+        try:
+            chunk = os.read(0, 4096)
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        _buf += chunk
+
+
+with open(PROBE + '.part', 'w') as fh:
+    fh.write('stdin_tty=%d\n' % si)
+    fh.write('stdout_tty=%d\n' % so)
+    fh.write('cwd=%s\n' % os.getcwd())
+    # Anything queued BEFORE we announce ourselves was typed by `fleet`, not by you.
+    # The whole design turns on fleet never pressing a key at the picker.
+    early = ''
+    while True:
+        line = readline(1)
+        if line is None:
+            break
+        early += '[%s]' % line
+    fh.write('early=%s\n' % early)
+os.rename(PROBE + '.part', PROBE)
+
+sys.stdout.write('FAKE-READY\n')
+sys.stdout.flush()
+
+# Now block on a real line. Reaching this proves the pane is still interactive.
+line = readline(10)
+with open(PROBE, 'a') as fh:
+    fh.write('echo=%s\n' % (line if line is not None else '<none>'))

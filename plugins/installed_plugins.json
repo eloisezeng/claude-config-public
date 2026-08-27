@@ -1,0 +1,58 @@
+{
+  "version": 2,
+  "plugins": {
+    "skill-creator@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/skill-creator/unknown",
+        "version": "unknown",
+        "installedAt": "2026-05-29T21:36:03.992Z",
+        "lastUpdated": "2026-07-31T18:05:23.350Z",
+        "gitCommitSha": "6ec4b4020230e4c600407a1c46d76bc4f28a0d48"
+      }
+    ],
+    "superpowers@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/superpowers/6.2.0",
+        "version": "6.2.0",
+        "installedAt": "2026-05-29T21:36:21.462Z",
+        "lastUpdated": "2026-07-24T15:52:17.878Z",
+        "gitCommitSha": "f2cbfbefebbfef77321e4c9abc9e949826bea9d7"
+      }
+    ],
+    "context-mode@context-mode": [
+      {
+        "scope": "user",
+        "installPath": "$HOME/.claude/plugins/cache/context-mode/context-mode/1.0.169",
+        "version": "1.0.169",
+        "installedAt": "2026-05-29T21:37:06.487Z",
+        "lastUpdated": "2026-07-31T18:10:32.986Z",
+        "gitCommitSha": "f66230d94f03e5ae43d14c1d267f9b037e06e895"
+      }
+    ],
+    "claude-mem@thedotmack": [
+      {
+        "scope": "user",
+        "installPath": "$HOME/.claude/plugins/cache/thedotmack/claude-mem/13.4.0",
+        "version": "13.4.0",
+        "installedAt": "2026-05-29T21:37:44.121Z",
+        "lastUpdated": "2026-05-29T21:37:44.121Z",
+        "gitCommitSha": "84636894740724cb424e993d2e37a5a06a2aff2e"
+      }
+    ],
+    "frontend-design@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/frontend-design/unknown",
+        "version": "unknown",
+        "installedAt": "2026-05-29T21:37:51.842Z",
+        "lastUpdated": "2026-07-31T18:05:23.345Z",
+        "gitCommitSha": "6ec4b4020230e4c600407a1c46d76bc4f28a0d48"
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "context-mode@context-mode": true
+  }
+}

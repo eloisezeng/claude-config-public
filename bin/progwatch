@@ -1,0 +1,23 @@
+#!/bin/bash
+# progwatch <label> <total> <interval> <count-cmd> [alive-pattern] [start-epoch]
+# start-epoch: pass the JOB's start (e.g. `stat -f %B <task-output>`), not the watcher's, or the
+# ETA is computed from a rate that excludes everything already done.
+# Emits ONE progress-bar line per interval until done>=total, then a final line and exits.
+# Designed for the Monitor tool: each stdout line becomes a notification.
+L="$1"; T="$2"; IV="$3"; CMD="$4"; AP="$5"; S="${6:-}"
+[ -z "$S" ] && S=$(date +%s)
+stalls=0; last=-1
+while :; do
+  D=$(eval "$CMD" 2>/dev/null | tr -d ' \n'); [ -z "$D" ] && D=0
+  if [ -n "$AP" ]; then
+    pgrep -f "$AP" >/dev/null 2>&1 && A="working" || A="NO PROCESS"
+  else A=""; fi
+  # stall detection: counter unchanged AND no process => say so instead of looking busy
+  if [ "$D" = "$last" ]; then stalls=$((stalls+1)); else stalls=0; fi
+  last=$D
+  note="$A"
+  [ "$stalls" -ge 3 ] && [ "$A" = "NO PROCESS" ] && note="STALLED — counter flat ${stalls}x and no process"
+  "$HOME/.claude/bin/prog" "$L" "$D" "$T" "$S" "$note"
+  [ "$D" -ge "$T" ] && exit 0
+  sleep "$IV"
+done

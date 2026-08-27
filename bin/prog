@@ -1,0 +1,14 @@
+#!/bin/bash
+# prog <label> <done> <total> <start_epoch> [extra]
+# Renders a progress bar with elapsed + ETA derived from observed rate.
+L="$1"; D="$2"; T="$3"; S="$4"; X="$5"
+now=$(date +%s); el=$((now-S))
+[ "$T" -le 0 ] && T=1
+pct=$(( D*100/T )); [ $pct -gt 100 ] && pct=100
+filled=$(( pct*30/100 )); bar=""
+for i in $(seq 1 30); do [ $i -le $filled ] && bar="$bar#" || bar="$bar."; done
+fmt(){ printf '%dm%02ds' $(($1/60)) $(($1%60)); }
+if [ "$D" -gt 0 ]; then
+  rate=$(( el/D )); rem=$(( rate*(T-D) )); eta="~$(fmt $rem) left"
+else eta="ETA unknown (nothing finished yet)"; fi
+echo "[$bar] $pct%  $D/$T  elapsed $(fmt $el)  $eta  — $L ${X:+| $X}"

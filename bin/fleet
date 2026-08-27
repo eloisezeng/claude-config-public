@@ -1,0 +1,385 @@
+#!/usr/bin/env bash
+# fleet — the live background-Claude fleet, from any terminal.
+#
+#   fleet              every live session in one terminal (read-only)
+#   fleet who          which sessions can actually receive a reply
+#   fleet write        INTERACTIVE fleet view — reply to a running session
+#   fleet <short-id>   one session, focused (read-only tail)
+#   fleet open <id>    one session, WRITABLE — the picker, narrowed to it
+#   fleet -q           headlines only
+#   fleet workspace    regenerate + open a SECOND VS Code window (heavy)
+#   fleet doctor       say exactly what is and isn't working
+
+set -uo pipefail
+BIN="$HOME/.claude/bin"
+LOG="$HOME/.claude/fleet-errors.log"
+ARGV="$*"
+TRUSTED="${CLAUDE_FLEET_DIR:-$HOME/Coding/your_other_project}"
+RV="/tmp/cc-daemon-$(id -u)"
+
+# VS Code terminal profiles launch this binary with NO shell, so ~/.zshrc never runs and PATH is
+# launchd's bare /usr/bin:/bin:/usr/sbin:/sbin — neither node nor claude is on it. Resolve both by
+# searching real locations instead of trusting PATH.
+resolve() {
+  local name="$1"; shift
+  local p
+  p="$(command -v "$name" 2>/dev/null || true)"
+  if [ -n "$p" ] && [ -x "$p" ]; then printf '%s' "$p"; return 0; fi
+  for p in "$@"; do
+    if [ -x "$p" ]; then printf '%s' "$p"; return 0; fi
+  done
+  if [ "$name" = node ]; then
+    p="$(ls -td "$HOME"/.nvm/versions/node/*/bin/node 2>/dev/null | head -1 || true)"
+    if [ -n "$p" ] && [ -x "$p" ]; then printf '%s' "$p"; return 0; fi
+  fi
+  return 1
+}
+NODE="$(resolve node "$HOME/.local/bin/node" /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node || true)"
+CLAUDE="$(resolve claude "$HOME/.local/bin/claude" /opt/homebrew/bin/claude /usr/local/bin/claude || true)"
+
+# A VS Code profile tab vanishes the instant this process exits, taking the error with it.
+# Never die silently: say why, write it down, and hold the window open when interactive.
+die() {
+  local msg="$1"; shift
+  printf '\n\033[31mfleet: %s\033[0m\n' "$msg" >&2
+  local l; for l in "$@"; do printf '  %s\n' "$l" >&2; done
+  printf '\n  (logged to %s)\n' "$LOG" >&2
+  printf '%s  fleet %s :: %s\n' "$(date '+%F %T')" "$ARGV" "$msg" >>"$LOG" 2>/dev/null || true
+  if [ -t 0 ] && [ -t 1 ]; then printf '\n  press enter to close ... ' >&2; read -r _ || true; fi
+  exit 2
+}
+need_node() {
+  [ -n "$NODE" ] || die "could not find node" \
+    "Looked in: PATH, ~/.local/bin, /opt/homebrew/bin, /usr/local/bin, /usr/bin, ~/.nvm." \
+    "If you launched this from a VS Code terminal profile, that runs with no shell," \
+    "so ~/.zshrc never sets PATH. Install node somewhere above, or edit $0."
+  [ -f "$BIN/$1" ] || die "missing $BIN/$1"
+}
+
+# ONE name sanitizer, read by BOTH node programs below. `who` and `ids` each turn a
+# state.json name into a LABEL, and round 5 found the socket predicate written twice
+# with only one copy under test -- this is that same shape, caught before it bit:
+# `ids` stripped tabs and newlines, `who` stripped nothing, so a pasted multi-line
+# name broke `who` into fake rows while `ids` was fine.
+#   - control characters collapse to a space; zero-width and bidi FORMAT characters
+#     are removed outright. A name made only of those must not stay truthy: it would
+#     skip the cwd fallback and render as a status bullet with nothing beside it.
+#   - the coercion is load-bearing, not defensive dressing: `name` is null in 12 of
+#     the 150 live state.json records measured 2026-08-21.
+JS_CLEAN='const CLEAN=(s)=>String(s==null?"":s).replace(/[\u0000-\u001f\u007f]+/g," ").replace(/[\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]/g,"").replace(/\s+/g," ").trim();'
+
+case "${1:-}" in
+  -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+
+  doctor)
+    [ "$#" -le 1 ] || die "fleet doctor: takes no arguments" "Got: ${*:2}" "usage: fleet doctor"
+    echo "fleet doctor"
+    echo "  this script  : $0"
+    echo "  node         : ${NODE:-*** NOT FOUND ***} $([ -n "$NODE" ] && "$NODE" -v 2>/dev/null)"
+    echo "  claude       : ${CLAUDE:-*** NOT FOUND ***}"
+    echo "  trusted dir  : $TRUSTED $([ -d "$TRUSTED" ] && echo '(exists)' || echo '*** MISSING ***')"
+    for f in fleet-watch.mjs fleet-tail.mjs fleet-open.sh; do
+      [ -f "$BIN/$f" ] && echo "  $f : ok" || echo "  $f : *** MISSING ***"
+    done
+    if [ -t 1 ]; then echo "  stdout TTY   : yes"; else echo "  stdout TTY   : NO — 'fleet write' needs a real terminal"; fi
+    echo "  PATH         : $PATH"
+    echo "  shell-less?  : $([ -n "${ZSH_VERSION:-}${BASH_VERSION:-}" ] && echo no || echo 'possibly (launched without a shell)')"
+    if [ -s "$LOG" ]; then echo "  recent errors:"; tail -5 "$LOG" | sed 's/^/    /'; else echo "  recent errors: none"; fi
+    exit 0 ;;
+
+  who)
+    # Silently ignoring an argument is the `ids --reachble` defect at a second site:
+    # `fleet who --reachable` looks like a filter and was accepted as decoration.
+    [ "$#" -le 1 ] || die "fleet who: takes no arguments" "Got: ${*:2}" "usage: fleet who"
+    need_node fleet-watch.mjs
+    exec "$NODE" -e "$JS_CLEAN"'
+      const fs=require("fs"),p=require("path"),os=require("os"),cp=require("child_process");
+      const uid=process.getuid();
+      let alive=new Set();
+      try{const r=JSON.parse(fs.readFileSync(os.homedir()+"/.claude/daemon/roster.json","utf8"));
+        const w=r.workers||{};const arr=Array.isArray(w)?w:Object.entries(w).map(([k,v])=>({key:k,...v}));
+        for(const x of arr)(JSON.stringify(x).match(/[0-9a-f]{8}(?=[^0-9a-f])/g)||[]).forEach(v=>alive.add(v));
+      }catch(e){console.log("(roster unreadable: "+e.message+")");}
+      let rvdir=null;
+      // The daemon socket directory is an ENVIRONMENT INPUT, so it is injectable.
+      // Reachability is (in the daemon roster) AND (a live socket); a fixture can
+      // fabricate the first under a temp $HOME but not the second, which lives under
+      // /tmp/cc-daemon-<uid> and belongs to the real daemon. With both inputs
+      // injectable the rule can be PINNED -- inverting it used to change nothing any
+      // test could see.
+      try{const ov=process.env.CLAUDE_DAEMON_RV_DIR;
+        if(ov){ if(fs.existsSync(ov)) rvdir=ov; }
+        else{const base="/tmp/cc-daemon-"+uid;
+          for(const d of fs.readdirSync(base)){const c=path_join(base,d,"rv");if(fs.existsSync(c))rvdir=c;}}
+      }catch(e){}
+      function path_join(){return p.join.apply(p,arguments);}
+      const j=p.join(os.homedir(),".claude","jobs"),now=Date.now(),live=[],dead=[];
+      for(const d of fs.readdirSync(j)){
+        try{const f=p.join(j,d,"state.json"),st=JSON.parse(fs.readFileSync(f,"utf8"));
+        if(!["working","blocked"].includes(st.state))continue;
+        const mins=Math.round((now-fs.statSync(f).mtimeMs)/60000); if(mins>360)continue;
+        const sock=rvdir?fs.existsSync(p.join(rvdir,d+".sock")):true;
+        const ok=alive.has(d)&&sock;
+        (ok?live:dead).push({d,name:(CLEAN(st.name)||"?").slice(0,40),st:st.state,mins,
+          detail:CLEAN(st.detail).slice(0,56)});
+        }catch(e){}}
+      live.sort((a,b)=>a.mins-b.mins); dead.sort((a,b)=>a.mins-b.mins);
+      console.log("\nCAN receive a reply ("+live.length+"):");
+      for(const r of live)console.log("  "+(r.st==="blocked"?"●":"○")+" "+r.name.padEnd(42)+String(r.mins).padStart(5)+"m  "+r.detail);
+      if(dead.length){console.log("\nlisted as needing input but NOT reachable ("+dead.length+") — a reply here goes nowhere:");
+        for(const r of dead)console.log("  ✗ "+r.name.padEnd(42)+String(r.mins).padStart(5)+"m  "+r.detail);}
+      console.log("\n  ● waiting on you   ○ working   ✗ gone");
+      console.log("  in `fleet write`: ↑/↓ to the row, then SPACE to reply.");
+      console.log("  typing in the bottom box starts a NEW session — it is not a reply.\n");
+    ' ;;
+
+  ids)
+    # Machine-readable roster: one live session per line, TSV
+    #   short <TAB> state <TAB> reachable(1/0) <TAB> ageMin <TAB> cwd <TAB> name
+    # Freshest first. This is the ONE enumeration everything else builds on
+    # (the VS Code button, fleet-open.sh, any future tool) so a session can
+    # never be live for one surface and invisible to another.
+    need_node fleet-watch.mjs
+    exec "$NODE" -e "$JS_CLEAN"'
+      const fs=require("fs"),p=require("path"),os=require("os");
+      const argv=process.argv.slice(1);
+      // Parsed SEQUENTIALLY against an allowlist, exactly as `fleet open` parses.
+      // Scanning for the flags it knows and dropping the rest is what made
+      // `fleet ids --reachble` print the UNFILTERED roster and exit 0 -- a typo that
+      // answers confidently is worse than one that fails, and `open` refuses the
+      // same token, so the two entry points disagreed about the same argv.
+      //
+      // The digits-only rule is the other half of that agreement: a value one side
+      // takes and the other refuses is how a schema-valid 1.5 listed every row and
+      // then killed every pane. And Number("abc") is NaN, which no row is older than,
+      // so a typo used to admit EVERY session instead of failing.
+      const USAGE="  usage: fleet ids [--max-age <minutes>] [--max <n>] [--reachable]\n";
+      const bad=(m)=>{process.stderr.write("fleet ids: "+m+"\n"+USAGE);process.exit(2);};
+      let MAXAGE=60, MAX=0, ONLYOK=false;
+      for(let i=0;i<argv.length;i++){
+        const a=argv[i];
+        if(a==="--reachable"){ONLYOK=true;continue;}
+        if(a!=="--max-age"&&a!=="--max")bad("unknown argument "+JSON.stringify(a));
+        const v=argv[i+1];
+        if(v===undefined)bad(a+" needs a whole number and nothing followed it");
+        if(!/^[0-9]+$/.test(v))bad(a+" needs a whole number\n  Got: "+JSON.stringify(v));
+        if(a==="--max-age")MAXAGE=Number(v);else MAX=Number(v);
+        i++;
+      }
+      const uid=process.getuid(); const alive=new Set();
+      try{const r=JSON.parse(fs.readFileSync(os.homedir()+"/.claude/daemon/roster.json","utf8"));
+        const w=r.workers||{};const arr=Array.isArray(w)?w:Object.entries(w).map(([k,v])=>({key:k,...v}));
+        for(const x of arr)(JSON.stringify(x).match(/[0-9a-f]{8}(?=[^0-9a-f])/g)||[]).forEach(v=>alive.add(v));
+      }catch(e){}
+      let rvdir=null;
+      // The daemon socket directory is an ENVIRONMENT INPUT, so it is injectable.
+      // Reachability is (in the daemon roster) AND (a live socket); a fixture can
+      // fabricate the first under a temp $HOME but not the second, which lives under
+      // /tmp/cc-daemon-<uid> and belongs to the real daemon. With both inputs
+      // injectable the rule can be PINNED -- inverting it used to change nothing any
+      // test could see.
+      try{const ov=process.env.CLAUDE_DAEMON_RV_DIR;
+        if(ov){ if(fs.existsSync(ov)) rvdir=ov; }
+        else{const base="/tmp/cc-daemon-"+uid;
+          for(const d of fs.readdirSync(base)){const c=p.join(base,d,"rv");if(fs.existsSync(c))rvdir=c;}}
+      }catch(e){}
+      // A name is a UI surface (terminal tab labels, the VS Code button, fleet who).
+      // Never emit a bare session id as one: state.json can carry no name at all
+      // (seen live: job faed3ee8), so fall back to the worktree it runs in.
+      const label=(st,d)=>{
+        const raw=CLEAN(st.name);
+        if(raw&&raw!=="?"&&raw!==d)return raw.slice(0,40);
+        const base=p.basename(st.cwd||"");
+        return (base?base+" (unnamed)":d).slice(0,40);
+      };
+      const j=p.join(os.homedir(),".claude","jobs"),now=Date.now(),rows=[];
+      let dirs=[]; try{dirs=fs.readdirSync(j);}catch(e){
+        process.stderr.write("fleet ids: cannot read "+j+": "+e.message+"\n"); process.exit(1);}
+      for(const d of dirs){
+        try{const f=p.join(j,d,"state.json"),st=JSON.parse(fs.readFileSync(f,"utf8"));
+          if(!["working","blocked"].includes(st.state))continue;
+          const mins=(now-fs.statSync(f).mtimeMs)/60000; if(mins>MAXAGE)continue;
+          const sock=rvdir?fs.existsSync(p.join(rvdir,d+".sock")):true;
+          const ok=(alive.has(d)&&sock)?1:0;
+          if(ONLYOK&&!ok)continue;
+          rows.push({d,st:st.state,ok,mins:Math.round(mins),
+            cwd:st.cwd||os.homedir(),
+            name:label(st,d)});
+        }catch(e){}}
+      rows.sort((a,b)=>(b.ok-a.ok)||(a.mins-b.mins));
+      const out=MAX>0?rows.slice(0,MAX):rows;
+      for(const r of out)process.stdout.write([r.d,r.st,r.ok,r.mins,r.cwd,r.name].join("\t")+"\n");
+    ' -- "${@:2}" ;;
+
+  w|write)
+    [ "$#" -le 1 ] || die "fleet write: takes no arguments" "Got: ${*:2}" \
+      "usage: fleet write   (the interactive fleet view -- it takes no session id)"
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+      die "needs a real terminal (stdin/stdout are not a TTY)" \
+        "Run it directly in a terminal — not through a pipe, a task runner," \
+        "or the '!' prefix inside a Claude Code session."
+    fi
+    [ -n "$CLAUDE" ] || die "the 'claude' command was not found" \
+      "This is exactly why 'fleet write' fails to open from a VS Code terminal profile:" \
+      "profiles run with no shell, so ~/.zshrc never sets PATH." \
+      "Looked in: PATH, ~/.local/bin, /opt/homebrew/bin, /usr/local/bin."
+    [ -d "$TRUSTED" ] || die "CLAUDE_FLEET_DIR ($TRUSTED) does not exist" \
+      "Point it at a Claude-trusted repo: export CLAUDE_FLEET_DIR=\$HOME/Coding/your_other_project"
+    cd "$TRUSTED" || die "cannot cd to $TRUSTED"
+    exec "$CLAUDE" agents ;;
+
+  open)
+    # ONE PANE, ONE SESSION, WRITABLE.
+    #
+    # There is no CLI that attaches a terminal to a specific running background
+    # session. Verified against `claude agents --help` AND the binary's own
+    # option table (2.1.238): the full option list is --setting-sources, --cwd,
+    # --add-dir, --plugin-dir[-no-mcp], --settings, --mcp-config,
+    # --strict-mcp-config, --permission-mode, --model, --effort, --agent, --json.
+    # No --session, no attach. The only write surface is the picker itself,
+    # where `enter` opens a session (you then type straight into it) and
+    # `space` replies without opening.
+    #
+    # So: narrow the picker as far as a DOCUMENTED flag allows. `--cwd` filters
+    # it to this session's own worktree, which in most cases leaves exactly one
+    # live row.
+    #
+    # Driving the picker's keystrokes from out here was considered and REJECTED.
+    # Its row order is not derivable from any machine-readable source:
+    # `claude agents --json` returns an unsorted array while the TUI groups by
+    # state (ready for review / needs input / working / completed), so a
+    # precomputed `alt+N` would open the WRONG session the moment the fleet
+    # changed under it — and "open" on an idle session starts a resume that
+    # spends usage. Screen-scraping the highlight to verify first would need a
+    # VT emulator and would break on any TUI change. A wrong pane is worse than
+    # one keypress.
+    short="${2:-}"
+    [ -n "$short" ] || die "usage: fleet open <short-id> [--max-age <minutes>]" \
+      "Run 'fleet ids' to list the live sessions."
+    # The cutoff is the CALLER'S, defaulting to the same 1440 this used to hardcode.
+    # A caller that listed a session with `ids --max-age N` must be able to open it:
+    # when the two disagreed, the VS Code extension (whose maxAgeMinutes setting has
+    # no upper bound) could open a pane for a row this lookup then refused, and the
+    # pane's entire output was "no live session <short>".
+    open_maxage=1440
+    _i=3
+    while [ "$_i" -le "$#" ]; do
+      eval "_a=\${$_i}"
+      case "$_a" in
+        --max-age)
+          _j=$((_i+1)); eval "_v=\${$_j:-}"
+          case "$_v" in
+            ''|*[!0-9]*) die "fleet open: --max-age needs a whole number of minutes" \
+              "Got: '$_v'" ;;
+            *) open_maxage="$_v"; _i=$((_i+2)); continue ;;
+          esac ;;
+        *) die "fleet open: unknown argument '$_a'" \
+          "usage: fleet open <short-id> [--max-age <minutes>]" ;;
+      esac
+    done
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+      die "needs a real terminal (stdin/stdout are not a TTY)" \
+        "This is the writable view — it has to be a terminal, not a pipe."
+    fi
+    [ -n "$CLAUDE" ] || die "the 'claude' command was not found" \
+      "VS Code terminals run with no shell, so ~/.zshrc never sets PATH." \
+      "Looked in: PATH, ~/.local/bin, /opt/homebrew/bin, /usr/local/bin."
+    roster="$("$0" ids --max-age "$open_maxage" 2>/dev/null)"
+    # Every value crossing into awk goes through ENVIRON, never `-v`. MEASURED on this
+    # box (awk 20200816, 2026-08-21): `-v c='/tmp/a\q'` arrives as `/tmp/aq` because -v
+    # runs the string through escape processing, while ENVIRON is byte-preserving. A cwd
+    # or a session name containing a backslash therefore matched NOTHING, and the header
+    # went on to say "the only live row -- press ENTER" with two rows behind it.
+    line="$(printf '%s\n' "$roster" | AWK_S="$short" awk -F'\t' 'BEGIN{s=ENVIRON["AWK_S"]} $1==s{print;exit}')"
+    [ -n "$line" ] || die "no live session '$short'" \
+      "It may have finished, or its daemon socket is gone." \
+      "Run 'fleet who' to see what can still receive a reply."
+    state="$(printf '%s' "$line" | cut -f2)"
+    cwd="$(printf '%s' "$line" | cut -f5)"
+    name="$(printf '%s' "$line" | cut -f6)"
+    # A worktree can be removed while its session is still live. Falling back to a
+    # broader directory MUST happen before the row count is taken: counting against
+    # the old path and then opening the picker on the new one is how the header came
+    # to promise "the only live row" while the picker listed six.
+    widened=0
+    if [ ! -d "$cwd" ]; then
+      # Walk up to the nearest directory that still exists. `--cwd X` admits every
+      # session started UNDER X, so the parent of a deleted worktree still contains
+      # this session while listing far fewer rows than the whole trusted tree does --
+      # $TRUSTED is the last resort, not the first.
+      #
+      # The walk refuses $HOME itself (and anything outside it, and /). `claude agents`
+      # gates on folder trust, and $HOME is the one directory it must never be launched
+      # from -- a deleted $HOME/scratch would otherwise widen the picker to every
+      # session on the machine, which is the opposite of narrowing.
+      anc="$cwd"
+      while [ "$anc" != "/" ] && [ ! -d "$anc" ]; do anc="$(dirname "$anc")"; done
+      case "$anc" in
+        "$HOME"|"/"|"") cwd="$TRUSTED" ;;
+        "$HOME"/*)      cwd="$anc" ;;
+        *)              cwd="$TRUSTED" ;;
+      esac
+      # Still WIDENED, and still says so: whatever we narrowed to, it is not the
+      # folder this session is running in, so the header may not promise a narrowing.
+      widened=1
+    fi
+
+    # How many LIVE sessions will the filtered picker show? `--cwd` admits sessions
+    # started UNDER that path, so nested worktrees (your_other_project/.claude/
+    # worktrees/*) count too; equality alone would promise one row and show three.
+    # `/` is special-cased because "/" . "/" is "//", which matches nothing.
+    rows_here="$(printf '%s\n' "$roster" | AWK_C="$cwd" awk -F'\t' '
+      BEGIN{c=ENVIRON["AWK_C"]}
+      c == "/" ? substr($5,1,1) == "/" : ($5 == c || index($5, c "/") == 1)')"
+    here="$(printf '%s' "$rows_here" | grep -c . | tr -d ' ')"
+    # Is this session's NAME enough to identify it among those rows? Two sessions in
+    # one worktree can carry the same name (state.json may have none at all, and the
+    # fallback is the directory), and "pick this name" is useless when it is ambiguous.
+    same="$(printf '%s\n' "$rows_here" | AWK_N="$name" awk -F'\t' 'BEGIN{n=ENVIRON["AWK_N"]} $6==n' | grep -c . | tr -d ' ')"
+    mark='○'; [ "$state" = blocked ] && mark='●'
+    # MEASURED 2026-08-21 under a pty against the real `claude agents` (nothing
+    # written to its stdin, so nothing was spent): it takes the screen at 0.19s
+    # and then spins for over 50s before listing anything. So this header is on
+    # screen for a fifth of a second, NOT "while you wait" as an earlier version
+    # of this comment claimed. It is a glance, not a reference — which is why the
+    # durable copy of "which session is this pane" is the VS Code pane LABEL that
+    # splitInto sets, and why that label carries the short id whenever two live
+    # rows share a name. Keep every line under ~46 columns: three panes on a
+    # laptop is about 55.
+    printf '\n  \033[1m%s %s\033[0m\n' "$mark" "$name"
+    printf '  \033[2m%s · %s\033[0m\n' "$short" "$(basename "$cwd")"
+    if [ "$widened" = 1 ]; then
+      # Never claim a narrowing that did not happen.
+      printf '  \033[33mits folder is gone — picker NOT narrowed\033[0m\n'
+      printf '  \033[33mfind %s in the list, then ENTER\033[0m\n' "$short"
+    elif [ "${here:-1}" -le 1 ]; then
+      printf '  \033[32mthe only live row — press ENTER\033[0m\n'
+    elif [ "${same:-1}" -gt 1 ]; then
+      # The name repeats in this folder, so name it by id instead of by name.
+      printf '  \033[33m%s live rows, %s share this name\033[0m\n' "$here" "$same"
+      printf '  \033[33mmatch on %s, then ENTER\033[0m\n' "$short"
+    else
+      printf '  \033[33m%s live rows — pick this name, then ENTER\033[0m\n' "$here"
+    fi
+    # The roster read is unfiltered, so a session that has lost its daemon socket
+    # still resolves here. The picker will show it; replying to it will not work.
+    [ "$(printf '%s' "$line" | cut -f3)" = 1 ] || \
+      printf '  \033[31mnot reachable — it may not accept a reply\033[0m\n'
+    printf '  \033[2menter opens · space replies · esc quits\033[0m\n\n'
+    cd "$cwd" || die "cannot cd to $cwd"
+    exec "$CLAUDE" agents --cwd "$cwd" ;;
+
+  workspace|--open)
+    # Renamed from `--open`, which sat two dashes and two lines away from
+    # `fleet open <id>` and did something wildly more expensive: it spawns a
+    # WHOLE second VS Code window. On a machine that has already died of memory
+    # pressure that is not a typo you want to be able to make. `--open` still
+    # works so existing muscle memory and scripts do not break.
+    [ -x "$BIN/fleet-open.sh" ] || die "missing $BIN/fleet-open.sh"
+    exec "$BIN/fleet-open.sh" "${@:2}" ;;
+
+  -q|--quiet) need_node fleet-watch.mjs; exec "$NODE" "$BIN/fleet-watch.mjs" --quiet "${@:2}" ;;
+  "")         need_node fleet-watch.mjs; exec "$NODE" "$BIN/fleet-watch.mjs" ;;
+  -*)         need_node fleet-watch.mjs; exec "$NODE" "$BIN/fleet-watch.mjs" "$@" ;;
+  *)          need_node fleet-tail.mjs;  exec "$NODE" "$BIN/fleet-tail.mjs" "$@" ;;
+esac

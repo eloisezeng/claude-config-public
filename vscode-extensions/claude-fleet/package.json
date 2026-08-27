@@ -1,0 +1,92 @@
+{
+  "name": "claude-fleet",
+  "displayName": "Claude Fleet",
+  "description": "A status-bar button that opens the live background-Claude sessions as writable panes in the terminal panel you are already looking at, in groups of three.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "private": true,
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudeFleet.split",
+        "title": "Claude Fleet: Open live sessions in this panel (groups of 3)",
+        "category": "Claude Fleet"
+      },
+      {
+        "command": "claudeFleet.splitFreshest",
+        "title": "Claude Fleet: Open just the freshest group",
+        "category": "Claude Fleet"
+      },
+      {
+        "command": "claudeFleet.splitRead",
+        "title": "Claude Fleet: Watch live sessions (read-only tails)",
+        "category": "Claude Fleet"
+      },
+      {
+        "command": "claudeFleet.pick",
+        "title": "Claude Fleet: Pick which sessions to open",
+        "category": "Claude Fleet"
+      },
+      {
+        "command": "claudeFleet.watch",
+        "title": "Claude Fleet: All sessions in ONE terminal",
+        "category": "Claude Fleet"
+      },
+      {
+        "command": "claudeFleet.write",
+        "title": "Claude Fleet: Reply to a session (claude agents)",
+        "category": "Claude Fleet"
+      },
+      {
+        "command": "claudeFleet.close",
+        "title": "Claude Fleet: Close the fleet terminals",
+        "category": "Claude Fleet"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Fleet",
+      "properties": {
+        "claudeFleet.panes": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 12,
+          "markdownDescription": "How many sessions go side by side in ONE terminal tab. Anything beyond this opens as further tabs in the list down the right of the panel \u2014 8 live sessions at 3 give you three tabs of 3, 3 and 2. Past about 4 the panes get too narrow to read."
+        },
+        "claudeFleet.confirmAbove": {
+          "type": "integer",
+          "default": 6,
+          "markdownDescription": "Ask first when opening more than this many WRITABLE panes at once. Each one runs its own `claude` process, and this machine has lost VS Code to memory pressure before. Set to `0` to never ask.",
+          "minimum": 0
+        },
+        "claudeFleet.maxAgeMinutes": {
+          "type": "integer",
+          "default": 60,
+          "minimum": 1,
+          "maximum": 525600,
+          "description": "Ignore sessions whose state file has not been touched in this many minutes (a whole number). A pane passes this same cutoff to `fleet open`, so any value here can be opened."
+        },
+        "claudeFleet.reachableOnly": {
+          "type": "boolean",
+          "default": true,
+          "description": "Skip sessions that are listed as live but whose daemon socket is gone \u2014 a pane on one of those shows a frozen transcript."
+        },
+        "claudeFleet.fleetPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the 'fleet' script. Leave empty to auto-detect."
+        }
+      }
+    }
+  }
+}
