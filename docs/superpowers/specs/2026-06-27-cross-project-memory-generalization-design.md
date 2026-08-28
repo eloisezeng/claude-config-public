@@ -17,7 +17,7 @@ There are 31 `scope: global` memories spread across both config dirs (`claude` a
 Several are duplicates that were independently re-learned in separate silos because they could not see each other:
 
 - `prefer-playwright-e2e-convergence` (your-other-project) ≈ `execution-verification-prefs` (your-project).
-- `use-your-review-tool-for-visualization` + `visualize-means-your-review-tool` (your-other-project) ≈ `visualize-in-browser` (your-project).
+- `use-lavish-for-visualization` + `visualize-means-lavish` (your-other-project) ≈ `visualize-in-browser` (your-project).
 - `notify-only-on-convergence-or-blocked` (your-other-project) ≈ `notify-on-response` (your-project).
 - `extract-learnings-proactively` and `check-memory-before-asking-user` (your-other-project) are behavioral directives your-project silo has never seen.
 
@@ -148,7 +148,7 @@ Global memories now go to `memories/global/`, not `memories/<configDir>/<project
 
 ## Migration: guided consolidation
 
-Migration is a guided consolidation, not a blind move, because of dedup judgment calls and because some `scope: global` tags are over-broad (for example `your-review-tool-fork-sse-hardening` is arguably tool-internal rather than universal).
+Migration is a guided consolidation, not a blind move, because of dedup judgment calls and because some `scope: global` tags are over-broad (for example `lavish-fork-sse-hardening` is arguably tool-internal rather than universal).
 
 1. Collect all `scope: global` bodies across both config dirs and all projects.
 2. Re-apply the promotion test to each; downgrade mis-tagged ones back to local; keep genuine universals.

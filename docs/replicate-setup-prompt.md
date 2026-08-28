@@ -12,7 +12,7 @@ Set up my Claude Code environment to match your-org/claude-config. Work step by 
 
 2. PERSONALIZE MY FORK BEFORE INSTALLING (the repo carries your personal config; commit these changes to my fork):
    - memories/: these are your memories, not mine. Unless I say otherwise: delete the memories/claude/ and memories/claude1/ trees entirely (per-project memory backups that install.sh would otherwise symlink onto my machine), delete all bodies in memories/global/, and reduce memories/global/MEMORY.md to its header comment. Also remove MIGRATION-MANIFEST.md.
-   - CLAUDE.md: keep the General Guidelines section; walk me through the Working directives one by one and delete the ones I don't adopt (each `[[slug]]` needs a matching body in memories/global/, so write bodies for the ones I keep, or strip the links). Update the Tools section — you use a personal fork of your-review-tool; I'll use the upstream npm package unless I say otherwise. Update tests/claudemd.test.sh so its pinned strings match my edited CLAUDE.md.
+   - CLAUDE.md: keep the General Guidelines section; walk me through the Working directives one by one and delete the ones I don't adopt (each `[[slug]]` needs a matching body in memories/global/, so write bodies for the ones I keep, or strip the links). Update the Tools section — you use a personal fork of lavish-axi; I'll use the upstream npm package unless I say otherwise. Update tests/claudemd.test.sh so its pinned strings match my edited CLAUDE.md.
    - skills/email-drafter is your personal email voice: delete it and remove it from ITEMS in install.sh, unless I want to write my own voice profile in its place.
    - settings.json (macOS) or settings.linux.json: hook paths are `$HOME`-based, so there is nothing to rewrite as long as the clone sits where the hooks point — ~/dotfiles/claude on macOS; on Linux settings.linux.json points at ~/claude-config, so either clone there or update those paths. Note the macOS notification hooks only fire if ~/.claude/.enable-stop-notif / ~/.claude/.enable-response-ready-notif exist — create those flag files if I want the sounds.
 
@@ -23,7 +23,7 @@ Set up my Claude Code environment to match your-org/claude-config. Work step by 
    - context-mode marketplace: context-mode (then run its ctx-upgrade/doctor to confirm the version is current)
    - Do NOT install claude-mem (listed in the manifest but disabled in settings — its background observer sessions burn tokens) and do NOT install anything gsd-* (retired from this setup).
 
-5. Install the CLI tools CLAUDE.md references, with Node >= 20: `npm i -g your-review-tool gh chrome-devtools` (plus `no-mistakes` if I keep that skill; skip any I told you to drop in step 2).
+5. Install the CLI tools CLAUDE.md references, with Node >= 20: `npm i -g gh-axi chrome-devtools-axi`, then run `bin/install-lavish-fork.sh` for the forked `lavish-axi`, which is not published to npm (plus `no-mistakes` if I keep that skill; skip any I told you to drop in step 2).
 
 6. VERIFY end to end: `bash tests/*.test.sh` in the repo all PASS; `git -C ~/dotfiles/claude status` is clean and a test commit auto-pushes to my fork within ~1 minute; a brand-new Claude Code session starts with no hook errors and injects my (possibly empty) global memory index.
 

@@ -240,7 +240,7 @@ It cannot take `-C <worktree>`, so it would review the wrong checkout — the ex
    Run `superpowers:brainstorming` to explore intent and options.
    Ask Codex the same framing question independently (Terra at `medium`); fold its angles in.
    For an audit, the "brainstorm" is the discovery sweep: fan out Claude subagents per subsystem AND a Codex full-codebase pass, then consolidate + dedupe findings.
-   When a design/UX decision needs the human, present your-review-tool mockup (`visualize-in-browser` / `brainstorm-in-your-review-tool` prefs), let you pick, and fold the chosen option into the spec — this is the right place for the one human check-in in an otherwise hands-off run.
+   When a design/UX decision needs the human, present Lavish mockup (`visualize-in-browser` / `brainstorm-in-lavish` prefs), let you pick, and fold the chosen option into the spec — this is the right place for the one human check-in in an otherwise hands-off run.
 
 2. **Claude writes the spec.**
    A written design/spec doc (for a fix-set: the consolidated, deduped, severity-ranked findings + the intended fixes and any design decisions).

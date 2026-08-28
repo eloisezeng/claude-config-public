@@ -1,5 +1,0 @@
-# `fleet-open-pty.py` puts a `claude` -> fake-claude symlink here for the duration of a
-# run and removes it at teardown. An interrupted run leaves it behind, and this repo
-# auto-commits on every Stop -- it was published twice (1e6e7c5, 8dc368a) before this
-# line existed. A transient test artifact must never be committable.
-claude
