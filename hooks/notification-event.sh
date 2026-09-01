@@ -8,6 +8,34 @@
 # (inputNeededNotifEnabled, agentPushNotifEnabled) push to MOBILE -- "Push to
 # mobile when a permission prompt or question is waiting" / "Allow Claude to
 # push proactive mobile notifications" -- so the LOCAL surface is here.
+#
+# WHY THIS IS NOT REDUNDANT WITH CLAUDE CODE'S BUILT-IN NOTIFICATIONS.
+# Measured against the 2.1.258 binary, 2026-09-01. Re-measure before deleting
+# this hook on the theory that the product now covers it:
+#
+#   * `preferredNotifChannel` is the only built-in LOCAL channel, and every one
+#     of its values emits a TERMINAL ESCAPE SEQUENCE, never an OS banner:
+#     iterm2 -> OSC 9, terminal_bell -> \a, kitty -> OSC 99, ghostty -> OSC 777,
+#     iterm2_with_bell -> both, notifications_disabled -> nothing.
+#   * Its default `auto` resolves by terminal: Apple_Terminal -> bell (and only
+#     if that profile's Bell is enabled), iTerm.app -> iterm2, kitty -> kitty,
+#     ghostty -> ghostty. EVERYTHING ELSE -- including VS Code's integrated
+#     terminal, which is what this machine actually runs -- resolves to
+#     `no_method_available` and delivers nothing at all.
+#   * The binary carries no `display notification` for these events; its one
+#     osascript banner is the re-authentication prompt.
+#   * inputNeededNotifEnabled / agentPushNotifEnabled push to MOBILE over Remote
+#     Control. A different device, not this Mac.
+#
+# So the built-in channel and this hook are not two ways of doing one thing: in
+# VS Code the built-in surface is empty. Deleting this hook removes local
+# notification entirely, and with it the idle_prompt suppression below, which
+# the built-in has no equivalent for (measured in ~/.claude/hook-events.log:
+# 63 of 83 idle_prompt events muted because background agents were still up).
+#
+# They DO double up on a terminal that raises its own OS toast from the escape
+# sequence (iTerm2, kitty, ghostty). On such a terminal pick one surface: remove
+# the gate files below, or set preferredNotifChannel to notifications_disabled.
 # Until now this hook muted agent_completed outright (it was in the same
 # blanket case as task_completed) and gave agent_needs_input a content-free
 # "Claude needs your input" chime naming neither the session nor the ask,
