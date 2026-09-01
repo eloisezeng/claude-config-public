@@ -6,6 +6,10 @@
 # background_tasks field, only the Stop payload does.
 # The "Response ready" turn-end chime stays gated on a sentinel that is
 # deliberately absent (see memories/global/notify-on-response.md).
+#
+# Not redundant with Claude Code's built-in turn-end notification: the built-in
+# LOCAL channel emits only a terminal escape sequence, which in VS Code resolves
+# to nothing at all. The measurement is in hooks/notification-event.sh.
 IN=$(cat)
 printf '%s %s\n' "$(date +%FT%T)" "$IN" >> "$HOME/.claude/hook-events.log"
 
