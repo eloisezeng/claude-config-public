@@ -14,7 +14,7 @@ set -uo pipefail
 BIN="$HOME/.claude/bin"
 LOG="$HOME/.claude/fleet-errors.log"
 ARGV="$*"
-TRUSTED="${CLAUDE_FLEET_DIR:-$HOME/Coding/your_other_project}"
+TRUSTED="${CLAUDE_FLEET_DIR:-$HOME/Coding/your-other-project}"
 RV="/tmp/cc-daemon-$(id -u)"
 
 # VS Code terminal profiles launch this binary with NO shell, so ~/.zshrc never runs and PATH is
@@ -224,7 +224,7 @@ case "${1:-}" in
       "profiles run with no shell, so ~/.zshrc never sets PATH." \
       "Looked in: PATH, ~/.local/bin, /opt/homebrew/bin, /usr/local/bin."
     [ -d "$TRUSTED" ] || die "CLAUDE_FLEET_DIR ($TRUSTED) does not exist" \
-      "Point it at a Claude-trusted repo: export CLAUDE_FLEET_DIR=\$HOME/Coding/your_other_project"
+      "Point it at a Claude-trusted repo: export CLAUDE_FLEET_DIR=\$HOME/Coding/your-other-project"
     cd "$TRUSTED" || die "cannot cd to $TRUSTED"
     exec "$CLAUDE" agents ;;
 
@@ -325,7 +325,7 @@ case "${1:-}" in
     fi
 
     # How many LIVE sessions will the filtered picker show? `--cwd` admits sessions
-    # started UNDER that path, so nested worktrees (your_other_project/.claude/
+    # started UNDER that path, so nested worktrees (your-other-project/.claude/
     # worktrees/*) count too; equality alone would promise one row and show three.
     # `/` is special-cased because "/" . "/" is "//", which matches nothing.
     rows_here="$(printf '%s\n' "$roster" | AWK_C="$cwd" awk -F'\t' '
@@ -340,7 +340,7 @@ case "${1:-}" in
     # MEASURED 2026-08-21 under a pty against the real `claude agents` (nothing
     # written to its stdin, so nothing was spent): it takes the screen at 0.19s
     # and then spins for over 50s before listing anything. So this header is on
-    # screen for a fifth of a second, NOT "while you wait" as an earlier version
+    # screen for a fifth of a second, NOT "while she waits" as an earlier version
     # of this comment claimed. It is a glance, not a reference — which is why the
     # durable copy of "which session is this pane" is the VS Code pane LABEL that
     # splitInto sets, and why that label carries the short id whenever two live

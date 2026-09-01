@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const dir = process.env.CLAUDE_GLOBAL_MEMORY_DIR || join(scriptDir, 'memories', 'global');
-// 8000 → 12000 on your word (2026-08-19): the index hit a 287-char margin and you chose
+// 8000 → 12000 on the user's word (2026-08-19): the index hit a 287-char margin and she chose
 // raising the budget over trimming. The cost is always-on context in EVERY session, so raise
 // deliberately, not reflexively.
 const BUDGET = 12000;

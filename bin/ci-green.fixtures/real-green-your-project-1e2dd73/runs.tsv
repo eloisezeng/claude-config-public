@@ -1,0 +1,3 @@
+deploy — shellcheck + Caddyfile validate (with rate-limit plugin)	completed	success
+analyzer — pytest	completed	success
+web — typecheck, unit (incl. Postgres contract), e2e	completed	success

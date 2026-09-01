@@ -40,7 +40,7 @@ assert_contains "truncated — read" "$out"
 # bash counts BYTES under a non-UTF-8 locale (the default in Git Bash). Every
 # em-dash in the index then counts 3x and a compliant output reads as oversize.
 len="$(printf '%s' "$out" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(s.length)))')"
-# 12000 follows BUDGET in inject-global-memory.mjs (raised 8000 -> 12000 on your word,
+# 12000 follows BUDGET in inject-global-memory.mjs (raised 8000 -> 12000 on the user's word,
 # ccc293a); this cap must move with that constant or the truncation fixture trips it.
 [ "$len" -le 12000 ] || { echo "FAIL: output exceeds hard cap ($len chars)"; fail=1; }
 

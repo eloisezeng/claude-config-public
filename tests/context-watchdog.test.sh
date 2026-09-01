@@ -57,16 +57,20 @@ URGENT_CMD='`~/dotfiles/claude/hooks/handoff.sh "<absolute-handoff-path>" -- "<o
 WARN_CMD='`~/dotfiles/claude/hooks/handoff.sh "<handoff-file>" -- "<objective>"`'
 
 # ---- A. URGENT names the launcher, with the exact invocation --------------
+# Since the 2026-08-31 lifecycle decision the urgent band's message is "sync
+# durable state and let auto-compact fire", with dispatch reserved for genuine
+# task boundaries — so the band must carry the ledger sync, must NOT order a
+# mid-task dispatch, and still carries the exact boundary-dispatch invocation.
 write_transcript 155000
 out="$(run UserPromptSubmit sA)"
 assert_contains "$URGENT_CMD" "$(printf '%s' "$out" | ctx)" A
-# the mechanism's rationale must survive: never a fork, and why not a subagent
-assert_contains "never a fork" "$out" A
-assert_contains "subagent" "$out" A
-# and the artifact check: a dispatch is proven by what the launcher printed
-assert_contains "Report the record path" "$out" A
-# the recurring-loop carve-out and the no-blocking rule must survive the rewire
-assert_contains "EXCEPTION" "$out" A
+# the durable-state sync is the whole point of the band now
+assert_contains "~/.claude/ops" "$out" A
+assert_contains "do NOT dispatch a successor merely because context is high" "$out" A
+assert_contains "genuine task boundary" "$out" A
+# the demoted behaviour must stay demoted: no autonomous mid-task dispatch order
+assert_missing "Hand off AUTONOMOUSLY" "$out" A
+# the no-blocking rule must survive the rewire
 assert_contains "NEVER stop work to wait" "$out" A
 
 # ---- B. WARN nudges without claiming urgency ------------------------------
@@ -74,6 +78,7 @@ write_transcript 125000
 out="$(run UserPromptSubmit sB)"
 assert_contains "warn threshold" "$out" B
 assert_contains "$WARN_CMD" "$(printf '%s' "$out" | ctx)" B
+assert_contains "~/.claude/ops" "$out" B
 assert_missing "Auto-compact will fire" "$out" B
 
 # ---- C. below WARN says nothing ------------------------------------------
@@ -85,8 +90,8 @@ assert_eq "$out" "" C
 write_transcript 160000
 out="$(run PostToolUse sD)"
 assert_contains "$URGENT_CMD" "$(printf '%s' "$out" | ctx)" D
-assert_contains "never a fork" "$out" D
-assert_contains "EXCEPTION" "$out" D
+assert_contains "~/.claude/ops" "$out" D
+assert_missing "Hand off AUTONOMOUSLY" "$out" D
 # same band again -> silent
 out="$(run PostToolUse sD)"
 assert_eq "$out" "" D

@@ -67,7 +67,7 @@ notify() {
               "$(hostname)" "$1" "$LOG_FILE"
             tail -20 "$LOG_FILE" 2>/dev/null; } \
             | mail -s "claude-config sync FAILED on $(hostname)" \
-                you@example.com >/dev/null 2>&1 && touch "$stamp"
+                you@example.edu >/dev/null 2>&1 && touch "$stamp"
         fi
       fi ;;
   esac
@@ -113,7 +113,7 @@ done
 #    hostname — fall back to the real identity per-command, only when unset.
 IDENT=()
 git config user.email >/dev/null 2>&1 \
-  || IDENT=(-c user.name="you" -c user.email="you@example.com")
+  || IDENT=(-c user.name="the user Zeng" -c user.email="you@example.com")
 if [ -n "$(git status --porcelain)" ]; then
   if ! err="$(git add -A 2>&1)"; then
     fail "git add failed" "$err"
@@ -138,6 +138,32 @@ tracked_sha="$(git rev-parse "$remote/$branch" 2>/dev/null || true)"
 # A network failure is not a sync failure — the machine may simply be offline,
 # which is normal and must not raise an alarm. Skip the remote half instead.
 if ! ls_out="$(git ls-remote "$remote" "refs/heads/$branch" 2>&1)"; then
+  # A genuine network outage is normal and must stay quiet. An AUTH or
+  # OWNERSHIP failure is the opposite: the repo has stopped backing up and
+  # will keep not backing up until a human acts. Both arrive here, so the
+  # error text is the only thing that tells them apart.
+  #
+  # 2026-08-30: a "Repository not found." (the remote had moved out from under
+  # this credential) was classified as "offline" and skipped SILENTLY 505 times
+  # across two days, while 33 commits -- 14 memory files, 2 skills, a hook and
+  # CLAUDE.md -- sat unbacked. That is exactly the silent drift this script's
+  # header promises never to allow, produced by the one branch that returns 0.
+  case "$ls_out" in
+    *"Repository not found"*|*"Authentication failed"*|*"could not read Username"*|\
+    *"Permission denied"*|*"access denied"*|*"Invalid username or password"*|*"403"*)
+      log "AUTH/OWNERSHIP FAILURE (not an outage): $(printf '%s' "$ls_out" | head -1)"
+      # This fires on every file change, so alarm at most once every 6h --
+      # loud enough to be seen, not so loud it trains her to ignore it.
+      stamp="${TMPDIR:-/tmp}/claude-config-sync-authfail.stamp"
+      last=0; now="$(date +%s)"
+      [ -e "$stamp" ] && last="$(stat -f %m "$stamp" 2>/dev/null || stat -c %Y "$stamp" 2>/dev/null || echo 0)"
+      if [ "$(( now - last ))" -gt 21600 ]; then
+        touch "$stamp"
+        fail "config backup BROKEN: $remote refuses this credential. Not an outage -- $(git rev-list --count '@{u}..HEAD' 2>/dev/null || echo '?') commits unbacked." "$ls_out"
+      fi
+      echo "sync.sh: config backup broken (auth/ownership); see $LOG_FILE" >&2
+      exit 1 ;;
+  esac
   log "offline or remote unreachable; skipped pull/push ($(printf '%s' "$ls_out" | head -1))"
   exit 0
 fi

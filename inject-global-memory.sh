@@ -30,7 +30,7 @@ out="$header"$'\n\n'"$body"$'\n'
 
 # BUDGET: keep equal to `const BUDGET` in inject-global-memory.mjs — same knob, two
 # runtimes (bash here, node on Windows); tests/inject-budget-parity.test.sh pins the
-# equality. 8000 -> 12000 on your word (2026-08-19), matching the .mjs raise in
+# equality. 8000 -> 12000 on the user's word (2026-08-19), matching the .mjs raise in
 # ccc293a. (An older comment claimed the harness caps hook output at 10000; the
 # 2026-08-19 docs state no such limit.) 100 chars reserved for the truncation notice.
 budget=12000

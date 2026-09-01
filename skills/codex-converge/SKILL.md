@@ -1,6 +1,6 @@
 ---
 name: codex-converge
-description: Use when building a feature or fixing/auditing a codebase with the full cross-AI convergence loop where Claude and Codex check each other at every stage. Runs brainstorm → spec → converge → plan → converge → execute → review-till-converge, pairing each Claude artifact with an independent Codex critique and looping until both AIs agree there are no remaining unresolved findings. Invoke when you say "use the convergence workflow", "have claude and codex work together", "codex-converge", or asks for a thorough Claude↔Codex build/fix/review with Playwright verification.
+description: Use when building a feature or fixing/auditing a codebase with the full cross-AI convergence loop where Claude and Codex check each other at every stage. Runs brainstorm → spec → converge → plan → converge → execute → review-till-converge, pairing each Claude artifact with an independent Codex critique and looping until both AIs agree there are no remaining unresolved findings. Invoke when the user says "use the convergence workflow", "have claude and codex work together", "codex-converge", or asks for a thorough Claude↔Codex build/fix/review with Playwright verification.
 ---
 
 # Codex-converge — the Claude↔Codex convergence build/fix loop
@@ -14,7 +14,7 @@ Use the superpowers skills for the Claude-side discipline (`superpowers:brainsto
 ## When to use
 
 - Building a feature, fixing a bug, or auditing/cleaning a codebase where correctness and quality matter.
-- Any time you want Claude and Codex to "work together" or check each other.
+- Any time the user wants Claude and Codex to "work together" or check each other.
 - Not for trivial one-line edits — use judgment; the loop has overhead.
 
 ## Setup
@@ -46,7 +46,7 @@ Read the live ladder with:
 python3 -c "import json,os;d=json.load(open(os.path.expanduser('~/.codex/models_cache.json')));[print(m['slug'],m.get('default_reasoning_level'),[x['effort'] for x in m.get('supported_reasoning_levels') or []]) for m in d['models']]"
 ```
 
-Re-verified on **your Mac** 2026-08-17 against `~/.codex/models_cache.json` (CLI 0.146.0):
+Re-verified on **the user's Mac** 2026-08-17 against `~/.codex/models_cache.json` (CLI 0.146.0):
 
 | Tier | slug | Supported efforts | Default |
 | --- | --- | --- | --- |
@@ -62,13 +62,13 @@ Re-verified on **your Mac** 2026-08-17 against `~/.codex/models_cache.json` (CLI
 > profile set, so never carry a routing flag from one machine's notes to another.
 >
 > Measured differences seen so far:
-> - **your Mac** (ChatGPT auth, CLI 0.146.0): all three 5.6 tiers present. `-p sol` runs
+> - **the user's Mac** (ChatGPT auth, CLI 0.146.0): all three 5.6 tiers present. `-p sol` runs
 >   `gpt-5.6-sol` at `high` — verified live 2026-08-17, not read from the catalog.
-> - **a-collaborator's Windows machine** (different ChatGPT account, CLI 0.147.0): `-m gpt-5.6-sol`
+> - **deathstrxder's Windows machine** (different ChatGPT account, CLI 0.147.0): `-m gpt-5.6-sol`
 >   returns `400 invalid_request_error: The 'gpt-5.6-sol' model is not supported when using
 >   Codex with a ChatGPT account`, and the slug is absent from that machine's catalog. Terra is
 >   the ceiling there, with `terrax`/`terramax` profiles that do **not** exist on the Mac.
-> - **your institution cluster** (CLI 0.146.0): no profile files at all; base config is `gpt-5.6-sol`.
+> - **your-university cluster** (CLI 0.146.0): no profile files at all; base config is `gpt-5.6-sol`.
 >
 > **An unknown `-p <name>` is not an error — it silently falls through to the base config.**
 > Measured on the Mac 2026-08-17: `-p terrax` (absent here) ran `gpt-5.6-sol` at reasoning
@@ -102,7 +102,7 @@ codex exec -p solx -s read-only -C <worktree> ...
 ```
 
 `-p <name>` layers `$CODEX_HOME/<name>.config.toml` over the base config, and an explicit `-m` / `-c` on the same command line still wins over the profile.
-Profiles installed **on your Mac** (`ls ~/.codex/*.config.toml` — always check this rather than trusting the table, because the set differs per machine):
+Profiles installed **on the user's Mac** (`ls ~/.codex/*.config.toml` — always check this rather than trusting the table, because the set differs per machine):
 
 | Profile | model | effort |
 | --- | --- | --- |
@@ -126,7 +126,7 @@ Pick the cheapest tier that can do the job, and escalate only where a miss is ex
 | Discovery sweep / brainstorm angles | `-m gpt-5.6-terra -c model_reasoning_effort="medium"` | Breadth, not depth. |
 | Spec and plan convergence rounds; plan-to-diff conformance | `-p terra` | Semantic judgment, everyday depth. |
 | **Adversarial review of the diff** (the finding-hunt) | `-p sol` | Review is the stage where a miss ships a bug. |
-| Security, migration, money/lifecycle seams, schema rebuilds | `-p solx` | your repeat-bug classes live here. |
+| Security, migration, money/lifecycle seams, schema rebuilds | `-p solx` | the user's repeat-bug classes live here. |
 | One gnarly tightly-coupled bug (a race, an ordering bug) | `-m gpt-5.6-sol -c model_reasoning_effort="max"` | Every clue must stay in ONE reasoning chain — do not split it. No profile covers this route. |
 | Whole-codebase audit with independent workstreams | `-m gpt-5.6-terra -c model_reasoning_effort="ultra"` | Spawns internal subagents that decompose and reassemble. Highest spend — see the budget rule. |
 
@@ -142,7 +142,7 @@ Per OpenAI's own Codex prompting guidance: tighten the task contract and the ver
 If a round comes back vague, the usual fix is a missing `<structured_output_contract>`, not a bigger tier.
 
 **Budget.** Published API pricing is Sol $5/$30, Terra $2.50/$15, Luna $1/$6 per 1M input/output tokens.
-Those are **API-key prices and are not what you pay** — this machine authenticates Codex with a ChatGPT subscription, so usage draws on plan allowances and credits instead.
+Those are **API-key prices and are not what the user pays** — this machine authenticates Codex with a ChatGPT subscription, so usage draws on plan allowances and credits instead.
 Use the dollar figures only as a *relative weight* between tiers, never as a spend estimate.
 The rule that does bind: no usage-based overage without explicit per-action permission.
 `ultra` is the one setting whose cost is unbounded in principle (main agent + subagents + tool calls + integration), so treat Sol/`xhigh` as the default ceiling and ask before reaching for `ultra` on a large repo.
@@ -156,11 +156,15 @@ The rule that does bind: no usage-based overage without explicit per-action perm
 
 ```
 SKILL=~/dotfiles/claude/skills/codex-converge
-"$SKILL/run-codex.sh" /tmp/cc-prompt.txt /tmp/cc-verdict.json /tmp/cc-run.log "$WORKTREE" \
+"$SKILL/run-codex.sh" --policy-version 2026-08-30-regression-v1 /tmp/cc-prompt.txt /tmp/cc-verdict.json /tmp/cc-run.log "$WORKTREE" \
   -p sol --output-schema "$SKILL/review-output.schema.json"
 ```
 
-Its contract is `run-codex.sh [--write] <prompt-file> <out-file> <log-file> <workdir> [codex-args...]`.
+Its contract is `run-codex.sh --policy-version 2026-08-30-regression-v1 [--write] <prompt-file> <out-file> <log-file> <workdir> [codex-args...]`.
+The version handshake is a fail-closed session refresh: when this review policy changes, increment
+the version in both files. A session holding old instructions cannot launch another round; the
+launcher tells it to re-read this file and acknowledge the current version. It cannot alter a
+review process already in flight, so apply the new policy starting with that process's result.
 It supplies exactly one `-s` — **never pass your own** — plus `-C <workdir>`, `-o <out-file>` and stdin-piping; everything after `<workdir>` is passed through to `codex exec`, which is where the profile and schema go.
 It kills a run whose log has been idle 150s, clears the output file before each attempt, and exits non-zero unless a non-empty verdict landed.
 
@@ -193,7 +197,7 @@ Pass the vendored schema so the CLI enforces the shape, instead of the prompt me
 
 ```
 SKILL=~/dotfiles/claude/skills/codex-converge
-"$SKILL/run-codex.sh" /tmp/cc-prompt.txt /tmp/cc-verdict.json /tmp/cc-run.log "$WORKTREE" \
+"$SKILL/run-codex.sh" --policy-version 2026-08-30-regression-v1 /tmp/cc-prompt.txt /tmp/cc-verdict.json /tmp/cc-run.log "$WORKTREE" \
   -p sol --output-schema "$SKILL/review-output.schema.json"
 ```
 
@@ -240,7 +244,7 @@ It cannot take `-C <worktree>`, so it would review the wrong checkout — the ex
    Run `superpowers:brainstorming` to explore intent and options.
    Ask Codex the same framing question independently (Terra at `medium`); fold its angles in.
    For an audit, the "brainstorm" is the discovery sweep: fan out Claude subagents per subsystem AND a Codex full-codebase pass, then consolidate + dedupe findings.
-   When a design/UX decision needs the human, present Lavish mockup (`visualize-in-browser` / `brainstorm-in-lavish` prefs), let you pick, and fold the chosen option into the spec — this is the right place for the one human check-in in an otherwise hands-off run.
+   When a design/UX decision needs the human, present a Lavish mockup (`visualize-in-browser` / `brainstorm-in-lavish` prefs), let the user pick, and fold the chosen option into the spec — this is the right place for the one human check-in in an otherwise hands-off run.
 
 2. **Claude writes the spec.**
    A written design/spec doc (for a fix-set: the consolidated, deduped, severity-ranked findings + the intended fixes and any design decisions).
@@ -298,7 +302,7 @@ It cannot take `-C <worktree>`, so it would review the wrong checkout — the ex
 7. **Codex ↔ Claude review each other's work — till convergence.**
    Claude runs `superpowers:requesting-code-review`; Codex runs an independent review of the diff, scoped `--base $BASE`, at `-p solx` when the diff touches security, money, migrations, or schema.
    If any range on this branch was Codex-authored, the Codex pass does not speak for it — see the independence rule in "Who implements"; those ranges need a Claude review artifact of their own.
-   For UI changes, ground the review in Playwright on the live page (drive the real flow as an end user would), per your execution-verification preference.
+   For UI changes, ground the review in Playwright on the live page (drive the real flow as an end user would), per the user's execution-verification preference.
    Each side adversarially verifies the other's claims; apply real findings, reject false ones with reasoning.
    Loop until the gate below is satisfied from both sides.
    Run the loop with the efficiency rules ("Keeping the loop short", below) — generated corpora for enumerable families, delta scoping after a clean sweep, lens panels over serial chains — so convergence takes rounds, not days.
@@ -313,14 +317,14 @@ Codex is allowed to implement plan tasks. **The one rule that cannot bend: whoev
 
 **Preconditions — check these before the first write-capable run:**
 
-- **Codex can see the project's rules.** Codex reads `AGENTS.md`, not `CLAUDE.md`. your global config sets `project_doc_fallback_filenames = ["CLAUDE.md"]` so it falls back correctly; verify per repo by asking Codex to quote a rule that exists only in `CLAUDE.md` before trusting it to write. A repo where this fails is a repo where Codex must not implement.
+- **Codex can see the project's rules.** Codex reads `AGENTS.md`, not `CLAUDE.md`. The user's global config sets `project_doc_fallback_filenames = ["CLAUDE.md"]` so it falls back correctly; verify per repo by asking Codex to quote a rule that exists only in `CLAUDE.md` before trusting it to write. A repo where this fails is a repo where Codex must not implement.
 - **Isolated worktree, always.** `-s workspace-write -C <worktree>`, never the main checkout. `workspace-write` still lets Codex run commands; the worktree is what bounds the blast radius.
 - **One plan task per run.** Do not hand it the whole plan; a single run that half-lands three tasks is far worse than three runs.
 
 **Run it with the launcher's `--write` mode**, which is the only supported way to get a mutating run:
 
 ```
-"$SKILL/run-codex.sh" --write /tmp/task.txt /tmp/task-out.json /tmp/task.log "$WORKTREE" \
+"$SKILL/run-codex.sh" --policy-version 2026-08-30-regression-v1 --write /tmp/task.txt /tmp/task-out.json /tmp/task.log "$WORKTREE" \
   -p terra
 ```
 
@@ -444,6 +448,35 @@ not a whole round. Scope discipline: the micro-pass supplements the full-range r
 substitutes for the confirming full-range round that closes the gate, and its reviewer must never
 be the fix's author.
 
+### Freeze discovery before regression review
+
+The first whole-range implementation audit is **discovery mode**. Save its deduplicated findings,
+the user's locked decisions, and the reviewed HEAD in the progress ledger before applying fixes.
+Every corrective pass after that is **regression mode** until the fixes are clean:
+
+- Review only `<previous-reviewed-HEAD>..HEAD` plus a named checklist of invariants the fix could
+  affect. The prompt identifies the finding IDs being closed and their required regression tests.
+- A regression round blocks only when a target finding remains, the fix breaks a named invariant,
+  the claimed test does not detect removal of the fix, or the fix introduces a new critical/high
+  defect in the same behavior family.
+- A pre-existing concern outside that contract is recorded as a candidate for the confirmation
+  sweep; it does not recursively widen the current round. Never hide a newly observed critical/high
+  risk, but classify whether it was fix-induced before treating it as a regression blocker.
+- When findings enumerate spellings, encodings, or other members of one machine-generable family,
+  stop the instance loop. Add a generated adversarial corpus/property test and ask the reviewer to
+  audit the family boundary once.
+
+After regression mode is clean, run exactly one **confirmation mode** panel over the full pinned
+`$BASE...$HEAD`. Confirmation may reopen the branch only for a concrete unresolved defect, not to
+re-litigate a recorded product decision or accepted data outcome. A user decision is binding unless
+new evidence shows its stated premise was false; reviewers classify it as `product_decision` or
+`data_outcome`, not an implementation blocker.
+
+Each review prompt declares `mode: discovery | regression | confirmation`. A regression prompt also
+declares `target_findings`, `fix_range`, `affected_invariants`, `settled_decisions`, and
+`out_of_scope_disposition: record_for_confirmation`. A prompt missing these fields is a discovery
+prompt regardless of what it calls itself.
+
 ## Encode constraints as guards, not prose
 
 A constraint written as a sentence can be contradicted silently by the next plan; a constraint
@@ -477,7 +510,7 @@ The permitted dispositions differ by severity, and there is exactly one way to r
 
 | Severity | May be resolved by |
 | --- | --- |
-| `critical`, `high` | **fixed** in the artifact, or **adjudicated as not a defect** with written evidence. Deferral is not available to the agent. The single exception is your own explicit, recorded risk acceptance — you can release a blocker; you cannot, and you must ask rather than assume. |
+| `critical`, `high` | **fixed** in the artifact, or **adjudicated as not a defect** with written evidence. Deferral is not available to the agent. The single exception is the user's own explicit, recorded risk acceptance — she can release a blocker; you cannot, and you must ask rather than assume. |
 | `medium`, `low` | fixed, adjudicated as not a defect with written evidence, or deferred with a written reason. |
 
 Read the gate off the validated JSON, never off the prose summary.

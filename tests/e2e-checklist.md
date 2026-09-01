@@ -9,11 +9,10 @@ Date: 2026-06-27. Evidence for the real code paths a new session exercises.
 - **Authoring round-trip** (real `sync-memories.sh`, sandboxed `$HOME`): a project-dir memory tagged `scope: global` → moved to `memories/global/`, removed from the project dir (no symlink-back), and an `UNINDEXED` warning fired (since its pointer wasn't in the index yet). YES / NO / YES as expected.
 - **No dangling symlinks** in any project `memory/` dir; **no migrated slug double-listed** in any project `MEMORY.md` (migration-verify check 2).
 
-## Manual confirmation (next real session — you)
+## Manual confirmation (next real session — the user)
 
 These need an actual new Claude Code SessionStart, which can't be triggered from inside this session:
 
-- [ ] Start a session in a *different* project (e.g. `~/Coding/your-company-leads`) → confirm the "Global memory (cross-project)" block appears in context, and a body (e.g. `execution-verification-prefs.md`) unfolds via Read.
 - [ ] Start a session in a brand-new project dir (no `memory/`) → confirm the global block still appears.
 - [ ] Confirm under both `~/.claude` and `~/.claude1`.
 - [ ] Exercise `SessionStart` sources: `startup`, `resume`, `clear`, `compact`.

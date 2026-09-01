@@ -15,7 +15,7 @@ Use literal absolute paths with forward slashes instead — PowerShell accepts f
 
 **Why:** This failure is completely silent.
 PowerShell *parses* `(:USERPROFILE + '/path')` without complaint, then throws `CommandNotFoundException` at runtime, and the hook's stderr is not surfaced.
-On 2026-08-21 all six of your global hooks were dead this way — notifications, dotfiles sync, `inject-global-memory.mjs`, and `sync-memories.sh` — and it read as "the notifications got disabled" rather than as a bug.
+On 2026-08-21 all six of the user's global hooks were dead this way — notifications, dotfiles sync, `inject-global-memory.mjs`, and `sync-memories.sh` — and it read as "the notifications got disabled" rather than as a bug.
 Memory injection and memory sync had silently stopped working, so the global memory directories were empty.
 
 **How to apply:** After writing or editing any hook command on Windows, grep the command string for `$` and replace every interpolation with a literal path.

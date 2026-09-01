@@ -6,7 +6,7 @@ metadata:
 scope: global
 ---
 
-Since 2026-08-16 you run Claude Code on the **Max 20× subscription** (the older you@example.com org) rather than metered API credits, and said plainly: "we can use fable now we switched to max 20x".
+Since 2026-08-16 the user runs Claude Code on the **Max 20× subscription** (the older you@example.com org) rather than metered API credits, and said plainly: "we can use fable now we switched to max 20x".
 
 **Why:** The 13–16 Aug spend audit showed 94% of context is replayed tool traffic and half the cost sat in requests above 400K context. On a subscription the dollar rate is gone but the 5-hour and weekly usage limits still meter the same token flow — so model tier is no longer the lever to argue about; **window size and session length are**.
 

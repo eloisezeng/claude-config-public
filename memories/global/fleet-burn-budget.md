@@ -27,11 +27,11 @@ The old "seats run to 1M and never compact" picture is HISTORY, not the current 
 
 **The remaining lever is the BOOT READ SURFACE, and it is the handoff docs themselves.**
 The largest TEXT tool results in the entire corpus are handoff docs being read: 204 docs, 7.8 MB, ~1.95M tokens if fully read; 79 docs over 20 KB hold 89% of the bytes.
-Worst: `HANDOFF-gtm-supervision.md` 506,884 B ≈ **126,721 tokens**, `HANDOFF-toolmaru-sold-execute.md` 369,365 B across **75 `## UPDATE` sections** — a doc whose own record of truth is documented as "the LAST `## UPDATE` only".
+Worst: `HANDOFF-gtm-supervision.md` 506,884 B ≈ **126,721 tokens**, `HANDOFF-example-domain-sold-execute.md` 369,365 B across **75 `## UPDATE` sections** — a doc whose own record of truth is documented as "the LAST `## UPDATE` only".
 A healthy post-fix session sits at 118k; reading ONE such doc more than doubles it before any work happens. The doc written to make the handoff cheap is what makes it dear.
 
 **How to apply:**
-- A handoff doc is a **READ SURFACE, not a log.** Keep the live doc small; append history to a separate `-archive.md`. If it has grown, cut a capped brief (orienting head + last UPDATE + pointers scoped to that text) and point the successor at the brief — `.handoff-brief.py` in your_other_project does this non-destructively (~500 KB → ~2.6 KB, source never opened for writing) and has a `--check` staleness gate, because a brief is a snapshot of a file other live sessions keep appending to.
+- A handoff doc is a **READ SURFACE, not a log.** Keep the live doc small; append history to a separate `-archive.md`. If it has grown, cut a capped brief (orienting head + last UPDATE + pointers scoped to that text) and point the successor at the brief — `scripts/fleet/handoff-brief.py` in your-other-project does this non-destructively (~500 KB → ~2.6 KB, source never opened for writing) and has a `--check` staleness gate, because a brief is a snapshot of a file other live sessions keep appending to.
 - Scope a brief's pointer list to the text the brief CARRIES, never the whole archive: a bare 8-hex id from three days ago reads as live when it is a corpse.
 - Hand off at the task boundary. The context ceiling is now enforced by the setting, so a boundary handoff is about carrying **derived values with their pointers**, not about escaping a deep context.
 - Plumbing seats (relay / watch / hold / read) dispatch on `claude-sonnet-5[1m]` — pass `--model` explicitly; handoff.sh defaults to Fable for real continuations, which plumbing is not. Measured: Sonnet seats peaked at a 159,901 median with 0% over 300k, the cleanest profile of any tier.

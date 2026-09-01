@@ -117,7 +117,7 @@ tasks.append({
     'label': '\u2630 Fleet view (claude agents) \u2014 interactive',
     'type': 'shell',
     'command': 'claude agents',
-    'options': {'cwd': os.path.expanduser('~/Coding/your_other_project')},
+    'options': {'cwd': os.path.expanduser('~/code/your-other-project')},
     'presentation': {'reveal': 'always', 'panel': 'dedicated',
                      'showReuseMessage': False, 'clear': True, 'echo': False},
     'problemMatcher': [],

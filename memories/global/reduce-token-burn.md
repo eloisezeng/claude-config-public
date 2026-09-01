@@ -21,5 +21,5 @@ The subtler cost is **re-derivation**: recomputing the same aggregate across man
 - Don't re-render a table already printed in the conversation; state the new insight or delta.
 - `grep -nA N <anchor>` beats a full Read for "show me §X of the runbook".
 - Prefer `/clear` or a handoff over `/compact` between fully-done task pivots ([[handoff-at-boundaries-saves-tokens]]).
-- Batch authorization-gated steps: if you greenlit "edit → commit → push", do the whole chain in one turn without intermediate "want me to…?" round-trips.
+- Batch authorization-gated steps: if the user greenlit "edit → commit → push", do the whole chain in one turn without intermediate "want me to…?" round-trips.
 - Check the guard/validator BEFORE authoring against it. Writing first and discovering the linter refuses your central claim costs a full rewrite cycle plus a misdirected debugging round.

@@ -89,12 +89,12 @@ STUB_RC=0 STUB_OUT= verdict "file:// url"   "file://$SANDBOX/remote.git" local
   || echo "  ok: no probe was attempted for a local path"
 
 echo "A2: an anonymous reader that CAN fetch the refs means public"
-STUB_RC=0 STUB_OUT= verdict "ls-remote succeeds" "https://example.com/o/r.git" public
+STUB_RC=0 STUB_OUT= verdict "ls-remote succeeds" "https://github.com/o/r.git" public
 
 echo "A3: every way a host refuses an anonymous reader means private"
 # GitHub answers 'not found' for a private repo rather than leaking its existence.
 STUB_RC=128 STUB_OUT="remote: Repository not found." \
-  verdict "github 404" "https://example.com/o/r.git" private
+  verdict "github 404" "https://github.com/o/r.git" private
 STUB_RC=128 STUB_OUT="fatal: could not read Username for 'https://gitlab.com': terminal prompts disabled" \
   verdict "prompt refused" "https://gitlab.com/o/r.git" private
 STUB_RC=128 STUB_OUT="fatal: Authentication failed for 'https://example.com/o/r.git/'" \
@@ -103,19 +103,19 @@ STUB_RC=128 STUB_OUT="fatal: unable to access 'https://x/o/r.git/': The requeste
   verdict "403" "https://x/o/r.git" private
 
 echo "A4: anything else is 'unknown' -- which the caller must treat as a refusal"
-STUB_RC=128 STUB_OUT="fatal: unable to access 'https://example.com/o/r.git/': Could not resolve host: example.com" \
-  verdict "offline" "https://example.com/o/r.git" unknown
+STUB_RC=128 STUB_OUT="fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com" \
+  verdict "offline" "https://github.com/o/r.git" unknown
 STUB_RC=0 STUB_OUT= verdict "no url"            ""                  unknown
 STUB_RC=0 STUB_OUT= verdict "unrecognised form" "weird::thing"       unknown
 # `PATH=/nonexistent bash ...` would prevent the shell from finding BASH, so the assignment has
 # to be scoped by env(1) around an already-resolved interpreter.
 BASH_BIN="$(command -v bash)"
-got="$(env PATH=/nonexistent "$BASH_BIN" "$HELPER" "https://example.com/o/r.git" 2>/dev/null)"
+got="$(env PATH=/nonexistent "$BASH_BIN" "$HELPER" "https://github.com/o/r.git" 2>/dev/null)"
 check "$got" unknown "git missing from PATH is unknown, not a pass"
 
 echo "A5: the probe carries NO credentials -- the guard the whole verdict rests on"
 : > "$STUB_LOG"
-STUB_RC=0 STUB_OUT= PATH="$SANDBOX/stub:$PATH" bash "$HELPER" "https://example.com/o/r.git" >/dev/null 2>&1
+STUB_RC=0 STUB_OUT= PATH="$SANDBOX/stub:$PATH" bash "$HELPER" "https://github.com/o/r.git" >/dev/null 2>&1
 grep -q 'credential.helper=' "$STUB_LOG" \
   && echo "  ok: credential helpers reset on the command line" \
   || { echo "FAIL: no 'credential.helper=' in the probe"; cat "$STUB_LOG"; fail=1; }
@@ -130,18 +130,18 @@ probe_url() { # last url argument the stub was handed
   STUB_RC=0 STUB_OUT= PATH="$SANDBOX/stub:$PATH" bash "$HELPER" "$1" >/dev/null 2>&1
   sed -n 's/.*\[\(https:[^]]*\)\].*/\1/p' "$STUB_LOG" | tail -1
 }
-check "$(probe_url 'git@example.com:o/r.git')"          "https://example.com/o/r.git" "scp-style -> https"
-check "$(probe_url 'ssh://git@example.com/o/r.git')"    "https://example.com/o/r.git" "ssh:// -> https"
-check "$(probe_url 'ssh://git@example.com:22/o/r.git')" "https://example.com/o/r.git" "ssh:// with a port -> https"
+check "$(probe_url 'git@github.com:o/r.git')"          "https://github.com/o/r.git" "scp-style -> https"
+check "$(probe_url 'ssh://git@github.com/o/r.git')"    "https://github.com/o/r.git" "ssh:// -> https"
+check "$(probe_url 'ssh://git@github.com:22/o/r.git')" "https://github.com/o/r.git" "ssh:// with a port -> https"
 
 echo "A7: URL-embedded userinfo is dropped, but an @ in the PATH is not"
 # Fail-OPEN if this regresses: `https://someone@host/o/r.git` on a PUBLIC repo prompts for a
 # password, prompts are disabled, and the repo reads as 'private' -- so the push is allowed.
-check "$(probe_url 'https://someone@example.com/o/r.git')" "https://example.com/o/r.git" \
+check "$(probe_url 'https://someone@github.com/o/r.git')" "https://github.com/o/r.git" \
   "https userinfo dropped"
-check "$(probe_url 'https://example.com/o/re@po.git')"     "https://example.com/o/re@po.git" \
+check "$(probe_url 'https://github.com/o/re@po.git')"     "https://github.com/o/re@po.git" \
   "an @ inside the path is left alone"
-check "$(probe_url 'ssh://example.com/o/re@po.git')"       "https://example.com/o/re@po.git" \
+check "$(probe_url 'ssh://github.com/o/re@po.git')"       "https://github.com/o/re@po.git" \
   "ssh:// with an @ inside the path"
 
 # ==============================================================================================

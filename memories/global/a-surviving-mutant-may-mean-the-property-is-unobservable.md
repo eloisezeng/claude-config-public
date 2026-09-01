@@ -11,7 +11,7 @@ Either the tests are weak, or **the property has no observable effect** — some
 
 Diagnose before strengthening: delete the thing, then ask what would have to differ downstream. If the answer is "nothing", stop writing outcome tests.
 
-**Why:** in your-research-project round 4 a reviewer deleted a per-dataset `dataset_dirs` mapping and the suite was unchanged. That was recorded as "the skip guard masks the bug" and accepted-but-not-fixed. When the skipped data came back, the mutant *still* survived — because of 30 mappings exactly one was non-identity, and the loader's `_find_npz_root` scans one level deep, silently finishing the job. No outcome test could ever have seen it. This is `[[vendor-what-the-code-searches-for]]` one layer out: a search path that quietly succeeds hides the fall-through completely.
+**Why:** in MFFP round 4 a reviewer deleted a per-dataset `dataset_dirs` mapping and the suite was unchanged. That was recorded as "the skip guard masks the bug" and accepted-but-not-fixed. When the skipped data came back, the mutant *still* survived — because of 30 mappings exactly one was non-identity, and the loader's `_find_npz_root` scans one level deep, silently finishing the job. No outcome test could ever have seen it. This is `[[vendor-what-the-code-searches-for]]` one layer out: a search path that quietly succeeds hides the fall-through completely.
 
 **How to apply:**
 - Before strengthening a test against a surviving mutant, name the downstream value that a positive case would change — the `[[absence-needs-a-probe-that-could-see-presence]]` move.

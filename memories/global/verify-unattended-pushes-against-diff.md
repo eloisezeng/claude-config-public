@@ -9,7 +9,7 @@ metadata:
 
 When a `/loop`, auto-sync, or any unattended session pushes to a shared remote, do not assume the commit message reflects the diff.
 
-**Why:** an auto-pushed commit titled "docs(r5): add HANDOFF.md" (`ffb76fbfc` in your_experiment_repo) actually deleted the entire 21,163-file codebase; it sat undetected on origin/main because the message read like a routine doc add, blocking every collaborator.
+**Why:** an auto-pushed commit titled "docs(r5): add HANDOFF.md" (`ffb76fbfc` in playground_test) actually deleted the entire 21,163-file codebase; it sat undetected on origin/main because the message read like a routine doc add, blocking every collaborator.
 
 **How to apply:**
 - Gate auto-pushing loops on a sanity check like `git diff --stat HEAD~1 HEAD` and bail when the change size wildly disagrees with what the message implies.

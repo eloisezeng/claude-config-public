@@ -7,13 +7,13 @@ scope: global
 ---
 
 When work runs in the background, "1 shell is still running" is not a status report.
-you cannot tell a job that is progressing from one that is wedged, so you wait on both.
+The user cannot tell a job that is progressing from one that is wedged, so she waits on both.
 
 Report background work as: `[####......] 40%  12/30  elapsed 5m10s  ~7m40s left  — <label> | working`.
 Derive the ETA from the observed rate (elapsed/done x remaining), not from a guess made before starting.
 Say **working** or **NO PROCESS** explicitly, and call a flat counter with no live process **STALLED** rather than letting it look busy.
 
-**Why:** silence and "running" are indistinguishable from a hang, which is the one state that needs you to act.
+**Why:** silence and "running" are indistinguishable from a hang, which is the one state that needs her to act.
 A rate-derived ETA is honest — it self-corrects as the job runs — where an up-front guess is not.
 
 **How to apply:**
@@ -23,4 +23,4 @@ A rate-derived ETA is honest — it self-corrects as the job runs — where an u
 - Two macOS traps that silently zero a counter: `/tmp` is a symlink, so `find /tmp -maxdepth 1` never descends — use `/private/tmp`; and zsh aborts a whole command when a glob matches nothing, so count with `find`, not `ls *.log`.
 - Pairs with [[worker-liveness-must-reflect-progress]] (a health signal must track real forward progress) and [[handoff-at-boundaries-saves-tokens]].
 
-**Platform note (2026-08-20):** `~/.claude/bin/progwatch` does not exist on your institution cluster (login nodes login-node-*); there the loop is written inline in the `Monitor` command (count / elapsed / rate-ETA / STALLED from log-mtime / terminal outcome), e.g. the C2 stage2500 watcher.
+**Platform note (2026-08-20):** `~/.claude/bin/progwatch` does not exist on the your-university cluster (login nodes hpc-92-*); there the loop is written inline in the `Monitor` command (count / elapsed / rate-ETA / STALLED from log-mtime / terminal outcome), e.g. the C2 stage2500 watcher.

@@ -1,4 +1,4 @@
-# claude-config-public
+# claude-config
 
 Portable Claude Code global configuration.
 This repo is the single source of truth; config directories symlink into it.
@@ -89,7 +89,7 @@ keeps the newest config and pushes its own edits automatically.
 ## Collaborators use forks, not write access
 
 This is one person's config. `CLAUDE.md`, `memories/` and `skills/` encode
-your preferences, your machines' Codex profiles, and your account's model
+The user's preferences, her machines' Codex profiles, and her account's model
 availability — none of which are portable.
 
 Because autosync pushes every tracked edit with **no review step**, a second
@@ -102,7 +102,7 @@ effort `none` for four days while reporting normal verdicts.
 
 So each person autosyncs to **their own fork**:
 
-- `your-org/claude-config-public` is canonical. Only you push to it.
+- `your-org/claude-config` is canonical. Only the user pushes to it.
 - A collaborator forks it, sets their fork as `origin` and this repo as
   `upstream` (push-disabled), and autosyncs freely to their own fork.
 - They pull improvements from `upstream` whenever they like.

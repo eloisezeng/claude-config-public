@@ -1,9 +1,9 @@
 #!/bin/bash
 # run-codex.sh — the watchdogged Codex launcher for codex-converge.
 #
-#   run-codex.sh [--write] <prompt-file> <out-file> <log-file> <workdir> [codex-args...]
+#   run-codex.sh --policy-version 2026-08-30-regression-v1 [--write] <prompt-file> <out-file> <log-file> <workdir> [codex-args...]
 #
-#   run-codex.sh prompt.txt /tmp/verdict.json /tmp/run.log "$WT" \
+#   run-codex.sh --policy-version 2026-08-30-regression-v1 prompt.txt /tmp/verdict.json /tmp/run.log "$WT" \
 #     -p sol --output-schema "$HOME/dotfiles/claude/skills/codex-converge/review-output.schema.json"
 #
 # Supplies exactly one -s (never pass your own), plus -C <workdir>, -o <tmp> and stdin-piping;
@@ -38,10 +38,27 @@ set -u
 set -m   # each background job becomes its own process-group leader, so we can kill the tree
 
 WRITE_MODE=0
-if [ "${1:-}" = "--write" ]; then WRITE_MODE=1; shift; fi
+POLICY_VERSION="2026-08-30-regression-v1"
+ACK_POLICY_VERSION=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --write) WRITE_MODE=1; shift ;;
+    --policy-version)
+      [ "$#" -ge 2 ] || { echo "run-codex: --policy-version requires a value" >&2; exit 2; }
+      ACK_POLICY_VERSION="$2"; shift 2 ;;
+    *) break ;;
+  esac
+done
+
+if [ "$ACK_POLICY_VERSION" != "$POLICY_VERSION" ]; then
+  echo "run-codex: convergence policy changed; refusing a stale-session launch." >&2
+  echo "run-codex: re-read ~/dotfiles/claude/skills/codex-converge/SKILL.md in full." >&2
+  echo "run-codex: then retry with --policy-version $POLICY_VERSION" >&2
+  exit 2
+fi
 
 if [ "$#" -lt 4 ]; then
-  echo "usage: run-codex.sh [--write] <prompt-file> <out-file> <log-file> <workdir> [codex-args...]" >&2
+  echo "usage: run-codex.sh --policy-version $POLICY_VERSION [--write] <prompt-file> <out-file> <log-file> <workdir> [codex-args...]" >&2
   exit 2
 fi
 PROMPT="$1"; OUT="$2"; LOG="$3"; WORKDIR="$4"
@@ -260,8 +277,13 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
       # from the flags we passed. The preflight refuses an unknown -p, but an explicit
       # -m/-c can still land somewhere unintended, and "effort: none" is the signature of a
       # request that resolved to the base config.
-      RAN_MODEL="$(sed -n 's/^model:[[:space:]]*//p'            "$LOG" 2>/dev/null | head -1)"
-      RAN_EFFORT="$(sed -n 's/^reasoning effort:[[:space:]]*//p' "$LOG" 2>/dev/null | head -1)"
+      # codex colorizes the banner labels ("\e[1mmodel:\e[0m gpt-..."), so the labels are NOT
+      # at the start of the line in bytes. Strip ANSI first or both reads return empty and the
+      # tier check reports "unknown" on every single run — a verification that always abstains
+      # is worse than none, because it reads like a check that ran.
+      _banner="$(sed -e 's/\x1b\[[0-9;]*m//g' "$LOG" 2>/dev/null)"
+      RAN_MODEL="$(printf '%s\n' "$_banner"  | sed -n 's/^[[:space:]]*model:[[:space:]]*//p'            | head -1)"
+      RAN_EFFORT="$(printf '%s\n' "$_banner" | sed -n 's/^[[:space:]]*reasoning effort:[[:space:]]*//p' | head -1)"
       echo "[watchdog] tier actually used: model=${RAN_MODEL:-unknown} effort=${RAN_EFFORT:-unknown}"
       if [ "$RAN_EFFORT" = "none" ]; then
         echo "run-codex: WARNING - the run resolved to reasoning effort 'none'." >&2

@@ -197,7 +197,7 @@ no-mistakes axi abort         # cancel the current-branch active run
 - Errors are printed as `error: ...` on stdout with a `help` list; act on the suggestion.
 - Exit codes: `0` success, no-op, or normal decision gates, `1` failed or cancelled final outcomes, `2` bad usage.
 
-A `gate:` waiting on you look roughly like this - a `gate:` line naming the
+A `gate:` waiting on you looks roughly like this - a `gate:` line naming the
 step, a `findings[N]{...}:` table with one row per finding, and a `help[N]:`
 list of next commands:
 

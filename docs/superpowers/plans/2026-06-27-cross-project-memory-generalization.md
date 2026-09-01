@@ -180,7 +180,7 @@ tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 echo '{"hooks":{}}' > "$tmp/settings.json"
 HOOK="node $REPO/inject-global-memory.mjs"
 
-# install.sh is bash (your interactive shell is zsh) -> always invoke via bash -c
+# install.sh is bash (the user's interactive shell is zsh) -> always invoke via bash -c
 run() { bash -c "source '$REPO/install.sh' --source-only; $1"; }
 
 run "install_global_memory_hook '$tmp/settings.json' '$HOOK'"
@@ -258,7 +258,7 @@ Expected: `PASS: install-global-hook`
 
 - [ ] **Step 5: Pre-populate all three tracked settings files (each with its real per-OS path)**
 
-So every machine gets the hook on first `git pull` (not only after re-running `install.sh`), add the entry to all three tracked settings files using each OS's known checkout path. The Windows path is **read from the existing `settings.windows.json`** — confirm it before running, do not fabricate. `install.sh` is bash, so invoke via `bash -c`:
+So every machine gets the hook on first `git pull` (not only after re-running `install.sh`), add the entry to all three tracked settings files using each OS's known checkout path. The Windows path is **read from the existing `settings.windows.json`** (currently `C:\Users\ilike\OneDrive\Desktop\claude-config`) — confirm it before running, do not fabricate. `install.sh` is bash, so invoke via `bash -c`:
 
 ```bash
 cd ~/dotfiles/claude
@@ -271,7 +271,7 @@ run "install_global_memory_hook settings.linux.json 'node \$HOME/claude-config/i
 # Windows checkout: the base path already used by hooks in settings.windows.json. Verify first:
 grep -o '[A-Za-z]:[^"]*claude-config' settings.windows.json | head -1
 # Then (substituting that exact base; example uses the current value):
-run "install_global_memory_hook settings.windows.json 'node C:\\\\Users\\\\you\\\\OneDrive\\\\Desktop\\\\claude-config\\\\inject-global-memory.mjs'"
+run "install_global_memory_hook settings.windows.json 'node C:\\\\Users\\\\ilike\\\\OneDrive\\\\Desktop\\\\claude-config\\\\inject-global-memory.mjs'"
 
 # Verify each file has exactly one inject command with the right path:
 for f in settings.json settings.linux.json settings.windows.json; do
@@ -537,7 +537,7 @@ Replace the body of the `## Memory` section with:
 ```markdown
 ## Memory
 
-- A learning is **global** if it passes this test: "Would this help me in an unrelated project next week, independent of any single repo?" If yes, it is who you are, a universal working preference, a tool/platform fact, or a generalizable lesson. Project-technical facts stay **local** even when the pattern is interesting — file the generalization, not the instance.
+- A learning is **global** if it passes this test: "Would this help me in an unrelated project next week, independent of any single repo?" If yes, it is who the user is, a universal working preference, a tool/platform fact, or a generalizable lesson. Project-technical facts stay **local** even when the pattern is interesting — file the generalization, not the instance.
 - **Routing.** A *behavioral directive* → write the body to `memories/global/` AND add a one-line imperative to the `## Working directives` section above. A *pure fact* → write the body to `memories/global/` with an index line only.
 - Global memories live in `memories/global/` (flat namespace, globally-unique descriptive slugs). The `sync-memories.sh` Stop hook routes any `scope: global` memory there automatically; the `inject-global-memory.mjs` SessionStart hook loads the `memories/global/MEMORY.md` index into every project. Project-local memory overrides global defaults on project-specific constraints.
 - Leave per-project state memories untagged so they stay local.
@@ -583,7 +583,7 @@ For each file, add a row to `memories/global/MIGRATION-MANIFEST.md` with: source
 
 - [ ] **Step 2: CHECKPOINT — present the manifest for approval**
 
-Show the proposed manifest (every move/merge/downgrade) to you. **Do not delete or move anything yet.** Get explicit approval. Commit the manifest as-is:
+Show the proposed manifest (every move/merge/downgrade) to the user. **Do not delete or move anything yet.** Get explicit approval. Commit the manifest as-is:
 ```bash
 git -C ~/dotfiles/claude add memories/global/MIGRATION-MANIFEST.md
 git -C ~/dotfiles/claude commit -m "chore(memory): migration manifest (pre-approval snapshot)"
@@ -665,7 +665,7 @@ Expected: every line `PASS: …`.
 
 - [ ] **Step 2: Cross-project injection**
 
-Start a session in a *different* project (e.g. `~/Coding/your-company-leads`) and confirm the injected "Global memory (cross-project)" block appears and a body unfolds via Read. Record the observation in `tests/e2e-checklist.md`.
+Start a session in a *different* project (e.g. `~/code/your-company-leads`) and confirm the injected "Global memory (cross-project)" block appears and a body unfolds via Read. Record the observation in `tests/e2e-checklist.md`.
 
 - [ ] **Step 3: Fresh-project + both-config-dir injection**
 

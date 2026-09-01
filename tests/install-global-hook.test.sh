@@ -10,7 +10,7 @@ tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 echo '{"hooks":{}}' > "$tmp/settings.json"
 HOOK="node $REPO/inject-global-memory.mjs"
 
-# install.sh is bash (your interactive shell is zsh) -> always invoke via bash -c
+# install.sh is bash (the user's interactive shell is zsh) -> always invoke via bash -c
 run() { bash -c "source '$REPO/install.sh' --source-only; $1"; }
 
 run "install_global_memory_hook '$tmp/settings.json' '$HOOK'"
@@ -48,7 +48,7 @@ e2e_install() { # $1 = repo dir (inside the fake HOME)  $2 = fake HOME  [$3 = PA
 # from either branch on one machine. install.sh picks its settings source from
 # `uname` (settings.linux.json on Linux, settings.json otherwise) and nothing had
 # ever exercised the Linux branch — a rename or a typo there would first be found
-# by whoever installs on Linux, which for this repo is your cluster box.
+# by whoever installs on Linux, which for this repo is the user's cluster box.
 #
 # Only the argless form is faked; anything else execs the real uname, so a future
 # `uname -m` in the installer is not silently answered wrong.

@@ -19,7 +19,7 @@ Several are duplicates that were independently re-learned in separate silos beca
 - `prefer-playwright-e2e-convergence` (your-other-project) ≈ `execution-verification-prefs` (your-project).
 - `use-lavish-for-visualization` + `visualize-means-lavish` (your-other-project) ≈ `visualize-in-browser` (your-project).
 - `notify-only-on-convergence-or-blocked` (your-other-project) ≈ `notify-on-response` (your-project).
-- `extract-learnings-proactively` and `check-memory-before-asking-user` (your-other-project) are behavioral directives your-project silo has never seen.
+- `extract-learnings-proactively` and `check-memory-before-asking-user` (your-other-project) are behavioral directives the your-project silo has never seen.
 
 ## Goals
 

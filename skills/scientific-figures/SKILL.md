@@ -75,7 +75,7 @@ the rendered PNG, not just by running the code.
   empty data before `polyfit`/`log`.
 
 ## Worked example
-`your_research_package/src/your_research_package/common/visualize.py` in your-research-repo repo (your-research-project review one-pager) applies all of the above:
+`mffp_sharp/src/mffp_sharp/common/visualize.py` in the SURF_2026 repo (the MFFP review one-pager) applies all of the above:
 native-resolution LF/IF/HF field row, descriptive "Error between …" panels, mathtext PDE + condition
 vector header, curated metrics, log-log spectrum with an annotated slope, and a `generate.py --replot`
 path. Mirror it for new figure types.

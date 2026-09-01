@@ -15,7 +15,7 @@ It fails in **both** directions, which is what makes it dangerous:
 - **A HIGH that is already closed.** The reviewer reports a defect I fixed in the amend. Cheap to detect — I go to verify it and find the fix already there — but it burns a full round and invites arguing with a correct reviewer.
 - **A "NO HIGH FINDINGS" that is VOID.** Far worse, and silent. The clean verdict describes a commit that lacks the very fix it should have judged, and it *looks* like convergence. I nearly reported one as evidence the change was sound.
 
-**How to apply:** use a launcher that substitutes a `__HEAD__` token from `git rev-parse` at dispatch time and compares `HEAD` before/after, refusing the result if it moved (`.run-codex-on-head.sh` in the your_other_project repo is the reference implementation, wrapping the watchdogged launcher). Reviewing the uncommitted working tree does not have this problem — the hazard is specific to naming a commit and then rewriting it.
+**How to apply:** use a launcher that substitutes a `__HEAD__` token from `git rev-parse` at dispatch time and compares `HEAD` before/after, refusing the result if it moved (`.run-codex-on-head.sh` in the your-other-project repo is the reference implementation, wrapping the watchdogged launcher). Reviewing the uncommitted working tree does not have this problem — the hazard is specific to naming a commit and then rewriting it.
 
 Corollary: when a reviewer's finding cites code you believe you changed, **check which SHA it read before assuming it is wrong**. Same evidence discipline as [[verify-claims-against-artifacts]] — the reviewer may be right about a commit that no longer exists.
 

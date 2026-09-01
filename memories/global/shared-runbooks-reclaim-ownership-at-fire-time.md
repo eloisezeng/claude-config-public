@@ -16,7 +16,7 @@ Two sessions held the same staged review runbook.
 The owning session was dormant (zero live processes — verified), so this session fired the round per the runbook's own "if that session is gone, run it by hand" clause.
 The laptop then slept.
 On wake the owner resumed and launched its own run — and this session's suspended launcher ALSO resumed: its stall-watchdog killed the stalled child and re-fired a fresh attempt 31 seconds after the owner's launch, onto the SAME verdict and log paths.
-The owner correctly killed this session's runs as rogue duplicates and reported the session to you as a leftover to be killed.
+The owner correctly killed this session's runs as rogue duplicates and reported the session to the user as a leftover to be killed.
 
 **Why:**
 An ownership check is a snapshot; every suspend/resume or retry boundary invalidates it.

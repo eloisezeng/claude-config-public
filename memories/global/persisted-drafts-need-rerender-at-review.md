@@ -10,7 +10,7 @@ When generated text is persisted and later approved by a human (an approval card
 
 Symptom: one surface showing two generations of the same template side by side.
 
-**Why:** 2026-07-31, your_other_project. you: "not all current outreach emails are using correct template." One inbox card held 12 emails — 4 on the current template, 8 on the previous one. The consolidation fold merged later cards into the oldest byte-for-byte, so the fold was exactly where the two templates met. A carded lead was never re-proposed, so nothing would ever have refreshed those words, and every future copy change would have split a card the same way.
+**Why:** 2026-07-31, your-other-project. The user: "not all current outreach emails are using correct template." One inbox card held 12 emails — 4 on the current template, 8 on the previous one. The consolidation fold merged later cards into the oldest byte-for-byte, so the fold was exactly where the two templates met. A carded lead was never re-proposed, so nothing would ever have refreshed those words, and every future copy change would have split a card the same way.
 
 **How to apply:**
 - Whenever you change how generated text is produced, ask: is there persisted output of the old version still awaiting a human? Sweep it.
