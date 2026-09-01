@@ -9,7 +9,7 @@ metadata:
   modified: 2026-08-10T20:00:56.990Z
 ---
 
-Three independent Playwright behaviours, each of which lets a suite pass while the page is wrong. All three hit on one feature (the media clips carousel, 2026-08-10).
+Three independent Playwright behaviours, each of which lets a suite pass while the page is wrong. All three hit on one feature (the Gaming Portfolio clips carousel, 2026-08-10).
 
 **1. `opacity: 0` is VISIBLE to Playwright.**
 Its visibility check is "non-empty bounding box and not `visibility: hidden`" — opacity is not consulted.

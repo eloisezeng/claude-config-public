@@ -13,7 +13,7 @@ Build bibliographies from machine-fetched metadata (arXiv Atom API, Crossref `/w
 Write a venue into the bibliography only when an authoritative source (DBLP, Crossref, arXiv `journal_ref`) or two independent indexes back it; otherwise cite the preprint and record the unconfirmed hint in a side report rather than promoting it silently.
 Vendor the API responses next to the generator so the bibliography rebuilds byte-identically offline.
 
-**Why:** on your-research-project your-research-paper paper, `beggs2025pdecond` — invented author, invented title, real ID 2509.09599 — sat in 12 places across 5 model families including the headline model, and its *mechanism* claim ("FiLM-via-LayerNorm") was also wrong, so it could not simply be re-pointed at the true paper.
+**Why:** on the MFFP Interp4Discovery paper, `beggs2025pdecond` — invented author, invented title, real ID 2509.09599 — sat in 12 places across 5 model families including the headline model, and its *mechanism* claim ("FiLM-via-LayerNorm") was also wrong, so it could not simply be re-pointed at the true paper.
 Machine metadata is not automatically right either: Crossref dropped a coauthor from Kennedy & O'Hagan, and one DOI recalled from memory resolved to an unrelated clinical-trials paper.
 
 **How to apply:** when a task involves citations, fetch every ID before writing anything that depends on it; when a cite attributes a *mechanism*, read the abstract and split the claim if the paper does not support it; correct the fabrication in the source tree, not only in the new document, and say plainly which files changed and what that invalidates.

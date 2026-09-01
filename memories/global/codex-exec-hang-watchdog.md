@@ -8,7 +8,7 @@ metadata:
   originSessionId: a6c590aa-dca1-4418-81b2-b5182bb7df65
 ---
 
-`codex exec` (drives Claude↔Codex convergence reviews) can hang **indefinitely on startup, before any model call**: your Codex install has custom hooks/MCP config (`~/.codex/hooks.json`, `config.toml`), and on launch it wants an interactive trust/confirm on stdin — as a background process it blocks forever at 0% CPU having written nothing. `--ignore-user-config` does NOT prevent this (it skips `config.toml` but not `hooks.json`); observed wedges of 2h+.
+`codex exec` (drives Claude↔Codex convergence reviews) can hang **indefinitely on startup, before any model call**: The user's Codex install has custom hooks/MCP config (`~/.codex/hooks.json`, `config.toml`), and on launch it wants an interactive trust/confirm on stdin — as a background process it blocks forever at 0% CPU having written nothing. `--ignore-user-config` does NOT prevent this (it skips `config.toml` but not `hooks.json`); observed wedges of 2h+.
 
 **Launch form that can't wedge** — feed the prompt via stdin (`-`) so the trust prompt hits EOF instead of blocking (also dodges shell-escaping of long prompts):
 ```
@@ -17,7 +17,7 @@ codex exec -s read-only -C <dir> --skip-git-repo-check --output-last-message <ou
 
 **The canonical launcher now ships with the skill: `~/dotfiles/claude/skills/codex-converge/run-codex.sh`** (`<prompt> <out> <log> <workdir> [codex-args...]`). Use it rather than re-deriving the loop below; it adds process-group kill, exit-status checking, atomic promotion, and fail-fast on non-retryable errors, all pinned by a stub-`codex` test matrix. The sketch below is the minimal shape it grew from.
 
-**The watchdog is not optional and must ship with auto-retry in the SAME launch** (you, 2026-07-13: "remember to not allow codex review to have failure mode, or retry if it occurs" — after a correctly-launched review sat silent 87 minutes under manual spot-checking). Canonical launcher — run THE SCRIPT as the background task, so its completion always means "verdict ready or 3 attempts exhausted", never "maybe wedged":
+**The watchdog is not optional and must ship with auto-retry in the SAME launch** (the user, 2026-07-13: "remember to not allow codex review to have failure mode, or retry if it occurs" — after a correctly-launched review sat silent 87 minutes under manual spot-checking). Canonical launcher — run THE SCRIPT as the background task, so its completion always means "verdict ready or 3 attempts exhausted", never "maybe wedged":
 ```bash
 # run-codex-watchdogged.sh <promptfile> <outfile> <logfile>
 for attempt in 1 2 3; do

@@ -4,7 +4,7 @@ Date: 2026-06-27. 31 `scope: global` memories across both config dirs / 4 projec
 Decisions: **move** (keep as canonical), **merge→x** (fold into canonical x, leave a tombstone alias), **downgrade** (not universal → make local, strip `scope: global`).
 Result: **25 canonical** global memories, **4 tombstoned** merges, **1 downgraded**, **1 deleted**.
 
-APPROVED 2026-06-27. Amendment: `feedback-prefers-prose-clarification` → **delete** (you confirmed you prefer multiple-choice; the memory was stale/wrong; `present-options-abc-not-star` covers option formatting). No replacement written, per your instruction.
+APPROVED 2026-06-27. Amendment: `feedback-prefers-prose-clarification` → **delete** (the user confirmed she prefers multiple-choice; the memory was stale/wrong; `present-options-abc-not-star` covers option formatting). No replacement written, per her instruction.
 
 | slug | from (configDir/project) | decision | sha10 | originSessionId |
 |------|--------------------------|----------|-------|-----------------|
@@ -21,7 +21,6 @@ APPROVED 2026-06-27. Amendment: `feedback-prefers-prose-clarification` → **del
 | claude1-second-profile | claude/your-project | move | 9ca5bf6f82 | a20cde08 |
 | feedback-prefers-prose-clarification | claude/your-company-leads | move | c5ed10e2f5 | 172f8138 |
 | feedback-privacy-business-material | claude/your-company-leads | move | e941a850f4 | 172f8138 |
-| _a personal identity profile — withheld from this config; see_ [[user-profile-template]] | claude/your-company-leads | move | 3370bd7523 | 172f8138 |
 | grill-defer-domain-judgment | claude/your-company-services | move | c2887bb206 | 35ccf7b1 |
 | brainstorm-in-lavish | claude1/your-project | move | 79796af03c | 09853060 |
 | execution-verification-prefs | claude1/your-project | move (canonical) | 64535ce910 | 8db8ef80 |
@@ -42,10 +41,10 @@ APPROVED 2026-06-27. Amendment: `feedback-prefers-prose-clarification` → **del
 
 ## Rationale for the 5 non-trivial calls
 
-- **merge→execution-verification-prefs:** `prefer-playwright-e2e-convergence` is the same Claude↔Codex E2E-convergence preference, re-learned in your-other-project silo.
-- **merge→visualize-in-browser:** `use-lavish-for-visualization` + `visualize-means-lavish` both say "visualize = build lavish-axi artifact" — the same rule, twice.
+- **merge→execution-verification-prefs:** `prefer-playwright-e2e-convergence` is the same Claude↔Codex E2E-convergence preference, re-learned in the your-other-project silo.
+- **merge→visualize-in-browser:** `use-lavish-for-visualization` + `visualize-means-lavish` both say "visualize = build a lavish-axi artifact" — the same rule, twice.
 - **merge→notify-on-response:** `notify-only-on-convergence-or-blocked` is a refinement of the notify preference (the long-autonomous-loop case); folded in as a nuance, not a separate memory.
-- **downgrade lavish-fork-sse-hardening:** this is implementation work on a specific lavish-axi-fork feature branch (SSE hardening, Slack thread panel) — project-specific to lavish-axi-fork repo, not a universal preference. Stays local.
+- **downgrade lavish-fork-sse-hardening:** this is implementation work on a specific lavish-fork feature branch (SSE hardening, Slack thread panel) — project-specific to the lavish-axi-fork repo, not a universal preference. Stays local.
 - Everything else is a straightforward universal (identity, working preference, tooling fact, or generalizable lesson) → move as-is.
 
-Amendment 2026-07-31: demoted 2 post-migration globals to your_other_project project memory (single-project platform gotchas): fly-deploy-depot-builder-fallback, node22-worker-tsx-execargv-silent-fail. Removed the 4 tombstone aliases (all [[old-slug]] refs rewritten to canonical). De-duplicated the index: behavioral directives are indexed in CLAUDE.md ## Working directives only.
+Amendment 2026-07-31: demoted 2 post-migration globals to your-other-project project memory (single-project platform gotchas): fly-deploy-depot-builder-fallback, node22-worker-tsx-execargv-silent-fail. Removed the 4 tombstone aliases (all [[old-slug]] refs rewritten to canonical). De-duplicated the index: behavioral directives are indexed in CLAUDE.md ## Working directives only.

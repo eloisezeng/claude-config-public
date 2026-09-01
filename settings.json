@@ -29,6 +29,14 @@
             "command": "bash \"$HOME/dotfiles/claude/inject-global-memory.sh\""
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/dotfiles/claude/inject-ops-lanes.sh\""
+          }
+        ]
       }
     ],
     "PostToolUse": [

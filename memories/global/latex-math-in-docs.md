@@ -1,6 +1,6 @@
 ---
 name: latex-math-in-docs
-description: you want math written as LaTeX in markdown docs ($...$) and as mathtext in figures — with GitHub's renderer quirks respected
+description: The user wants math written as LaTeX in markdown docs ($...$) and as mathtext in figures — with GitHub's renderer quirks respected
 metadata: 
   node_type: memory
   type: feedback
@@ -22,5 +22,5 @@ Write all math as **LaTeX**, not unicode/ASCII:
 - Verify a math-heavy doc by POSTing it to `gh api markdown` and checking every `$` landed inside a `<math-renderer>` element.
 
 **Why:** the math is the substance of research docs; LaTeX renders cleanly and is the form
-you expect — but only if the renderer actually fires. **How to apply:** use `$...$` from the start,
+The user expects — but only if the renderer actually fires. **How to apply:** use `$...$` from the start,
 convert any unicode/ASCII math encountered, and run the `gh api markdown` check before shipping a doc with equations.

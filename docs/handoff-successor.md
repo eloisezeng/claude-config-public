@@ -12,7 +12,7 @@ including the turn where the subagent reports back.
 Measured this session: a fresh subagent boots at 32–37K, a fork at 217K, an interactive session at 60.3K.
 The subagent's own window is cheap; the corpse it leaves loaded is not.
 
-"A new session" is cheaper — it abandons the spent window entirely — but it requires you to be
+"A new session" is cheaper — it abandons the spent window entirely — but it requires the user to be
 present to start it, which is exactly what is not true at the moment URGENT fires in an unattended run.
 
 `claude --bg` resolves the contradiction, and is verified working on this machine (2026-08-18):
@@ -51,8 +51,8 @@ appearing in `claude agents --json`, never by the launcher's own stdout.
 4. Pre-existing, unrelated: `tests/settings-portable-paths.test.sh` fails at BASE
    (`d88adc66`) on the symlinked-`$HOME` case. Fixed as its own task, its own commit.
 
-Out of scope: retiring the four already-blocked sessions (your call — they may hold state);
-anything in `your_other_project`.
+Out of scope: retiring the four already-blocked sessions (the user's call — they may hold state);
+anything in `your-other-project`.
 
 ## What is machine-enforced, and what is only advice
 
@@ -371,7 +371,7 @@ malformed JSON, wrong cwd, a stale lock, two concurrent callers, and watchdog ex
 12. `--status` flags blocked sessions.
 13. The URGENT band of `context-watchdog.mjs` names `handoff.sh` with its exact invocation, still
     forbids forks, still carries the recurring-loop exception, and still says never to block on
-    you — pinned by `tests/context-watchdog.test.sh` driving the hook's real stdin/stdout.
+    The user — pinned by `tests/context-watchdog.test.sh` driving the hook's real stdin/stdout.
 14. `tests/settings-portable-paths.test.sh` passes.
 15. Both watchdog bands are pinned at their exact edges — 119,999 silent, 120,000 warn, 149,999
     warn, 150,000 urgent — for `UserPromptSubmit` and `PostToolUse` alike, and each band's assertion
@@ -700,7 +700,7 @@ The class was then enumerated rather than patched at the one site: **3 derived-c
 
 ### Live end-to-end, re-run against P4
 
-2026-08-18 **04:53:33Z**, session `ccb5fc03` (`ccb5fc03-d4d6-41eb-9497-11d9c51b59c0`), cwd `~/Coding/dotfiles-handoff`.
+2026-08-18 **04:53:33Z**, session `ccb5fc03` (`ccb5fc03-d4d6-41eb-9497-11d9c51b59c0`), cwd `~/code/dotfiles-handoff`.
 The launcher reported `watchdog: generation 1787028818.98275.27629 (holding its lease; pid 98493 is diagnostic)` — the arming line now names what was actually proved.
 Measured 15s in, while the successor was still working: the dispatch lock **free** (the dispatch had returned) and the generation lease **HELD**.
 The successor appended `SUCCESSOR-OK 2026-08-18T04:53:51Z` 18s after dispatch; `claude agents --json` shows the row at `state: done`.
@@ -722,7 +722,7 @@ The lifecycle and test lenses also list the untracked `HANDOFF-auto-handoff.md` 
 **23 findings: 0 critical, 14 high, 8 medium, 1 low** — down from round 3's 31.
 This is the number that mattered: round 3's rate rose because P1–P3 had landed *between* rounds, so round 3 was round ONE for that code.
 **Round 4 is the first round to read P4 after a round that already read it, so it is the first honest rate on this region** — and it fell.
-The escalate-to-you trigger (flat or rising on the same region) did not fire, and no fifth rewrite was warranted.
+The escalate-to-user trigger (flat or rising on the same region) did not fire, and no fifth rewrite was warranted.
 
 Nor did the findings cluster in P4: only 5 of the 23 are against the locking region itself, and none of those is the ownership class that forced P1→P2→P3→P4.
 The rest are the surrounding surfaces — the installer's target set, the Linux service generation, the context watchdog's transcript window, and the alert lifecycle.
@@ -888,7 +888,7 @@ ways).
 
 ### Still open on this branch
 
-- Nothing blocking. The branch is not merged or pushed: that is your call and you have not been asked.
+- Nothing blocking. The branch is not merged or pushed: that is the user's call and she has not been asked.
 
 
 ## Review dispositions — Codex diff round 5 (three parallel lenses, `-p terrax`)
@@ -994,7 +994,7 @@ These two are **flake fixes, not new assertions, and they are not mutation-verif
 
 ### Still open on this branch
 
-- **The launcher runs unbounded under the dispatch claim** (`hooks/handoff.sh`, the `CLAUDE_BIN` command substitution, tagged `CLAIM:d`). If `claude --bg` starts a successor and then hangs, the record stays at `state=launching`, no watcher is armed, and the claim is held for as long as the hang lasts, so every later dispatch for that handoff refuses. A ceiling is coherent — expiry maps onto the existing `state=unknown` + `bg_here` path — but choosing it wrong turns a slow cold start into a false "may be running", and the alternative to refusing is a SECOND successor, which is invariant #1. **Proposed 600s; the decision is your.** This entry is what the tag's word "filed" refers to — round 6 found it referred to nothing.
+- **The launcher runs unbounded under the dispatch claim** (`hooks/handoff.sh`, the `CLAUDE_BIN` command substitution, tagged `CLAIM:d`). If `claude --bg` starts a successor and then hangs, the record stays at `state=launching`, no watcher is armed, and the claim is held for as long as the hang lasts, so every later dispatch for that handoff refuses. A ceiling is coherent — expiry maps onto the existing `state=unknown` + `bg_here` path — but choosing it wrong turns a slow cold start into a false "may be running", and the alternative to refusing is a SECOND successor, which is invariant #1. **Proposed 600s; the decision is the user's.** This entry is what the tag's word "filed" refers to — round 6 found it referred to nothing.
 - **The alert fence is deliberately open during the re-dispatch truncation window.** `gen_is_ours` treats an *empty* `watch_gen` as ours, because that is the window between a `--force` re-dispatch truncating the record and the replacement watcher arming — a watcher that stood down there would stand down against a generation that does not exist yet. A stale notifier returning inside that window can still land a flat `alerted_*` in the new generation's record. Closing it would require `dispatch` to take the alert claim, which lets a wedged notifier block a re-dispatch — a worse failure. The *unreadable* half of the same fence was NOT a trade-off and was fixed in round 6: a record that could not be read no longer authorises a durable suppression marker.
 - **`install.sh`'s backup selection is check-then-act across processes** (`backup_if_real`). Two deliberate concurrent manual installs can both choose `.bak-1`, and the second `mv` then destroys the user's original. Byte-identical since before this branch and nothing auto-invokes the installer, so it is recorded rather than fixed here.
 - The suite is now **~7 minutes** per run, so a ten-mutation set is ~70. That is the real reason mutations run serially: the two documented false failures in this loop both came from a concurrent second workload.
@@ -1524,7 +1524,7 @@ Micro-review 9's own delta is where round 6 stops: two mediums, both on the same
 ### Still open after round 6
 
 - The three entries under "Still open on this branch" above are unchanged: the unbounded launcher
-  under the dispatch claim (your number to choose), the deliberately open alert fence during the
+  under the dispatch claim (the user's number to choose), the deliberately open alert fence during the
   re-dispatch truncation window, and `install.sh`'s cross-process backup selection.
 - **`transcript_for`'s per-subdirectory blind spot**, recorded above with the reason it was not
   closed: a project SUBdirectory that cannot be searched is still invisible.

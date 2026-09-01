@@ -1,7 +1,7 @@
 # Replicating this Claude Code setup
 
 Give a collaborator access to this repo (or have them fork it), then have them paste the prompt below into a fresh Claude Code session on their machine.
-It reproduces the harness setup (symlinked config, memory architecture, hooks, auto-sync, plugins, CLI tools) while stripping you-personal content.
+It reproduces the harness setup (symlinked config, memory architecture, hooks, auto-sync, plugins, CLI tools) while stripping personal content.
 This prompt is for collaborators only: step 2 deletes the repo's memories, which a collaborator doesn't want but you do.
 To set up another machine of your own — keeping and merging that machine's existing memories — use `second-machine-setup-prompt.md` instead.
 
@@ -10,10 +10,10 @@ Set up my Claude Code environment to match your-org/claude-config. Work step by 
 
 1. FORK FIRST — never point at the upstream repo. This config auto-commits and auto-pushes every local change via a file watcher, so it must target MY fork: `gh repo fork your-org/claude-config --clone ~/dotfiles/claude` (ask me for access or a URL if that fails), and confirm `git remote -v` shows my fork.
 
-2. PERSONALIZE MY FORK BEFORE INSTALLING (the repo carries your personal config; commit these changes to my fork):
-   - memories/: these are your memories, not mine. Unless I say otherwise: delete the memories/claude/ and memories/claude1/ trees entirely (per-project memory backups that install.sh would otherwise symlink onto my machine), delete all bodies in memories/global/, and reduce memories/global/MEMORY.md to its header comment. Also remove MIGRATION-MANIFEST.md.
-   - CLAUDE.md: keep the General Guidelines section; walk me through the Working directives one by one and delete the ones I don't adopt (each `[[slug]]` needs a matching body in memories/global/, so write bodies for the ones I keep, or strip the links). Update the Tools section — you use a personal fork of lavish-axi; I'll use the upstream npm package unless I say otherwise. Update tests/claudemd.test.sh so its pinned strings match my edited CLAUDE.md.
-   - skills/email-drafter is your personal email voice: delete it and remove it from ITEMS in install.sh, unless I want to write my own voice profile in its place.
+2. PERSONALIZE MY FORK BEFORE INSTALLING (the repo carries the user's personal config; commit these changes to my fork):
+   - memories/: these are the user's memories, not mine. Unless I say otherwise: delete the memories/claude/ and memories/claude1/ trees entirely (per-project memory backups that install.sh would otherwise symlink onto my machine), delete all bodies in memories/global/, and reduce memories/global/MEMORY.md to its header comment. Also remove MIGRATION-MANIFEST.md.
+   - CLAUDE.md: keep the General Guidelines section; walk me through the Working directives one by one and delete the ones I don't adopt (each `[[slug]]` needs a matching body in memories/global/, so write bodies for the ones I keep, or strip the links). Update the Tools section — the user uses a personal fork of lavish-axi; I'll use the upstream npm package unless I say otherwise. Update tests/claudemd.test.sh so its pinned strings match my edited CLAUDE.md.
+   - skills/email-drafter is the user's personal email voice: delete it and remove it from ITEMS in install.sh, unless I want to write my own voice profile in its place.
    - settings.json (macOS) or settings.linux.json: hook paths are `$HOME`-based, so there is nothing to rewrite as long as the clone sits where the hooks point — ~/dotfiles/claude on macOS; on Linux settings.linux.json points at ~/claude-config, so either clone there or update those paths. Note the macOS notification hooks only fire if ~/.claude/.enable-stop-notif / ~/.claude/.enable-response-ready-notif exist — create those flag files if I want the sounds.
 
 3. Run ./install.sh from ~/dotfiles/claude (macOS/Linux; Windows uses the PowerShell path in the README). Verify: ~/.claude/CLAUDE.md, AGENTS.md, settings.json and the tracked skills are symlinks into the repo, and the SessionStart global-memory hook is present in the active settings.json.

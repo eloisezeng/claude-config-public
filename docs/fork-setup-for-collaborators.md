@@ -1,6 +1,6 @@
 # Running your own Claude config off a fork
 
-This repo is your personal Claude configuration.
+This repo is the user's personal Claude configuration.
 It is not a shared team config: `CLAUDE.md`, `memories/`, and `skills/` encode one person's working preferences, one machine's Codex profiles, and one account's model availability.
 
 Autosync makes that dangerous to share directly.
@@ -12,7 +12,7 @@ Every tracked-file edit is committed and pushed with no review step, so a machin
 
 On 2026-08-13 a Windows machine autosynced its own Codex routing into this repo: `-p terrax` and `-p terramax`, the profiles installed *there*.
 
-Neither profile exists on your Mac.
+Neither profile exists on the user's Mac.
 Codex does not error on an unknown `-p` — it silently falls through to the base config.
 Measured on the Mac: `-p terrax` ran `gpt-5.6-sol` at reasoning effort **`none`**, while `codex-converge` believed it had requested Terra/xhigh.
 
@@ -25,7 +25,7 @@ Nobody did anything careless. The architecture simply had no place for "true on 
 ### 1. Fork on GitHub
 
 Open <https://github.com/your-org/claude-config> and press **Fork**.
-Read access is enough to fork; you do not need write access to your repo.
+Read access is enough to fork; you do not need write access to the user's repo.
 
 ### 2. Repoint your checkout
 
@@ -35,7 +35,7 @@ From your config repo (`~/dotfiles/claude`, or `~/claude-config` on Linux/WSL):
 # Your fork becomes origin — this is where autosync pushes.
 git remote set-url origin https://github.com/<your-username>/claude-config.git
 
-# your repo becomes upstream — read-only, for pulling improvements.
+# The user's repo becomes upstream — read-only, for pulling improvements.
 git remote add upstream https://github.com/your-org/claude-config.git
 
 # Never push to upstream by accident.
@@ -59,20 +59,20 @@ upstream  DISABLED (push)
 git push -u origin main
 ```
 
-Autosync now pushes to your fork. Nothing you write reaches your repo unless you open a PR.
+Autosync now pushes to your fork. Nothing you write reaches the user's repo unless you open a PR.
 
 ## Day to day
 
 **Your own changes** — nothing to do. `sync.ps1` / `sync.sh` commits and pushes to your fork exactly as before.
 
-**Pulling your improvements** — whenever you want them:
+**Pulling the user's improvements** — whenever you want them:
 
 ```bash
 git fetch upstream
 git rebase upstream/main      # or: git merge upstream/main
 ```
 
-Review what arrives. Your `CLAUDE.md` and memories describe *your* machines and *your* preferences; take the parts that apply to you.
+Review what arrives. Her `CLAUDE.md` and memories describe *her* machines and *her* preferences; take the parts that apply to you.
 
 **Sending an improvement back** — only for genuinely portable work (a bug fix in `install.sh`, a Windows path fix, a new test):
 

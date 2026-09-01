@@ -1,99 +1,107 @@
 ---
 name: email-drafter
-description: Draft, rewrite, or polish emails and messages in the user's own voice. Use this whenever the user asks to write an email, clean up a draft, reply to someone, turn notes or bullet points into an email, or make a message "sound like me." Apply it even when the user does not name the skill — any time the task is composing or editing a message they will send, default to this voice profile rather than generic professional-email style.
+description: Draft, rewrite, or polish emails and messages in the user's own voice. Use this whenever the user asks to write an email, clean up an email draft, reply to someone, turn notes or bullet points into an email, or make a message "sound like me." Apply it even when she doesn't explicitly name the skill — any time the task is composing or editing an email/message she'll send, default to this voice profile rather than generic professional-email style.
 ---
 
 # Email drafter (the user's voice)
 
-The job: produce emails that read like the user wrote them on a good day — their natural, honest voice, but organized and tight. Not a generic "professional email," and not maximally casual either.
+The job: produce emails that read like the user wrote them on a good day — her natural, honest, slightly informal voice, but organized and tight. Not a generic "professional email," and not maximally casual either. The target is the middle: a smart person writing to a collaborator, being real with them, without padding.
 
-**This file is a TEMPLATE.** The structure below is the reusable part; the specifics are not. Every rule in "Hard rules" and "Voice profile" should be replaced with one learned from watching the user edit their own drafts, and the examples should be replaced with real before/after pairs from their sent mail. A voice profile copied from someone else produces someone else's voice.
-
-The skill is meant to compound: when an edit reveals a preference, write it into "Hard rules" or "Voice profile" so the next draft starts from it instead of relearning it.
+This profile is learned from watching the user edit her own emails. It will keep growing as we edit more together. When she makes a new edit that reveals a preference, update the "Voice profile" or "Hard rules" below so the skill compounds over time instead of relearning each session.
 
 ## How to use it
 
 Two modes, both common:
 
-- **Polish a draft.** The user supplies something rough, often one long block with typos. Keep their words, ideas, and order. Fix typos and grammar, break walls of text into short paragraphs, pull any list of asks into bullets, and cut padding. Do not inflate it into something stiffer than they wrote.
-  On a *re-polish* — the user hands the same file back after editing it — treat the wording they kept or restored as **locked**: fix new typos and genuine errors, but do not re-tighten or rephrase a clause they have already settled. A phrasing put back the way they originally wrote it is a decision, not an oversight.
-- **Brief to email.** The user supplies a few points ("tell the vendor X, Y, Z"). Write the whole thing in the voice below, with the ask stated clearly.
+- **Polish a draft.** She gives you something rough (often one long block with typos). Keep her words, ideas, and order. Fix typos and grammar, break walls of text into short paragraphs, pull any list of asks/items into bullets, and cut padding. Don't inflate it into something stiffer than she wrote. On a re-polish (she passes the file again after editing), treat the wording she kept or restored as locked: fix new typos and genuine errors, but don't re-tighten or rephrase clauses she's already settled on. If she put a phrasing back the way she wrote it ("and we were supervised by" over your "supervised by"), that's a decision, not an oversight.
+- **Brief to email.** She gives you a few points ("tell Alex X, Y, Z"). Write the whole thing in the voice below, with the ask stated clearly.
 
-When unsure which mode applies, default to polish: a user who has written something usually wants it cleaned, not replaced.
+When unsure which mode, default to polish — she usually has a draft and wants it cleaned, not replaced.
 
 ## Hard rules
 
-Non-negotiable, because the user has corrected each of them explicitly. *Replace these with the user's own; the ones here are placeholders that show the right level of specificity.*
+These are non-negotiable; she's corrected each of them explicitly.
 
-- **A named punctuation ban.** e.g. "no em dashes, ever — use a comma, a colon, a period, or restructure." A rule of this shape is easy to check and easy to violate silently, so state it absolutely.
-- **Few adverbs.** Cut filler and hedge words: *honestly, actually, really, pretty, kind of, basically*, and *just* when it is padding. Keep an adverb only when it carries meaning.
-- **Concise.** Prefer the shorter sentence. If a clause is not doing work, drop it.
-- **Do not "correct" a settled word choice.** When the user restores a phrasing, leave it, even if it reads like a slip. Lock that wording and stop re-flagging it.
-- **Write the changes into the file.** When the user passes a file (`/email-drafter draft.md`), write the polished version back into that same file, overwriting the rough one. Show the result in chat as well, plus a short note on what changed and anything to confirm — but the file is the source of truth and should end up holding the cleaned version.
+- **No em dashes.** Ever. Use a comma, a colon, a period, or restructure the sentence. This includes "—" anywhere.
+- **Few adverbs.** Cut filler adverbs and hedge-words: honestly, actually, really, pretty, kind of, just (when it's padding), basically. Keep an adverb only when it carries real meaning.
+- **Concise.** Prefer the shorter sentence. If a clause isn't doing work, drop it. She consistently edits toward fewer words.
+- **Drop redundant "I".** Avoid starting clauses with "I" when it adds nothing. Trim "I think I'd need to..." to "I'd need to...", and prefer "we" or an impersonal phrasing when the sentence works without the self-reference ("To get the MVP working, we would need some money" beats "I think I would need to spend some money"). The point isn't to erase her, it's to stop sentences from piling up "I ... I ... I" and sounding self-focused.
+- **Don't "correct" her settled word choices.** When she restores or writes a phrasing, leave it, even if it reads like a grammar slip to you. She has chosen "attending the ICML" (with the article) over "attending ICML"; that is her call, not an error to fix. When she reverts one of your fixes, lock that wording and don't re-flag it.
+- **Always write the changes into the file.** When she passes a file (e.g. `/email-drafter draft.md`), write the polished email back into that same file with the Write tool, overwriting the rough version. Don't just show it in chat and wait. Show the result in chat too, plus a short note on what changed and anything to confirm, but the file is the source of truth and should always end up holding the cleaned version.
 
 ## Voice profile
 
-*Replace each bullet with an observed pattern, and quote a real fragment as evidence. A voice profile without quotes degrades into generic advice within a few edits.*
+What makes it sound like her (keep these):
 
-- **Honest hedging.** The user owns rough edges instead of overselling. Do not sand this into corporate confidence.
-- **Context before the ask.** They set up the why, then ask. Keep that order.
-- **Soft, direct asks.** The request is clear but not a hard pitch.
-- **Concrete over vague.** Real numbers and named specifics rather than "some" and "a few." When a figure is known, use it; when it is not, go find it rather than fudge it.
-- **Plain language, not jargon.** Write for a smart non-specialist. If a term needs insider knowledge, explain it in plain words or cut it.
-- **Pronoun discipline.** Note which pronoun the user uses for shared work versus their own actions, and keep the split consistent.
+- **Honest hedging.** She owns the rough edges instead of overselling: "it was quick so if we decide to scrap it, that's okay." Don't sand this off into corporate confidence.
+- **Context before the ask.** She sets up the why, then asks. Keep that order.
+- **Soft, direct asks.** The request is clear but not a hard pitch. "Could we put a little money behind this?" not "I require funding to proceed."
+- **Parenthetical asides with concrete examples.** She clarifies with quick "(like repair vs. maintenance vs. installation)" parentheticals. These are part of her voice; keep them, just don't let them run on.
+- **Owns constraints plainly.** Money, limits, what's broken — she states them matter-of-factly rather than hiding them. Keep that candor.
+- **Concrete over vague.** She pushes for real numbers and named specifics, not hand-wavy ranges: "$5 to $20 a month (Railway or Fly.io on the cheaper end)", "about 5,000 free searches a month", "I've used $1.22 of credit testing it, with $3.57 left." When a figure or name is known, use it instead of "some money" or "a few." If you're unsure of a number, get it rather than fudge it.
+- **Plain language, not jargon.** Write for a smart non-engineer (her collaborator Alex). Translate technical terms — she had "per SKU" rewritten as "each type of call gets its own free monthly quota." If a term needs insider knowledge, explain it in plain words or cut it.
+- **"We/our" for the venture, "I" for her own actions.** The project is "we" and "our website"; reserve "I" for things she personally did ("I built a prototype," "I've used $1.22 of credit," "I was wondering if you'd want to move forward").
 
-Structure the user prefers:
+Structure she prefers (this is strong — she restructures almost every draft this way):
 
-- **Bullets are the default for any list of three or more parallel items.** Introduce each list with a short lead-in line ending in a colon.
-- Keep bullets grammatically parallel — lead each with the same verb form — and punctuate them consistently: all end with a period, or none do.
+- **Bullets are the default for any list of three or more parallel items** — examples, feature ideas, costs, reasons. She converts prose lists into bullets aggressively. Introduce each list with a short lead-in line ending in a colon ("For example on Google:", "It could:", "To get the MVP working, we would need some money:").
+- Keep bullets grammatically parallel — lead each with the same verb form ("Let… / Tell… / Give…") — and punctuate them consistently (all end with a period, or none do).
 - Short paragraphs are the connective tissue between lists, never one stream-of-consciousness block.
-- A numbered list when the message poses distinct questions, so replies can cite numbers.
-- Greeting and sign-off stay simple.
+- Numbered list when she's posing distinct questions.
+- Greeting and sign-off stay simple: "Hi [name]," / "Thanks, the user".
 
 What to avoid:
 
 - Stiff, over-formal phrasing ("I am writing to inform you," "Please be advised").
-- Maximally casual or slangy register.
+- Maximally casual / slangy ("college student" register). She tried that and reverted. Informal-but-clean is the target, not chatty.
 - Padding, throat-clearing, and adverb pile-ups.
 
 ## Examples
 
-*Replace with a real pair from the user's own mail. The illustration below is invented, and its only job is to show the format.*
+**Polish — input (her rough draft):**
+> I created a prototype today (it was quick so if we decide to scrap it, that's okay). I have screenshots... but I can't host this website without money, and I can't use the google maps api to extract data without money, so right now the serviceman results are just extracted from google and stored in a file
 
-**Polish — input (rough draft):**
-> got the build working today, it was pretty quick so if we want to throw it away thats fine. i cant run it on the shared box yet without a licence and i cant point it at the real data either so for now its just reading the sample file
-
-**Polish — output (cleaned):**
-> The build works. It came together quickly, so scrapping it is not expensive if we decide to.
+**Polish — output (her voice, cleaned):**
+> I built a prototype today: a chat interface where a user can explain their problem and get help finding a serviceman. Here are some screenshots:
 >
-> Two things block a real run:
->
-> - **Licence.** The shared box needs a seat before it can run this. One seat is enough for now.
-> - **Data.** It reads the sample file today. Pointing it at the real dataset needs read access to the export bucket.
+> To get the MVP working, we would need some money:
+> - **Hosting:** Right now it only runs locally. A small always-on host runs about $5 to $20 a month (Railway or Fly.io on the cheaper end).
+> - **APIs:** The Google Maps/Places API gives us about 5,000 free searches a month, but we need to enter a credit card. For now, the results are scraped from Google into a file.
 
-What stayed: the honest framing and the plain owning of the constraints. What changed: the blockers pulled into colon-led bullets, vague blockers named concretely, typos gone, tighter.
+Note what stayed: the honest framing, the plain owning of the money constraint, the context-then-ask flow. What changed: lists pulled into colon-led bullets, vague costs replaced with concrete numbers and named hosts, "I" → "we" for the shared venture, typos gone, no em dashes, tighter.
 
 ## Reference email (the target shape)
 
-*Replace this with a full email the user wrote and signed off on — it is the single most useful artifact in this file, because it fixes shape, length, and register at once. The one below is invented.*
+This is a full email the user wrote and signed off on. It's the single best reference for the target voice and structure: short acknowledgement → bulleted "here's the problem" → "our website could do better:" with parallel bullets → a money section with concrete figures → a soft ask. When in doubt, match this shape.
 
-> Hi,
+> Hi Alex,
 >
-> Short version: the prototype works, and it needs two things before it can run for real.
+> The competition strategy document makes sense. I hadn't realized Yelp reviews were gamed. It's also hard to determine the best servicemen online in general, so a lead generation website could help. For example on Google:
 >
-> What it does now:
+> - If you search "plumber", you get company websites, sponsored results, business listings, and Reddit threads.
+> - Only the business listings give a brief summary of their ratings, work, and one sample review.
+> - It has an "AI gets prices for you" feature, where the AI asks you to answer several multiple choice questions about your plumbing problem, then calls each company on your behalf.
 >
-> - Takes a plain-sentence description of the problem and routes it to the right handler.
-> - Summarizes the matching records rather than dumping them.
-> - Falls back to the sample dataset when the live one is unavailable.
+> Our website could do better. It could:
 >
-> To get it running on the shared box, we would need:
+> - Let a user describe their problem in one sentence and get matched to the right business (or the top few), with a summary of all its reviews and more detail on its specialties
+> - Let users see which services their friends have used.
+> - Let companies respond automatically with price estimates.
+> - Tell businesses how to rank higher on merit, like faster response times and better ratings over the last six months.
+> - Let companies pay to be promoted, though we'd mark paid placements and ask them to say why they're advertising.
+> - Give newer companies a small boost.
 >
-> - **A licence seat.** One seat covers the whole team for this workload.
-> - **Read access to the export bucket.** Read-only is enough; nothing writes back.
+> I built a prototype today: a chat interface where a user can explain their problem and get help finding a serviceman. Here are some screenshots:
 >
-> There is more we could build after that, including scheduled runs and a digest, but neither is worth doing before the two items above are settled.
+> To get the MVP working, we would need some money:
 >
-> Would you like me to move forward with this? If not, is there something else you would rather I pick up?
+> - **Hosting:** Right now it only runs locally. A small always-on host runs about $5 to $20 a month (Railway or Fly.io on the cheaper end).
+> - **APIs:** The Google Maps/Places API gives us about 5,000 free searches a month, but we need to enter a credit card. For now, the results are scraped from Google into a file. The Claude API for the chat is a few cents per conversation. I've used $1.22 of credit testing it so far, with $3.57 left.
 >
-> Thanks
+> There's also a lot more we could build for the servicemen themselves, including automated quote generation, invoicing, and the other items I listed in a previous document.
+>
+> I was wondering if you'd want to move forward with this. If so, I'd need a credit card. Otherwise, is there something else you'd like me to work on?
+>
+> Thanks,
+>
+> The user

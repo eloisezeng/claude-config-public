@@ -14,7 +14,7 @@
 # FAILURE VISIBILITY (2026-08-19): the Stop hook runs this under
 # `>/dev/null 2>&1 || true`, so without the trap below any failure would be
 # perfectly silent — the same failure class that let the config sync rot for
-# three days. On non-Mac boxes a nonzero exit emails you@example.com,
+# three days. On non-Mac boxes a nonzero exit emails you@example.edu,
 # rate-limited to one mail per 12h.
 
 _sm_fail_alert() {
@@ -28,7 +28,7 @@ _sm_fail_alert() {
       printf 'sync-memories.sh FAILED (rc=%s) on %s — global memories are not being routed into claude-config until this is fixed.\n' \
         "$rc" "$(hostname)" \
         | mail -s "claude-config sync-memories FAILED on $(hostname)" \
-            you@example.com >/dev/null 2>&1 && touch "$stamp"
+            you@example.edu >/dev/null 2>&1 && touch "$stamp"
     fi
   fi
   return "$rc"

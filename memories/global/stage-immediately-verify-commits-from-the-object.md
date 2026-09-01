@@ -17,7 +17,7 @@ is not a lost edit — it is a commit that captured *reverted* content, so its m
 changes it does not contain. That survives review, because reviewers read the message and the diff of
 what is there, never the diff of what should have been.
 
-Measured on `your_other_project`, 2026-08-11: one session had four coherent edits appear in its
+Measured on `your-other-project`, 2026-08-11: one session had four coherent edits appear in its
 worktree between its own; a `git stash list` entry from 2026-07-27 (`concurrent-edits-not-mine`)
 showed the same signature on a different branch — recurring, not a one-off. It lost two commits this
 way before switching to stage-first.

@@ -1,14 +1,14 @@
 ---
 name: end-a-handoff-with-the-open-command
-description: you 2026-08-25 — every response that hands work to another session must END with the copy-paste command to open that session; a handoff you cannot open in one paste is not delivered
+description: The user 2026-08-25 — every response that hands work to another session must END with the copy-paste command to open that session; a handoff she cannot open in one paste is not delivered
 metadata:
   type: feedback
   scope: global
 ---
 
-you, 2026-08-25: *"every time u handoff can u give me command to open handoff session at bottom of ur response?"*
+The user, 2026-08-25: *"every time u handoff can u give me command to open handoff session at bottom of ur response?"*
 
-**Why:** a handoff is only useful if you can get into it. Digging the session id out of a `.dispatch` record, then remembering whether it is `attach` or `--resume`, is friction you should never pay — and the ids are exactly the thing that silently break (see below). The command belongs at the BOTTOM because that is where your eye lands last and where a copy-paste is nearest the prompt.
+**Why:** a handoff is only useful if she can get into it. Digging the session id out of a `.dispatch` record, then remembering whether it is `attach` or `--resume`, is friction she should never pay — and the ids are exactly the thing that silently break (see below). The command belongs at the BOTTOM because that is where her eye lands last and where a copy-paste is nearest the prompt.
 
 **How to apply:**
 - End every response that DISPATCHED work to another session with a fenced, copy-pasteable command, last thing before the state line. Not linked, not described — the literal command.

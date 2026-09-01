@@ -320,6 +320,12 @@ export CLAUDE_HANDOFF_ARM=0
 #     [[handoff-session-id-ansi-poisoning]], one level up.
 unset CLAUDE_JOB_DIR CLAUDE_CODE_SESSION_ID CLAUDE_PID
 unset CLAUDE_HANDOFF_MODEL FORCE_COLOR CLI_COLOR COLORTERM
+#   CLAUDE_HANDOFF_LANE is the retirement's supersession trigger: inherited from
+#     a worker seat running this suite, a retirement case would supersede the
+#     REAL lane of the session hosting the tests. And without CLAUDE_OPS_DIR
+#     every dispatch below would register its lane in the REAL ~/.claude/ops.
+unset CLAUDE_HANDOFF_LANE
+export CLAUDE_OPS_DIR="$tmp/ops"
 export CLAUDE_HANDOFF_STATE_DIR="$tmp/session-state"
 
 HO="$tmp/work/HANDOFF-thing.md"
@@ -770,7 +776,7 @@ assert_contains "$(printf -- '--model\nclaude-opus-5')" "$args" AB
 assert_contains "$(printf -- '--permission-mode\nacceptEdits')" "$args" AB
 
 # ---- AB2. with NO --model, the dispatch defaults to Fable ----------------
-# your standing word: a continued session runs on Fable unless its limit is
+# The user's standing word: a continued session runs on Fable unless its limit is
 # spent. The default lives in the launcher so it holds for every caller, not
 # only the ones who remember it.
 rm -f "$REC" "$SHIM_BG_ARGS"; live_json "running"
@@ -792,6 +798,28 @@ GO "override" --force --model 'opus[1m]' >/dev/null 2>&1
 args="$(cat "$SHIM_BG_ARGS")"
 assert_contains "$(printf -- '--model\nopus[1m]')" "$args" AB4
 assert_missing "claude-fable-5" "$args" AB4
+
+# ---- AB5. with NO --permission-mode, the dispatch defaults to bypass -----
+# The user 2026-08-28: "whenever handing off to new sessions, use auto mode,
+# ideally bypass permissions." This used to default to "" — the flag was omitted
+# and the successor booted in the PROMPTING class, which is the one mode that
+# parks an unattended seat forever on a tool-approval prompt that no SendMessage
+# can drain. Like the model default, it lives in the launcher so it holds for
+# every caller and not only the ones who remember the flag.
+rm -f "$REC" "$SHIM_BG_ARGS"; live_json "running"
+GO "pmode-defaulted" --force >/dev/null 2>&1
+args="$(cat "$SHIM_BG_ARGS")"
+assert_contains "$(printf -- '--permission-mode\nbypassPermissions')" "$args" AB5
+
+# ---- AB6. an explicit --permission-mode still wins over the default ------
+# assert_missing is the control: it fails if the default is APPENDED alongside
+# the explicit flag rather than overwritten by it, which argv would accept
+# silently and `claude` would resolve to whichever it reads last.
+rm -f "$REC" "$SHIM_BG_ARGS"; live_json "running"
+GO "pmode-override" --force --permission-mode auto >/dev/null 2>&1
+args="$(cat "$SHIM_BG_ARGS")"
+assert_contains "$(printf -- '--permission-mode\nauto')" "$args" AB6
+assert_missing "bypassPermissions" "$args" AB6
 
 
 # ---- AC. a DIRECTORY left by the mkdir-based predecessor is REFUSED -----
@@ -3113,11 +3141,35 @@ CS_UNTAGGED="$(cs_q UNTAGGED)"
 #    other `>&9` in this hook is the lock file's diagnostic line, which really
 #    does write and is tagged `d` for exactly that reason; the two are not the
 #    same site type despite sharing a spelling.
-assert_eq "$(cs_q total)" "69" CS
+#    69 -> 75 and d 13 -> 19 with the 2026-08-31 lane ledger, and each of the six
+#    new sites was read before the numbers moved. All six touch $OPS_DIR, a
+#    directory in the user's home config, and every one is `d` because a hung
+#    home filesystem would block it and nothing bounds it -- but the six split
+#    into the two halves the ledger design names: the two REGISTRATION sites in
+#    dispatch (mkdir -p, ln -sfn) are fail-CLOSED (`|| die` -- a successor a
+#    coordinator cannot find must not be launched), while the four SUPERSESSION
+#    sites in retire_self (the -L filetest, readlink, the filetest+rec_put
+#    condition, rm -f) are best-effort and err OPEN (a skip leaves the old lane
+#    visible twice, never vanished). lane_key/close_lane themselves add nothing
+#    here: both run outside the claim closure, before any lock is taken.
+#    75 -> 77 and d 19 -> 21 with the 2026-08-31 review fix round, net of two
+#    moves, each site read before the numbers changed. MINUS the four
+#    supersession WRITE sites in retire_self: the writes moved to detached
+#    retire_exec (outside the closure -- fds 9/8/7 are closed at its nohup
+#    spawn), because a supersession written under the dispatch lock and a
+#    retirement aborted later would leave a live seat whose lane says it was
+#    replaced. PLUS three validation-only sites that stayed in retire_self (-L
+#    filetest, readlink, the [ -f ]+rec_read ownership read -- all `d`, same
+#    $OPS_DIR/home-filesystem reasoning, all err OPEN). PLUS three registration
+#    -guard sites in dispatch (-L filetest, readlink, -e filetest -- all `d`,
+#    fail-CLOSED like the mkdir/ln they guard: a lane key collision or a
+#    non-link occupant refuses the launch rather than silently repointing or
+#    burying another dispatch's registration).
+assert_eq "$(cs_q total)" "77" CS
 assert_eq "$(cs_q a)" "37" CS
 assert_eq "$(cs_q b)" "15" CS
 assert_eq "$(cs_q c)" "4"  CS
-assert_eq "$(cs_q d)" "13" CS
+assert_eq "$(cs_q d)" "21" CS
 
 # 3. `a` IS CHECKED, NOT BELIEVED. `a` claims the site runs inside
 #    timed_to_file's deadline-killed child, which is decidable from the call
@@ -5022,12 +5074,16 @@ assert_eq "$DP_GU" "1" DP
 assert_eq "$DP_AN" "1" DP
 assert_eq "$DP_TOT" "3" DP
 [ "$DP_OT" = 0 ] || { echo "FAIL[DP]: a clock reading is spent outside rec_stamp, outside the guarded dispatch pair and outside the lock annotation, so a failed \`date\` can be stored as a time there:"; printf '%s\n' "$DP_OTL"; fail=1; }
-# And the five markers that need a stamp still ASK for one. A count cannot say
+# And the six markers that need a stamp still ASK for one. A count cannot say
 # WHICH site lost the helper -- that is what the `other` bucket above is for;
 # this one catches the site that drops the marker altogether rather than
 # reverting it, which the bucket cannot see.
+#   5 -> 6 with the 2026-08-31 lane ledger: close_lane stamps closed_at through
+# rec_stamp for exactly the reason this census exists -- the first draft spent
+# the clock raw (`if now_utc; then rec_put ... "$NOW_UTC"`), and the `other`
+# bucket above named it before any human review did.
 DP_CALLS="$(grep -c '^ *rec_stamp "' "$SCRIPT" | tr -d ' ')"
-assert_eq "$DP_CALLS" "5" DP
+assert_eq "$DP_CALLS" "6" DP
 
 # The control: revert one site to the two-line form and the census names it.
 DPMUT="$tmp/handoff-dp-raw.sh"
@@ -5890,12 +5946,25 @@ dw_callers() { # $1=script -> the call sites, one per line
 # by `(` -- so every match is a caller, exactly as in DU. The definition is
 # asserted separately so that renaming the function fails here rather than
 # emptying the census silently.
-assert_eq "$(dw_callers "$SCRIPT" | grep -c . | tr -d ' ')" "4" DW
+# The fifth caller (2026-08-31, the F1 close/dispatch-race fix) was reviewed
+# under this census's rule at its addition: close_lane's status-2 die
+# ENUMERATES the collapsed causes ("unopenable, a symlink, or the lock backend
+# did not answer") instead of asserting one it did not observe.
+# The sixth caller (2026-08-31 micro-review, the stale-snapshot supersession
+# fix) was reviewed the same way: retire_exec's act-time re-verify treats every
+# nonzero status as "do not act", and its audit events honour the tri-state —
+# status 1 (an observed holder) logs Busy, every other status logs NotAcquired
+# and names NO cause, so none of the collapsed causes can be named falsely.
+# (Round 2 of that micro-review caught the first version logging Busy for
+# BOTH, asserting a holder nobody observed; LANE-12 arm 4 pins the split.)
+assert_eq "$(dw_callers "$SCRIPT" | grep -c . | tr -d ' ')" "6" DW
 assert_eq "$(grep -c '^lock_hold() { # \$1=fd  \$2=path$' "$SCRIPT" | tr -d ' ')" "1" DW
 assert_eq "$(grep -c '^  lock_hold 7 "\$_r.alert.\$_ak.flock"; _ah=\$?$' "$SCRIPT" | tr -d ' ')" "1" DW
 assert_eq "$(grep -c '^  lock_hold 9 "\$1"; _rc=\$?$' "$SCRIPT" | tr -d ' ')" "1" DW
 assert_eq "$(grep -c '^  lock_hold 8 "\$1"; _lp=\$?$' "$SCRIPT" | tr -d ' ')" "1" DW
 assert_eq "$(grep -c '^      lock_hold 8 "\$LEASE_FILE"; _wr=\$?$' "$SCRIPT" | tr -d ' ')" "1" DW
+assert_eq "$(grep -c '^  lock_hold 9 "\$_cl_rec.flock"; _cl_lk=\$?$' "$SCRIPT" | tr -d ' ')" "1" DW
+assert_eq "$(grep -c '^    lock_hold 9 "\$_re_oldrec.flock"; _re_lk=\$?$' "$SCRIPT" | tr -d ' ')" "1" DW
 # The control: a fifth caller, tab-separated, that turns status 2 into prose.
 # Checked for having bitten -- a control whose anchor missed cannot fail.
 DWMUT="$tmp/handoff-dw-tabcaller.sh"
@@ -5906,7 +5975,7 @@ if cmp -s "$SCRIPT" "$DWMUT"; then
 elif ! bash -n "$DWMUT" 2>/dev/null; then
   echo "FAIL[DW]: the tab-caller mutant does not parse, so it is not a caller this census has to see"; fail=1
 else
-  assert_eq "$(dw_callers "$DWMUT" | grep -c . | tr -d ' ')" "5" DW
+  assert_eq "$(dw_callers "$DWMUT" | grep -c . | tr -d ' ')" "7" DW
 fi
 rm -f "$DWMUT"
 
@@ -6150,14 +6219,52 @@ dy_chan()   { dy_sites "$1" | cut -d'|' -f1 | tr ',' '\n' | grep -c "^$2\$" | tr
 #     hedge, because whether the daemon re-derives that state is not observed here.
 # None of the five names a mechanism it did not see; that is the review, and the
 # digest below is what freezes it.
-assert_eq "$(dy_sites "$SCRIPT" | grep -c . | tr -d ' ')" "127" DY
-for _dyc in die:83 alert_once:22 prelaunch_die:6 notify:7 stderr:3 msgvar:6; do
+#   127 -> 140 and die 83 -> 96 with the 2026-08-31 lane ledger, all thirteen
+# new sentences on the die channel, each read before the numbers moved:
+#   * four in dispatch, all fail-closed registration -- a lane key that could
+#     not be derived (no usable md5), the record's lane= write (reuses the
+#     record-write failure wording), and the mkdir/ln pair, both of which say
+#     WHY refusing beats launching: a successor a coordinator cannot find;
+#   * nine in close_lane, the disposition surface -- its usage line, the two
+#     input validations (lane token, disposition enum) that each state the rule
+#     they enforce, the single-line note rule with the forgery reason, the
+#     no-open-lane refusal that names the lanes/-file route for non-dispatched
+#     work, the dangling-record refusal that says "investigate" rather than
+#     deleting, and three write-ordering refusals that each tell the operator
+#     the exact repair state (disposition landed / note did not / link stuck).
+#   The two top-level usage lines were REWORDED to list --close (a flag the
+# operator can pass has to appear where the flags are listed) -- count
+# unchanged, digest moved, which is the count/digest split working as designed.
+# None of the thirteen names a mechanism it did not see.
+#   140 -> 145 and die 96 -> 101 with the 2026-08-31 review fix round, all five
+# new sentences on the die channel, each read before the numbers moved:
+#   * three in close_lane, serializing close against dispatch -- the lock that
+#     could not be TAKEN AT ALL (unopenable path / lock backend silent, and it
+#     says why refusing beats guessing), the lock HELD by an in-flight dispatch
+#     (quotes the lock file's own line and says to retry after the dispatch),
+#     and the lane RE-REGISTERED between the unlocked read and the locked
+#     re-read (names both records and says a re-dispatch owns the lane again);
+#   * two in dispatch, guarding the registration link -- a lane key already
+#     registered for a DIFFERENT handoff (names both record paths; two paths
+#     can derive one key), and a non-symlink OCCUPANT at the link path (states
+#     the measured reason: ln -sfn onto a directory silently creates the link
+#     inside it).
+#   retire_exec's usage line was REWORDED to list [oldlane] [newlane] (the
+# supersession write moved into it from retire_self) -- count unchanged, digest
+# moved. None of the five names a mechanism it did not see.
+#   The same usage line was REWORDED again with the 2026-08-31 micro-review fix
+# (MR-1): [me] [oldrec] appended, because retire_exec now receives the validated
+# record and owner as arguments and re-verifies them at act time. Set-diff of
+# dy_sites old vs new: that one sentence out, its reworded form in, 145 both
+# sides -- count unchanged, digest moved.
+assert_eq "$(dy_sites "$SCRIPT" | grep -c . | tr -d ' ')" "145" DY
+for _dyc in die:101 alert_once:22 prelaunch_die:6 notify:7 stderr:3 msgvar:6; do
   assert_eq "$(dy_chan "$SCRIPT" "${_dyc%%:*}")" "${_dyc##*:}" "DY ${_dyc%%:*}"
 done
 # every emitted row must carry all three fields and a real source line: a row
 # whose third field is empty or a comment would be a census counting itself.
 assert_eq "$(dy_sites "$SCRIPT" | awk -F'|' 'NF < 3 || $3 == "" || $3 ~ /^#/' | grep -c . | tr -d ' ')" "0" DY
-assert_eq "$(dy_digest "$SCRIPT")" "c127c1842f61ff6fb71fdcb8ac8d96114bc0eb0a4e9370dbc8c59dc20109553b" DY
+assert_eq "$(dy_digest "$SCRIPT")" "503ae92fd3d25cdd10b3992064644d381d7c60b143584ae523a9abc63a7a5e82" DY
 # Four controls, each the surviving mutant of a review round, whole-file.
 # 1. micro-review 8's: a new degraded probe whose refusal names a mount nothing
 #    observed -- the exact shape DU, DW and DX all stayed green on.
@@ -6169,7 +6276,7 @@ if cmp -s "$SCRIPT" "$DYMUT"; then
 elif ! bash -n "$DYMUT" 2>/dev/null; then
   echo "FAIL[DY]: the invented-cause mutant does not parse, so it proves nothing about the census above"; fail=1
 else
-  assert_eq "$(dy_sites "$DYMUT" | grep -c . | tr -d ' ')" "128" DY
+  assert_eq "$(dy_sites "$DYMUT" | grep -c . | tr -d ' ')" "146" DY
   if [ "$(dy_digest "$DYMUT")" = "$(dy_digest "$SCRIPT")" ]; then
     echo "FAIL[DY]: a new operator message did not move the digest, so this census cannot see the shape it exists for"; fail=1
   fi
@@ -6184,7 +6291,7 @@ if cmp -s "$SCRIPT" "$DYMUT2"; then
 elif ! bash -n "$DYMUT2" 2>/dev/null; then
   echo "FAIL[DY]: the reword mutant does not parse, so it proves nothing about the census above"; fail=1
 else
-  assert_eq "$(dy_sites "$DYMUT2" | grep -c . | tr -d ' ')" "127" DY
+  assert_eq "$(dy_sites "$DYMUT2" | grep -c . | tr -d ' ')" "145" DY
   if [ "$(dy_digest "$DYMUT2")" = "$(dy_digest "$SCRIPT")" ]; then
     echo "FAIL[DY]: a REWORDED operator message did not move the digest, so this census counts sentences rather than freezing them"; fail=1
   fi
@@ -6200,8 +6307,8 @@ if cmp -s "$SCRIPT" "$DYMUT3"; then
 elif ! bash -n "$DYMUT3" 2>/dev/null; then
   echo "FAIL[DY]: the message-variable mutant does not parse, so it proves nothing about the census above"; fail=1
 else
-  assert_eq "$(dy_sites "$DYMUT3" | grep -c . | tr -d ' ')" "127" DY
-  assert_eq "$(dy_chan "$DYMUT3" die)" "83" DY
+  assert_eq "$(dy_sites "$DYMUT3" | grep -c . | tr -d ' ')" "145" DY
+  assert_eq "$(dy_chan "$DYMUT3" die)" "101" DY
   if [ "$(dy_digest "$DYMUT3")" = "$(dy_digest "$SCRIPT")" ]; then
     echo "FAIL[DY]: an invented cause written into a message VARIABLE did not move the digest, so the census still reads only the channel line"; fail=1
   fi
@@ -6235,8 +6342,8 @@ if cmp -s "$SCRIPT" "$DYMUT4"; then
 elif ! bash -n "$DYMUT4" 2>/dev/null; then
   echo "FAIL[DY]: the permutation mutant does not parse, so it proves nothing about the census above"; fail=1
 else
-  assert_eq "$(dy_sites "$DYMUT4" | grep -c . | tr -d ' ')" "127" DY
-  assert_eq "$(dy_chan "$DYMUT4" die)" "83" DY
+  assert_eq "$(dy_sites "$DYMUT4" | grep -c . | tr -d ' ')" "145" DY
+  assert_eq "$(dy_chan "$DYMUT4" die)" "101" DY
   if [ "$(dy_litdigest "$DYMUT4")" != "$(dy_litdigest "$SCRIPT")" ]; then
     echo "FAIL[DY]: the permutation control changed the SET of messages, so it is a reword and cannot show what site binding buys"; fail=1
   fi
@@ -6705,6 +6812,472 @@ assert_eq "$R11B_RC" "0" RETIRE-11
 case "$R11B_OUT" in
   *"RETIRE_GRACE"*) echo "FAIL[RETIRE-11]: a valid grace of 0 was refused -- the floor must be 0, not 1"; fail=1 ;;
 esac
+
+# ============================================================================
+# LANE — the operational ledger (2026-08-31 lifecycle decision)
+# ============================================================================
+# A lane leaves the open set only by an explicit disposition, never by a seat
+# dying. Dispatch-side that means fail-closed registration (a successor a
+# reconstructing coordinator cannot find is the RCA defect with extra steps),
+# --close is the disposition surface, and retirement is the ONE supersession
+# trigger. The suite exports CLAUDE_OPS_DIR="$tmp/ops" at the top; without it
+# every case above would have registered lanes in the REAL ~/.claude/ops.
+
+# ---- LANE-1. a dispatch registers the lane, and the key follows the rule ----
+live_json "running"
+LN1_HO="$(NEWHO lane1)"; LN1_REC="$LN1_HO.dispatch"
+out="$(GOF "$LN1_HO" "register me" 2>&1)"; code=$?
+assert_eq "$code" "0" LANE-1
+LN1_LANE="$(sed -n 's/^lane=//p' "$LN1_REC" 2>/dev/null | tail -1)"
+[ -n "$LN1_LANE" ] || { echo "FAIL[LANE-1]: the record carries no lane= key"; fail=1; }
+# The key is recomputed here from the record's own handoff= line by the SAME
+# RULE in a DIFFERENT implementation: basename minus .md, non-[A-Za-z0-9._-]
+# squashed to '-', first 48 chars, then '-' + first 8 hex of md5 of the
+# resolved path. Asserting the shape alone would pass a lane_key that hashed
+# the wrong input.
+LN1_FA="$(sed -n 's/^handoff=//p' "$LN1_REC" 2>/dev/null | tail -1)"
+LN1_B="$(printf '%s' "$(basename "$LN1_FA" .md)" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-48)"
+LN1_H="$(printf '%s' "$LN1_FA" | md5 -q 2>/dev/null || printf '%s' "$LN1_FA" | md5sum | cut -d' ' -f1)"
+assert_eq "$LN1_LANE" "$LN1_B-$(printf '%.8s' "$LN1_H")" LANE-1
+[ -L "$CLAUDE_OPS_DIR/dispatches/$LN1_LANE" ] || { echo "FAIL[LANE-1]: no ledger symlink for lane $LN1_LANE"; fail=1; }
+assert_eq "$(readlink "$CLAUDE_OPS_DIR/dispatches/$LN1_LANE" 2>/dev/null)" "$LN1_FA.dispatch" LANE-1
+# A re-dispatch of the SAME file derives the SAME key: one entry, repointed,
+# never a duplicate.
+out="$(GOF "$LN1_HO" "again" --force 2>&1)"; code=$?
+assert_eq "$code" "0" LANE-1
+assert_eq "$(ls "$CLAUDE_OPS_DIR/dispatches" 2>/dev/null | grep -c '^HANDOFF-lane1-')" "1" LANE-1
+
+# ---- LANE-2. --close stamps the disposition and removes the entry -----------
+out="$(bash "$SCRIPT" --close "$LN1_LANE" completed "done in test" 2>&1)"; code=$?
+assert_eq "$code" "0" LANE-2
+assert_rec "$LN1_REC" "disposition=completed" LANE-2
+assert_rec "$LN1_REC" "disposition_note=done in test" LANE-2
+[ ! -L "$CLAUDE_OPS_DIR/dispatches/$LN1_LANE" ] || { echo "FAIL[LANE-2]: the closed lane's ledger entry survived"; fail=1; }
+# a second close refuses: the lane is no longer in the open set
+out="$(bash "$SCRIPT" --close "$LN1_LANE" completed 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[LANE-2]: closing an already-closed lane must refuse"; fail=1; }
+assert_contains "no open dispatched lane" "$out" LANE-2
+
+# ---- LANE-3. --close validates, and never drops a lane it cannot verify -----
+live_json "running"
+LN3_HO="$(NEWHO lane3)"
+GOF "$LN3_HO" "for close refusals" >/dev/null 2>&1
+LN3_LANE="$(sed -n 's/^lane=//p' "$LN3_HO.dispatch" 2>/dev/null | tail -1)"
+out="$(bash "$SCRIPT" --close "$LN3_LANE" finished 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[LANE-3]: a made-up disposition was accepted"; fail=1; }
+assert_contains "explicit disposition" "$out" LANE-3
+out="$(bash "$SCRIPT" --close "../escape" completed 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[LANE-3]: a path-shaped lane key was accepted"; fail=1; }
+assert_contains "one token" "$out" LANE-3
+# dangling: the record is gone; the close must refuse AND leave the link, because
+# silently dropping the lane is exactly the disappearance the ledger exists to stop
+mv "$LN3_HO.dispatch" "$LN3_HO.dispatch.hidden"
+out="$(bash "$SCRIPT" --close "$LN3_LANE" completed 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[LANE-3]: a dangling lane was closed without its record"; fail=1; }
+assert_contains "investigate" "$out" LANE-3
+[ -L "$CLAUDE_OPS_DIR/dispatches/$LN3_LANE" ] || { echo "FAIL[LANE-3]: the dangling link was dropped -- a lane must err open, never closed"; fail=1; }
+mv "$LN3_HO.dispatch.hidden" "$LN3_HO.dispatch"
+bash "$SCRIPT" --close "$LN3_LANE" cancelled "test cleanup" >/dev/null 2>&1
+
+# ---- LANE-3b. an unwritable record refuses the close BEFORE the link moves ---
+# The write-before-remove ordering is the whole audit guarantee, and the mutant
+# this pins is rec_put's `|| die` softened to `|| true`: the link would then be
+# removed with no audit line, and the lane leaves the open set with nothing
+# saying why -- the silent disappearance the ledger exists to stop. A record the
+# owner cannot append to (mode 444) makes rec_put fail while everything before
+# it (the link, the readlink, the -f) still succeeds, so the refusal observed
+# here is the WRITE refusal and not one of LANE-3's earlier gates.
+live_json "running"
+LN3B_HO="$(NEWHO lane3b)"
+GOF "$LN3B_HO" "for the write-refusal pin" >/dev/null 2>&1
+LN3B_LANE="$(sed -n 's/^lane=//p' "$LN3B_HO.dispatch" 2>/dev/null | tail -1)"
+chmod 444 "$LN3B_HO.dispatch"
+out="$(bash "$SCRIPT" --close "$LN3B_LANE" completed 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[LANE-3b]: a close whose audit line could not be written still succeeded"; fail=1; }
+assert_contains "without an audit line" "$out" LANE-3b
+[ -L "$CLAUDE_OPS_DIR/dispatches/$LN3B_LANE" ] || { echo "FAIL[LANE-3b]: the link was removed although the record took no disposition"; fail=1; }
+grep -q '^disposition=' "$LN3B_HO.dispatch" && { echo "FAIL[LANE-3b]: a disposition line landed in a 444 record -- the refusal fired for the wrong reason"; fail=1; }
+chmod 644 "$LN3B_HO.dispatch"
+bash "$SCRIPT" --close "$LN3B_LANE" cancelled "test cleanup" >/dev/null 2>&1
+
+# ---- LANE-3c. --close refuses while a dispatch holds the lane's lock ---------
+# F1 of the 2026-08-31 review: close used to read the link and remove it without
+# ever taking the dispatch lock, so a close racing a dispatch could unlink the
+# lane that dispatch had just registered, between registration and launch. This
+# case pins the lock itself: a holder on the record's .flock must make the close
+# refuse, change nothing, and say why -- and the SAME close must succeed once
+# the lock is released, or the refusal above could be a close that never works
+# at all. The recheck window inside close (unlocked first read vs locked
+# re-read) is LANE-3d's, reached through the retarget seam.
+live_json "running"
+LN3C_HO="$(NEWHO lane3c)"
+out="$(GOF "$LN3C_HO" "to be closed under lock" 2>&1)"; code=$?
+assert_eq "$code" "0" LANE-3c
+LN3C_REC="$LN3C_HO.dispatch"
+LN3C_LANE="$(sed -n 's/^lane=//p' "$LN3C_REC" 2>/dev/null | tail -1)"
+[ -n "$LN3C_LANE" ] || { echo "FAIL[LANE-3c]: the fixture dispatch registered no lane"; fail=1; }
+perl -e '
+  open(my $fh, ">>", $ARGV[0]) or exit 3;
+  flock($fh, 6) or exit 4;            # LOCK_EX | LOCK_NB, as lock_take takes it
+  $| = 1; print "held\n";
+  sleep 30;
+' "$LN3C_REC.flock" > "$tmp/lane3c-held" 2>/dev/null &
+LN3C_HOLDER=$!
+n=0; while [ ! -s "$tmp/lane3c-held" ] && [ "$n" -lt 100 ]; do sleep 0.1; n=$(( n + 1 )); done
+[ -s "$tmp/lane3c-held" ] || { echo "FAIL[LANE-3c]: the background holder never took the lock, so this case proves nothing"; fail=1; }
+out="$(bash "$SCRIPT" --close "$LN3C_LANE" completed "should be refused" 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[LANE-3c]: a close racing a held dispatch lock still succeeded"; fail=1; }
+assert_contains "running right now" "$out" LANE-3c
+[ -L "$CLAUDE_OPS_DIR/dispatches/$LN3C_LANE" ] || { echo "FAIL[LANE-3c]: the refused close still removed the lane's ledger entry"; fail=1; }
+assert_missing "disposition=" "$(cat "$LN3C_REC" 2>/dev/null)" LANE-3c
+kill "$LN3C_HOLDER" 2>/dev/null; wait "$LN3C_HOLDER" 2>/dev/null
+out="$(bash "$SCRIPT" --close "$LN3C_LANE" completed "lock released" 2>&1)"; code=$?
+assert_eq "$code" "0" LANE-3c
+assert_rec "$LN3C_REC" "disposition=completed" LANE-3c
+[ ! -L "$CLAUDE_OPS_DIR/dispatches/$LN3C_LANE" ] || { echo "FAIL[LANE-3c]: the positive-control close left the ledger entry behind"; fail=1; }
+
+# ---- LANE-3d. --close refuses a lane RE-REGISTERED under its feet ------------
+# The other half of F1, found unreachable by the 2026-08-31 micro-review: the
+# locked re-read exists for a link retargeted between close's first readlink
+# and its lock take, a two-instruction window no outside fixture can hit. The
+# retarget seam in close_lane performs exactly that move at exactly that point,
+# so this case drives the recheck for real: without it, close writes the OLD
+# record's disposition and removes the link that now names a LIVE dispatch's
+# record. The close must refuse, and the retargeted registration must survive.
+live_json "running"
+LN3D_HO="$(NEWHO lane3d)"
+out="$(GOF "$LN3D_HO" "to be re-registered mid-close" 2>&1)"; code=$?
+assert_eq "$code" "0" LANE-3d
+LN3D_REC="$LN3D_HO.dispatch"
+LN3D_LANE="$(sed -n 's/^lane=//p' "$LN3D_REC" 2>/dev/null | tail -1)"
+[ -n "$LN3D_LANE" ] || { echo "FAIL[LANE-3d]: the fixture dispatch registered no lane"; fail=1; }
+LN3D_DECOY="$tmp/work/HANDOFF-lane3d-decoy.md.dispatch"
+printf 'session_id=ffff9999\nstate=verified\nobjective=the colliding re-registration\n' > "$LN3D_DECOY"
+out="$(CLAUDE_HANDOFF_CLOSE_RETARGET_DEBUG="$LN3D_DECOY" bash "$SCRIPT" --close "$LN3D_LANE" completed "should be refused" 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[LANE-3d]: a close whose lane was re-registered mid-close still succeeded"; fail=1; }
+assert_contains "re-registered" "$out" LANE-3d
+[ "$(readlink "$CLAUDE_OPS_DIR/dispatches/$LN3D_LANE" 2>/dev/null)" = "$LN3D_DECOY" ] || {
+  echo "FAIL[LANE-3d]: the refused close removed or moved the re-registered lane link -- a live dispatch's registration is gone"; fail=1; }
+assert_missing "disposition=" "$(cat "$LN3D_DECOY" 2>/dev/null)" LANE-3d
+assert_missing "disposition=" "$(cat "$LN3D_REC" 2>/dev/null)" LANE-3d
+# Positive control: with the link restored and the seam off, the same close
+# succeeds -- or the refusal above could be a close that never works at all.
+ln -sfn "$LN3D_REC" "$CLAUDE_OPS_DIR/dispatches/$LN3D_LANE"
+out="$(bash "$SCRIPT" --close "$LN3D_LANE" completed "seam off" 2>&1)"; code=$?
+assert_eq "$code" "0" LANE-3d
+assert_rec "$LN3D_REC" "disposition=completed" LANE-3d
+
+# ---- LANE-4. registration is fail-closed: no ledger, no launch --------------
+# The mutant this pins: an `|| true` on the ln/mkdir would launch an
+# unregistered successor -- open work that no reconstruction can find.
+live_json "running"
+LN4_HO="$(NEWHO lane4)"
+: > "$tmp/ops-blocked"   # a FILE where the ledger directory must be: mkdir -p fails
+LN4_BEFORE="$(grep -c . "$SHIM_SPAWNS" 2>/dev/null || echo 0)"
+out="$(CLAUDE_OPS_DIR="$tmp/ops-blocked" bash "$SCRIPT" "$LN4_HO" "must not launch" --cwd "$tmp/work" 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[LANE-4]: a dispatch whose lane could not be registered still succeeded"; fail=1; }
+assert_contains "operational ledger" "$out" LANE-4
+assert_eq "$(grep -c . "$SHIM_SPAWNS" 2>/dev/null || echo 0)" "$LN4_BEFORE" LANE-4
+rm -f "$tmp/ops-blocked"
+
+# ---- LANE-4b. the registration LINK failing alone is fail-closed too ---------
+# F8 of the 2026-08-31 review: LANE-4 blocks the mkdir, so an `|| true` mutant
+# on the ln line ALONE survived every LANE case -- ln succeeds in all other
+# fixtures. Here the ledger dirs EXIST (mkdir -p on an existing dir succeeds
+# whatever its mode) and dispatches/ is chmod 555, so the `ln -sfn` itself is
+# the step that fails. Fixture chosen by MEASUREMENT, not by intuition:
+# `ln -sfn target existing_dir` SUCCEEDS rc=0 by creating the link INSIDE the
+# directory, so a directory occupant cannot force this failure -- permissions
+# can (ln into a 555 dir fails rc=1, measured on this platform).
+live_json "running"
+LN4B_HO="$(NEWHO lane4b)"
+LN4B_OPS="$tmp/ops-lane4b"
+mkdir -p "$LN4B_OPS/dispatches" "$LN4B_OPS/lanes"
+chmod 555 "$LN4B_OPS/dispatches"
+LN4B_BEFORE="$(grep -c . "$SHIM_SPAWNS" 2>/dev/null || echo 0)"
+out="$(CLAUDE_OPS_DIR="$LN4B_OPS" bash "$SCRIPT" "$LN4B_HO" "must not launch" --cwd "$tmp/work" 2>&1)"; code=$?
+chmod 755 "$LN4B_OPS/dispatches"
+[ "$code" != "0" ] || { echo "FAIL[LANE-4b]: a dispatch whose lane link could not be created still succeeded"; fail=1; }
+assert_contains "cannot register lane" "$out" LANE-4b
+assert_eq "$(grep -c . "$SHIM_SPAWNS" 2>/dev/null || echo 0)" "$LN4B_BEFORE" LANE-4b
+
+# ---- LANE-5. --dry-run names the lane and writes nothing ---------------------
+LN5_HO="$(NEWHO lane5)"
+out="$(GOF "$LN5_HO" "dry" --dry-run 2>&1)"; code=$?
+assert_eq "$code" "0" LANE-5
+assert_contains "would register lane" "$out" LANE-5
+assert_eq "$(ls "$CLAUDE_OPS_DIR/dispatches" 2>/dev/null | grep -c '^HANDOFF-lane5-')" "0" LANE-5
+
+# ---- LANE-6. retirement supersedes the dispatcher's OWN lane -----------------
+# A worker (CLAUDE_HANDOFF_LANE set) hands off onward and is retired: the old
+# lane closes as superseded, naming its successor, and the new lane is open.
+# The old record's session_id (cccccccc) matches the retiring seat, so the
+# ownership check introduced by F2 of the 2026-08-31 review PASSES here; the
+# case where it must not is LANE-10.
+LN6_SID="cccccccc-2222-3333-4444-555555555555"
+LN6_JD="$(rt_fixture cccccccc "$LN6_SID")"
+live_json "running"
+LN6_HO="$(NEWHO lane6)"
+LN6_OLDREC="$tmp/work/HANDOFF-lane6-old.md.dispatch"
+printf 'session_id=cccccccc\nstate=verified\nobjective=the old lane\n' > "$LN6_OLDREC"
+ln -sfn "$LN6_OLDREC" "$CLAUDE_OPS_DIR/dispatches/old-lane6-deadbeef"
+export CLAUDE_HANDOFF_LANE="old-lane6-deadbeef"
+rt_dispatch "$LN6_JD" "$LN6_SID" "$LN6_HO" "supersede my lane"
+unset CLAUDE_HANDOFF_LANE
+assert_eq "$RT_RC" "0" LANE-6
+LN6_NEW="$(sed -n 's/^lane=//p' "$LN6_HO.dispatch" 2>/dev/null | tail -1)"
+# The supersession runs in DETACHED retire_exec (moved there so an aborted
+# retirement can never leave a live seat marked replaced), so the dispatch
+# exiting does not mean it has run yet: wait, bounded, for the link to move.
+n=0; while [ -L "$CLAUDE_OPS_DIR/dispatches/old-lane6-deadbeef" ] && [ "$n" -lt 250 ]; do sleep 0.1; n=$(( n + 1 )); done
+[ ! -L "$CLAUDE_OPS_DIR/dispatches/old-lane6-deadbeef" ] || { echo "FAIL[LANE-6]: the superseded lane's ledger entry survived retirement"; fail=1; }
+assert_rec "$LN6_OLDREC" "disposition=superseded" LANE-6
+assert_rec "$LN6_OLDREC" "superseded_by=$LN6_NEW" LANE-6
+[ -L "$CLAUDE_OPS_DIR/dispatches/$LN6_NEW" ] || { echo "FAIL[LANE-6]: the successor's lane was not registered"; fail=1; }
+rt_kill_seat
+
+# ---- LANE-7. supersession errs OPEN when the old record is unreachable ------
+# Write-before-remove: the link comes off only after BOTH record writes land.
+# With the old record missing, the dispatch must still succeed and the old
+# lane must survive (a lane that looks open twice beats work that vanished).
+LN7_SID="dddddddd-2222-3333-4444-555555555555"
+LN7_JD="$(rt_fixture dddddddd "$LN7_SID")"
+live_json "running"
+LN7_HO="$(NEWHO lane7)"
+ln -sfn "$tmp/work/GONE-lane7.md.dispatch" "$CLAUDE_OPS_DIR/dispatches/old-lane7-cafecafe"
+export CLAUDE_HANDOFF_LANE="old-lane7-cafecafe"
+rt_dispatch "$LN7_JD" "$LN7_SID" "$LN7_HO" "dangling old lane"
+unset CLAUDE_HANDOFF_LANE
+assert_eq "$RT_RC" "0" LANE-7
+# Assert AFTER the detached retirement has acted: the supersession block sits
+# before the kill in retire_exec, so the seat's death implies it has already
+# run (here: rightly declined). Asserting straight away would stay green even
+# if a late remove were on its way.
+rt_assert_dead LANE-7
+[ -L "$CLAUDE_OPS_DIR/dispatches/old-lane7-cafecafe" ] || { echo "FAIL[LANE-7]: a supersession whose record write could not land must leave the old lane OPEN"; fail=1; }
+rt_kill_seat
+
+# ---- LANE-8. a --no-retire side dispatch never touches the dispatcher's lane -
+# Supersession is COUPLED to retirement: a side dispatch leaves this seat alive
+# and still the owner of its own lane, so that lane must not move.
+# F9 of the 2026-08-31 review: the first version of this case ran a plain shell
+# with no job fixture, so retire_self bailed at its not-a-background-seat check
+# and the --no-retire gate was never on the path -- deleting the gate left
+# every assertion green. Now the fixture is a full retirement seat whose old
+# record's session_id matches it (ownership would pass), so with the gate
+# deleted the retirement WOULD proceed and supersede this lane: the assertions
+# below are reachable only through the gate.
+LN8_SID="eeeeeeee-2222-3333-4444-555555555555"
+LN8_JD="$(rt_fixture eeeeeeee "$LN8_SID")"
+live_json "running"
+LN8_HO="$(NEWHO lane8)"
+LN8_OLDREC="$tmp/work/HANDOFF-lane8-old.md.dispatch"
+printf 'session_id=eeeeeeee\nstate=verified\nobjective=side-dispatch owner\n' > "$LN8_OLDREC"
+ln -sfn "$LN8_OLDREC" "$CLAUDE_OPS_DIR/dispatches/old-lane8-beefbeef"
+export CLAUDE_HANDOFF_LANE="old-lane8-beefbeef"
+rt_dispatch "$LN8_JD" "$LN8_SID" "$LN8_HO" "side dispatch" --no-retire
+unset CLAUDE_HANDOFF_LANE
+assert_eq "$RT_RC" "0" LANE-8
+rt_assert_alive LANE-8
+[ -L "$CLAUDE_OPS_DIR/dispatches/old-lane8-beefbeef" ] || { echo "FAIL[LANE-8]: a --no-retire side dispatch superseded the dispatcher's own lane"; fail=1; }
+assert_missing "disposition=superseded" "$(cat "$LN8_OLDREC")" LANE-8
+rt_kill_seat
+
+# ---- LANE-9. a lane key that is already someone else's refuses the dispatch --
+# F4 of the 2026-08-31 review: only 8 hex digits of hash distinguish equal
+# basenames (a real colliding pair exists: two /tmp/lane-collision-*/ paths
+# both derive HANDOFF-work-26d9da28), so `ln -sfn` here could silently repoint
+# another dispatch's registration at this record. The guard refuses a link
+# whose target is a DIFFERENT record, refuses any non-symlink occupant
+# (measured: ln -sfn onto a directory silently creates the link INSIDE it),
+# and passes an identical re-dispatch.
+live_json "running"
+LN9_HO="$(NEWHO lane9)"; LN9_REC="$LN9_HO.dispatch"
+out="$(GOF "$LN9_HO" "register the real lane" 2>&1)"; code=$?
+assert_eq "$code" "0" LANE-9
+LN9_LANE="$(sed -n 's/^lane=//p' "$LN9_REC" 2>/dev/null | tail -1)"
+LN9_FA="$(sed -n 's/^handoff=//p' "$LN9_REC" 2>/dev/null | tail -1)"
+[ -n "$LN9_LANE" ] && [ -n "$LN9_FA" ] || { echo "FAIL[LANE-9]: the fixture dispatch wrote no lane=/handoff= lines"; fail=1; }
+printf 'session_id=99999999\nstate=verified\nobjective=the OTHER colliding dispatch\n' > "$tmp/work/OTHER-lane9.dispatch"
+ln -sfn "$tmp/work/OTHER-lane9.dispatch" "$CLAUDE_OPS_DIR/dispatches/$LN9_LANE"
+LN9_BEFORE="$(grep -c . "$SHIM_SPAWNS" 2>/dev/null || echo 0)"
+out="$(GOF "$LN9_HO" "collides" --force 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[LANE-9]: a dispatch onto a lane key registered for a DIFFERENT handoff still succeeded"; fail=1; }
+assert_contains "already registered for a different handoff" "$out" LANE-9
+assert_eq "$(readlink "$CLAUDE_OPS_DIR/dispatches/$LN9_LANE" 2>/dev/null)" "$tmp/work/OTHER-lane9.dispatch" LANE-9
+assert_eq "$(grep -c . "$SHIM_SPAWNS" 2>/dev/null || echo 0)" "$LN9_BEFORE" LANE-9
+# a non-symlink occupant refuses too, and is left in place for a human
+rm -f "$CLAUDE_OPS_DIR/dispatches/$LN9_LANE"
+mkdir "$CLAUDE_OPS_DIR/dispatches/$LN9_LANE"
+out="$(GOF "$LN9_HO" "occupied" --force 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[LANE-9]: a dispatch over a directory occupant at its lane path still succeeded"; fail=1; }
+assert_contains "not a lane link" "$out" LANE-9
+[ -d "$CLAUDE_OPS_DIR/dispatches/$LN9_LANE" ] || { echo "FAIL[LANE-9]: the refusal removed the occupant it refused over"; fail=1; }
+assert_eq "$(grep -c . "$SHIM_SPAWNS" 2>/dev/null || echo 0)" "$LN9_BEFORE" LANE-9
+rmdir "$CLAUDE_OPS_DIR/dispatches/$LN9_LANE"
+# positive control: the SAME record already at the key is a re-dispatch, passes
+ln -sfn "$LN9_FA.dispatch" "$CLAUDE_OPS_DIR/dispatches/$LN9_LANE"
+out="$(GOF "$LN9_HO" "re-dispatch over own link" --force 2>&1)"; code=$?
+assert_eq "$code" "0" LANE-9
+assert_eq "$(readlink "$CLAUDE_OPS_DIR/dispatches/$LN9_LANE" 2>/dev/null)" "$LN9_FA.dispatch" LANE-9
+
+# ---- LANE-10. a STALE INHERITED lane marker supersedes nothing ---------------
+# F2 of the 2026-08-31 review: CLAUDE_HANDOFF_LANE is a filter hint any plain
+# `claude --bg` child inherits from its parent, but retirement treated it as
+# ownership authority -- a child handing off onward would mark its PARENT's
+# still-owned lane superseded and unlink it. Ownership is the dispatch
+# record's session_id: here it names cdcd3434 while the retiring seat is
+# abab1212, so the retirement itself proceeds (the seat dies) and the lane
+# must not move.
+LN10_SID="abab1212-2222-3333-4444-555555555555"
+LN10_JD="$(rt_fixture abab1212 "$LN10_SID")"
+live_json "running"
+LN10_HO="$(NEWHO lane10)"
+LN10_OLDREC="$tmp/work/HANDOFF-lane10-old.md.dispatch"
+printf 'session_id=cdcd3434\nstate=verified\nobjective=the PARENT seat lane, not ours\n' > "$LN10_OLDREC"
+ln -sfn "$LN10_OLDREC" "$CLAUDE_OPS_DIR/dispatches/old-lane10-feedf00d"
+export CLAUDE_HANDOFF_LANE="old-lane10-feedf00d"
+rt_dispatch "$LN10_JD" "$LN10_SID" "$LN10_HO" "inherited marker"
+unset CLAUDE_HANDOFF_LANE
+assert_eq "$RT_RC" "0" LANE-10
+rt_assert_dead LANE-10
+[ -L "$CLAUDE_OPS_DIR/dispatches/old-lane10-feedf00d" ] || { echo "FAIL[LANE-10]: a stale inherited lane marker superseded a lane owned by ANOTHER session"; fail=1; }
+assert_missing "disposition=superseded" "$(cat "$LN10_OLDREC")" LANE-10
+rt_kill_seat
+
+# ---- LANE-11. an ABORTED retirement leaves the lane it would have superseded -
+# F3 of the 2026-08-31 review: the supersession used to be written in
+# retire_self, BEFORE detached retire_exec re-verified the successor -- so an
+# aborted retirement (successor vanished) rolled back the seat's state but the
+# ledger already said the live seat was replaced by a successor that never
+# lived. The write now sits in retire_exec's success path, after the act-time
+# re-verify; ownership here PASSES (abcd5678 = abcd5678), so only the abort
+# keeps the lane in place.
+LN11_SID="abcd5678-2222-3333-4444-555555555555"
+LN11_JD="$(rt_fixture abcd5678 "$LN11_SID")"
+live_json "running"
+LN11_HO="$(NEWHO lane11)"; LN11_REC="$LN11_HO.dispatch"
+LN11_OLDREC="$tmp/work/HANDOFF-lane11-old.md.dispatch"
+printf 'session_id=abcd5678\nstate=verified\nobjective=would move if retirement completed\n' > "$LN11_OLDREC"
+ln -sfn "$LN11_OLDREC" "$CLAUDE_OPS_DIR/dispatches/old-lane11-0badf00d"
+export SHIM_AGENTS_AFTER="$tmp/agents-after-lane11.json" SHIM_AGENTS_AFTER_REC="$LN11_REC"
+printf '[]\n' > "$SHIM_AGENTS_AFTER"
+export CLAUDE_HANDOFF_LANE="old-lane11-0badf00d"
+rt_dispatch "$LN11_JD" "$LN11_SID" "$LN11_HO" "successor vanishes"
+unset CLAUDE_HANDOFF_LANE SHIM_AGENTS_AFTER SHIM_AGENTS_AFTER_REC
+assert_eq "$RT_RC" "0" LANE-11
+await_rec "$LN11_REC" '^retire_state=retire_aborted$' 300 || {
+  echo "FAIL[LANE-11]: the retirement did not abort on a vanished successor, so this case cannot observe the abort path"; fail=1; }
+rt_assert_alive LANE-11
+[ -L "$CLAUDE_OPS_DIR/dispatches/old-lane11-0badf00d" ] || { echo "FAIL[LANE-11]: an ABORTED retirement removed the lane -- a live seat's ledger entry says it was replaced by a successor that never lived"; fail=1; }
+assert_missing "disposition=superseded" "$(cat "$LN11_OLDREC")" LANE-11
+rt_kill_seat
+live_json "running"
+
+# ---- LANE-12. supersession re-verifies ownership AT ACT TIME -----------------
+# The 2026-08-31 micro-review's high finding: retire_self's ownership check is
+# a snapshot that detached retire_exec outlives. A --force re-dispatch of the
+# old handoff between the two rewrites the SAME record for a NEW live seat, so
+# acting on the snapshot would mark the new seat's record superseded and
+# unlink its lane -- a live dispatch vanishing from the ledger. retire_exec is
+# driven DIRECTLY here (the interleaving is the fixture's premise: the record
+# below is what a re-dispatch leaves behind), with the validated-at-snapshot
+# owner and record arriving as arguments exactly as retire_self passes them.
+LN12_JD="$(rt_fixture aaaa1111 "aaaa1111-2222-3333-4444-555555555555")"
+live_json "running"
+# Arm 1: the record now names a DIFFERENT seat (a re-dispatch rewrote it).
+LN12_OLDREC="$tmp/work/HANDOFF-lane12-old.md.dispatch"
+printf 'session_id=bbbb2222\nstate=verified\nobjective=re-dispatched for a NEW live seat\n' > "$LN12_OLDREC"
+ln -sfn "$LN12_OLDREC" "$CLAUDE_OPS_DIR/dispatches/old-lane12-0ddba11e"
+LN12_REC="$tmp/work/lane12-new.dispatch"; printf 'state=verified\n' > "$LN12_REC"
+LN12_BAK="$tmp/work/lane12.bak"; : > "$LN12_BAK"
+LN12_SENT="$tmp/work/lane12.sent"; : > "$LN12_SENT"
+sleep 60 & LN12_PID=$!
+bash "$SCRIPT" --retire-exec "$LN12_JD" "$LN12_PID" "$SHORT" "$LN12_SENT" "$LN12_REC" "$LN12_BAK" \
+  "old-lane12-0ddba11e" "HANDOFF-lane12-new" "aaaa1111" "$LN12_OLDREC" >/dev/null 2>&1
+assert_eq "$?" "0" LANE-12
+assert_rec "$LN12_REC" "retire_state=retired" LANE-12
+kill -0 "$LN12_PID" 2>/dev/null && { echo "FAIL[LANE-12]: the withheld supersession also withheld the retirement -- the seat should still die"; fail=1; kill -9 "$LN12_PID" 2>/dev/null; }
+[ -L "$CLAUDE_OPS_DIR/dispatches/old-lane12-0ddba11e" ] || { echo "FAIL[LANE-12]: a stale ownership snapshot superseded a lane re-dispatched for ANOTHER live seat"; fail=1; }
+assert_missing "disposition=superseded" "$(cat "$LN12_OLDREC")" LANE-12
+# Arm 2: the record still names US, but the LINK was re-registered onto a
+# different record (a colliding lane key) -- the link identity check refuses.
+printf 'session_id=aaaa1111\nstate=verified\nobjective=ours at snapshot time\n' > "$LN12_OLDREC"
+LN12_FOREIGN="$tmp/work/HANDOFF-lane12-foreign.md.dispatch"
+printf 'session_id=eeee7777\nstate=verified\nobjective=the colliding registration\n' > "$LN12_FOREIGN"
+ln -sfn "$LN12_FOREIGN" "$CLAUDE_OPS_DIR/dispatches/old-lane12-0ddba11e"
+printf 'state=verified\n' > "$LN12_REC"; : > "$LN12_BAK"
+sleep 60 & LN12_PID=$!
+bash "$SCRIPT" --retire-exec "$LN12_JD" "$LN12_PID" "$SHORT" "$LN12_SENT" "$LN12_REC" "$LN12_BAK" \
+  "old-lane12-0ddba11e" "HANDOFF-lane12-new" "aaaa1111" "$LN12_OLDREC" >/dev/null 2>&1
+assert_eq "$?" "0" LANE-12
+assert_rec "$LN12_REC" "retire_state=retired" LANE-12
+kill -9 "$LN12_PID" 2>/dev/null
+[ "$(readlink "$CLAUDE_OPS_DIR/dispatches/old-lane12-0ddba11e" 2>/dev/null)" = "$LN12_FOREIGN" ] || {
+  echo "FAIL[LANE-12]: a re-registered link was removed or moved by a retirement holding a stale record snapshot"; fail=1; }
+assert_missing "disposition=" "$(cat "$LN12_FOREIGN")" LANE-12
+assert_missing "disposition=" "$(cat "$LN12_OLDREC")" LANE-12
+# Arm 3, positive control: both facts re-verify clean, so the supersession
+# must actually run -- or the two refusals above could be a block that never
+# passes. (LANE-6 drives the same success end-to-end through retire_self.)
+ln -sfn "$LN12_OLDREC" "$CLAUDE_OPS_DIR/dispatches/old-lane12-0ddba11e"
+printf 'state=verified\n' > "$LN12_REC"; : > "$LN12_BAK"
+sleep 60 & LN12_PID=$!
+bash "$SCRIPT" --retire-exec "$LN12_JD" "$LN12_PID" "$SHORT" "$LN12_SENT" "$LN12_REC" "$LN12_BAK" \
+  "old-lane12-0ddba11e" "HANDOFF-lane12-new" "aaaa1111" "$LN12_OLDREC" >/dev/null 2>&1
+assert_eq "$?" "0" LANE-12
+kill -9 "$LN12_PID" 2>/dev/null
+[ ! -L "$CLAUDE_OPS_DIR/dispatches/old-lane12-0ddba11e" ] || { echo "FAIL[LANE-12]: the act-time re-verify refused a supersession whose facts all check out -- it can never pass"; fail=1; }
+assert_rec "$LN12_OLDREC" "disposition=superseded" LANE-12
+assert_rec "$LN12_OLDREC" "superseded_by=HANDOFF-lane12-new" LANE-12
+
+# Arm 4, the status-2 audit split (round-2 micro-review): a lock backend that
+# cannot answer is NOT a competing holder, and the first version of this block
+# logged Busy for both — an audit line asserting a holder nobody observed.
+# CLAUDE_HANDOFF_LOCK_DEBUG=broken makes lock_take answer 3 on every fd, which
+# lock_hold maps to 2; rec_put is a plain append with no lock in its path, so
+# the retirement itself must still land. Expect: no supersession (err open),
+# the seat still dies, NotAcquired logged, and Busy NOT logged.
+ln -sfn "$LN12_OLDREC" "$CLAUDE_OPS_DIR/dispatches/old-lane12-0ddba11e"
+printf 'session_id=aaaa1111\nstate=launching\n' > "$LN12_OLDREC"
+printf 'state=verified\n' > "$LN12_REC"; : > "$LN12_BAK"
+: > "$CLAUDE_HANDOFF_LOG"
+sleep 60 & LN12_PID=$!
+CLAUDE_HANDOFF_LOCK_DEBUG=broken bash "$SCRIPT" --retire-exec "$LN12_JD" "$LN12_PID" "$SHORT" "$LN12_SENT" "$LN12_REC" "$LN12_BAK" \
+  "old-lane12-0ddba11e" "HANDOFF-lane12-new" "aaaa1111" "$LN12_OLDREC" >/dev/null 2>&1
+assert_eq "$?" "0" LANE-12
+assert_rec "$LN12_REC" "retire_state=retired" LANE-12
+kill -0 "$LN12_PID" 2>/dev/null && { echo "FAIL[LANE-12]: the unanswerable lock also withheld the retirement -- the seat should still die"; fail=1; kill -9 "$LN12_PID" 2>/dev/null; }
+[ -L "$CLAUDE_OPS_DIR/dispatches/old-lane12-0ddba11e" ] || { echo "FAIL[LANE-12]: a supersession acted through a lock that could not answer"; fail=1; }
+assert_missing "disposition=superseded" "$(cat "$LN12_OLDREC")" LANE-12
+assert_contains "HandoffLaneLockNotAcquiredAtAct" "$(cat "$CLAUDE_HANDOFF_LOG")" LANE-12
+assert_missing "HandoffLaneLockBusyAtAct" "$(cat "$CLAUDE_HANDOFF_LOG")" LANE-12
+rm -f "$CLAUDE_OPS_DIR/dispatches/old-lane12-0ddba11e"
+
+# ---- LANE-ORD. the supersession write order is pinned STRUCTURALLY -----------
+# F10 of the 2026-08-31 review, adjudicated OUTCOME-UNOBSERVABLE: both rec_put
+# calls append to the same file with the same permissions and pre-validated
+# values, so no reachable input fails the second write while the first
+# succeeds -- a reordered mutant cannot be told apart by any outcome test.
+# The order that matters (disposition, then superseded_by, then the unlink,
+# so a lane never vanishes before its audit trail is complete) is therefore
+# pinned by reading the source region between its markers.
+ord_check() { # $1=region text -> 0 iff disposition < superseded_by < rm
+  _oc="$(printf '%s\n' "$1" | grep -v '^[[:blank:]]*#')"
+  _o1="$(printf '%s\n' "$_oc" | grep -n 'disposition superseded' | head -1 | cut -d: -f1)"
+  _o2="$(printf '%s\n' "$_oc" | grep -n 'superseded_by' | head -1 | cut -d: -f1)"
+  _o3="$(printf '%s\n' "$_oc" | grep -n 'rm -f .*dispatches' | head -1 | cut -d: -f1)"
+  [ -n "$_o1" ] && [ -n "$_o2" ] && [ -n "$_o3" ] && [ "$_o1" -lt "$_o2" ] && [ "$_o2" -lt "$_o3" ]
+}
+LORD_REGION="$(sed -n '/# SUPERSEDE-ORDER-BEGIN/,/# SUPERSEDE-ORDER-END/p' "$SCRIPT")"
+[ -n "$LORD_REGION" ] || { echo "FAIL[LANE-ORD]: the SUPERSEDE-ORDER markers are gone from the hook -- the region this pin reads no longer exists"; fail=1; }
+ord_check "$LORD_REGION" || { echo "FAIL[LANE-ORD]: the supersession region does not order disposition < superseded_by < unlink"; fail=1; }
+# control: the same check must FAIL on a reordered region -- a pin that cannot
+# fail pins nothing.
+LORD_CTRL='rm -f "x/dispatches/y"
+rec_put r disposition superseded
+rec_put r superseded_by z'
+ord_check "$LORD_CTRL" && { echo "FAIL[LANE-ORD]: the order check passed a region with the unlink FIRST, so it cannot see the reorder it exists for"; fail=1; }
 
 # Nothing below this line depends on a seat, and a seat left running would idle
 # for a minute after the suite has printed its verdict.

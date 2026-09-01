@@ -78,26 +78,26 @@ STUB_RC=0 STUB_OUT= verdict "UNC share"     '\\server\share\config'      local
   || echo "  ok: no probe was attempted for a local path"
 
 echo "A2: an anonymous reader that CAN fetch the refs means public"
-STUB_RC=0 STUB_OUT= verdict "ls-remote succeeds" "https://example.com/o/r.git" public
+STUB_RC=0 STUB_OUT= verdict "ls-remote succeeds" "https://github.com/o/r.git" public
 
 echo "A3: every way a host refuses an anonymous reader means private"
 STUB_RC=128 STUB_OUT="remote: Repository not found." \
-  verdict "github 404" "https://example.com/o/r.git" private
+  verdict "github 404" "https://github.com/o/r.git" private
 STUB_RC=128 STUB_OUT="fatal: could not read Username for 'https://gitlab.com': terminal prompts disabled" \
   verdict "prompt refused" "https://gitlab.com/o/r.git" private
 STUB_RC=128 STUB_OUT="fatal: Authentication failed for 'https://example.com/o/r.git/'" \
   verdict "auth failed" "https://example.com/o/r.git" private
 
 echo "A4: anything else is 'unknown' -- which the caller must treat as a refusal"
-STUB_RC=128 STUB_OUT="fatal: unable to access 'https://example.com/o/r.git/': Could not resolve host: example.com" \
-  verdict "offline"           "https://example.com/o/r.git" unknown
+STUB_RC=128 STUB_OUT="fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com" \
+  verdict "offline"           "https://github.com/o/r.git" unknown
 STUB_RC=0 STUB_OUT= verdict "no url"            ""             unknown
 STUB_RC=0 STUB_OUT= verdict "unrecognised form" "weird::thing"  unknown
 
 echo "A5: the probe carries NO credentials -- the guard the whole verdict rests on"
 : > "$STUB_LOG"
 STUB_RC=0 STUB_OUT= PATH="$SANDBOX/stub:$PATH" pwsh -NoLogo -NoProfile -File "$HELPER" \
-  "https://example.com/o/r.git" >/dev/null 2>&1
+  "https://github.com/o/r.git" >/dev/null 2>&1
 grep -q 'credential.helper=' "$STUB_LOG" \
   && echo "  ok: credential helpers reset on the command line" \
   || { echo "FAIL: no 'credential.helper=' in the probe"; cat "$STUB_LOG"; fail=1; }
@@ -120,7 +120,7 @@ $env:GIT_TERMINAL_PROMPT = 'SENTINEL-PROMPT'
 "GIT_TERMINAL_PROMPT=$($env:GIT_TERMINAL_PROMPT)" | Add-Content -LiteralPath $Out
 PS
 STUB_RC=0 STUB_OUT= PATH="$SANDBOX/stub:$PATH" pwsh -NoLogo -NoProfile -File "$SANDBOX/envcheck.ps1" \
-  -Helper "$HELPER" -Url "https://example.com/o/r.git" -Out "$SANDBOX/env.log" >/dev/null 2>&1
+  -Helper "$HELPER" -Url "https://github.com/o/r.git" -Out "$SANDBOX/env.log" >/dev/null 2>&1
 grep -qx 'GIT_CONFIG_GLOBAL=SENTINEL-GLOBAL' "$SANDBOX/env.log" \
   && echo "  ok: GIT_CONFIG_GLOBAL restored" \
   || { echo "FAIL: the probe left GIT_CONFIG_GLOBAL clobbered"; cat "$SANDBOX/env.log"; fail=1; }
@@ -135,11 +135,11 @@ probe_url() {
     >/dev/null 2>&1
   sed -n 's/.*\[\(https:[^]]*\)\].*/\1/p' "$STUB_LOG" | tail -1
 }
-check "$(probe_url 'git@example.com:o/r.git')"             "https://example.com/o/r.git" "scp-style -> https"
-check "$(probe_url 'ssh://git@example.com/o/r.git')"       "https://example.com/o/r.git" "ssh:// -> https"
-check "$(probe_url 'ssh://git@example.com:22/o/r.git')"    "https://example.com/o/r.git" "ssh:// with a port"
-check "$(probe_url 'https://someone@example.com/o/r.git')" "https://example.com/o/r.git" "userinfo dropped"
-check "$(probe_url 'https://example.com/o/re@po.git')"     "https://example.com/o/re@po.git" "@ in the path kept"
+check "$(probe_url 'git@github.com:o/r.git')"             "https://github.com/o/r.git" "scp-style -> https"
+check "$(probe_url 'ssh://git@github.com/o/r.git')"       "https://github.com/o/r.git" "ssh:// -> https"
+check "$(probe_url 'ssh://git@github.com:22/o/r.git')"    "https://github.com/o/r.git" "ssh:// with a port"
+check "$(probe_url 'https://someone@github.com/o/r.git')" "https://github.com/o/r.git" "userinfo dropped"
+check "$(probe_url 'https://github.com/o/re@po.git')"     "https://github.com/o/re@po.git" "@ in the path kept"
 
 # ==============================================================================================
 # B. sync.ps1's gate

@@ -1,14 +1,14 @@
 ---
 name: continued-sessions-default-to-fable
-description: you 2026-08-23 supersedes for REVIVALS — a dead seat comes back on Opus, standing, no asking; your 2026-08-21 Fable default still governs ordinary handoff continuations
+description: The user 2026-08-23 supersedes for REVIVALS — a dead seat comes back on Opus, standing, no asking; her 2026-08-21 Fable default still governs ordinary handoff continuations
 metadata:
   type: feedback
 scope: global
 ---
 
-**you, 2026-08-21: "whenever we continue sessions default to fable unless we used up fable limit."**
+**The user, 2026-08-21: "whenever we continue sessions default to fable unless we used up fable limit."**
 
-**SUPERSEDED FOR REVIVALS — you, 2026-08-23, verbatim: "revive the sessions with opus whenever
+**SUPERSEDED FOR REVIVALS — the user, 2026-08-23, verbatim: "revive the sessions with opus whenever
 they die."** Typed directly, immediately after a `/login` that lifted a weekly account cap, and
 followed by "revive sessions". Standing, not a one-off, and unconditional on its face — *whenever*
 they die. So:
@@ -24,8 +24,8 @@ they die. So:
   it is only the revival branch that no longer needs it.
 
 Authored record, quotable by any session that will not take a peer's header on trust:
-`~/Coding/your_other_project/HANDOFF-fleet-limit-revival.md`, section
-`## UPDATE 2026-08-23 — the 18:09Z weekly-limit wave, and your STANDING revival instruction`.
+`~/code/your-other-project/HANDOFF-fleet-limit-revival.md`, section
+`## UPDATE 2026-08-23 — the 18:09Z weekly-limit wave, and the user's STANDING revival instruction`.
 Applied 2026-08-23 to six lanes after a fleet-wide weekly cap-kill at 2026-08-22T18:09:36Z; all six
 verified alive at their own transcripts on `claude-opus-5`.
 
@@ -42,7 +42,7 @@ dispatch that actually took a turn. On 2026-08-21 three Fable dispatches died in
 literal detail `You've reached your Fable 5 limit.` (19:23:55Z, 20:57:06Z, 21:12:05Z), and three sessions
 independently published "Fable is spent" as a measured fact and moved a whole runbook to `opus[1m]` — while
 another session was producing Fable turns at 21:35:56Z and a throwaway probe dispatched at 21:36:44Z
-survived turn 1 and completed. **The cap was lifted by you running `/login` (an account switch)** —
+survived turn 1 and completed. **The cap was lifted by the user running `/login` (an account switch)** —
 measured by `your-other-project-b2`, and the same lever that cleared the 2026-08-21 fleet-wide stall.
 **But the login is the LEVER, not the MOMENT — never date a lift from the account event.** On
 2026-08-22 the switch was ~02:0xZ and the cap did not clear until between **03:08:14Z** (last
@@ -53,7 +53,7 @@ artifact: the corpus scan below gives it to the second, for free. So
 deaths in a window show a quota was exhausted THEN, and an operator can lift it at any moment without
 telling any session; they say nothing about now. (I first wrote "quota windows roll" here — plausible, and
 not what happened. Do not publish the MECHANISM of a recovery you did not measure either.) This is `[[absence-needs-a-probe-that-could-see-presence]]` wearing a tier
-costume, and it inverts your rule while every session believes it is obeying it — opus is the
+costume, and it inverts the user's rule while every session believes it is obeying it — opus is the
 documented fallback, so choosing it on a false premise records as compliance.
 
 **Probe it, but read the CORPUS first — it is free and no dispatch is needed.** The fleet is continuously
@@ -79,7 +79,7 @@ change is not evidence the change happened.
 **Why:** on 2026-08-21 eight concurrent Opus sessions exhausted the plan's session cap in ~35 minutes,
 which stalled the whole fleet silently — a stall records no turn, so no session could report it
 (`[[a-session-cannot-see-its-own-stall]]`). Tier is the burn-rate lever the fleet actually has, and
-it is one you have now set; it sits alongside fan-out width and session length under
+it is one the user has now set; it sits alongside fan-out width and session length under
 `[[no-extra-cash-without-permission]]`.
 
 **How to apply — it is mechanical, not a thing to remember.** `hooks/handoff.sh` defaults
@@ -96,7 +96,7 @@ environment carries `CLAUDE_HANDOFF_MODEL` set to the tier *it* was launched on 
 `${VAR-default}` only falls back when the variable is **unset**, so every seat a bg seat dispatches
 silently inherits the parent's tier and the Fable default is dead code on that path. Measured 2026-08-24:
 seat `2b9a9ca6` (opus[1m]) dispatched a review seat with no `--model`, believed it had launched Fable,
-and told you so; the child's `respawnFlags` read `["--model","claude-opus-5[1m]"]`. Nobody
+and told the user so; the child's `respawnFlags` read `["--model","claude-opus-5[1m]"]`. Nobody
 hand-passed a tier — the environment did, which is exactly the case the "do not hand-pass a tier to
 defeat the default" rule does not cover. So: **read the tier from the CHILD's own `respawnFlags` (or its
 transcript's `message.model`), never from the flag you passed or from the documented default** — this is
@@ -107,7 +107,7 @@ variable (`CLAUDE_HANDOFF_MODEL= handoff.sh …` gives `claude --bg`'s own pick,
 Do **not** churn already-running sessions to move them onto Fable: the word is about how a session is
 *continued*, and a mid-flight model switch buys nothing while costing the run.
 
-**COST FACT, measured 2026-08-23 (does not reverse your default — makes its price visible):** Fable 5
+**COST FACT, measured 2026-08-23 (does not reverse her default — makes its price visible):** Fable 5
 is **$10/$50 per MTok, twice Opus 5's $5/$25** — the most expensive model on the menu, not a cheap
 one. Across a measured 4-day fleet window Fable carried 34% of spend. So this Fable default is a
 *capability* choice being paid for at 2x Opus, and the 08-23 revive-on-Opus word is the cheaper branch

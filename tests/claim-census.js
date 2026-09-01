@@ -184,7 +184,17 @@ const closure = new Set();
 // invisible until the day one of them moved inside it.
 const BINARIES = 'date|osascript|notify-send|basename|mktemp|cat|rm|perl|awk|grep|head|tail'
                + '|sed|stat|readlink|sleep|nohup|pkill|pwd|cd|kill|touch|mkdir|ln|mv|cp|find'
-               + '|dirname|uname|ps';
+               + '|dirname|uname|ps'
+               // 2026-08-31, lane ledger: lane_key() derives the lane identity with
+               // tr|cut (sanitize + truncate the basename) and md5 / md5sum (hash the
+               // resolved path; md5sum is the Linux fallback). md5sum must be listed
+               // SEPARATELY: the exec pattern's token boundary means `md5` can never
+               // match inside `md5sum` -- an earlier version of this comment claimed
+               // they shared one entry, and that claim was false. All four run OUTSIDE
+               // the claim closure today -- lane_key is called before any lock is
+               // taken -- so they add no primitive sites; listing them is what lets
+               // the audit keep noticing if that ever changes.
+               + '|tr|cut|md5|md5sum';
 // Common external commands a shell script of this kind might reach for. Being
 // on this list is not permission to use one -- it is the census promising to
 // NOTICE if you do.
@@ -196,7 +206,7 @@ const BINARIES = 'date|osascript|notify-send|basename|mktemp|cat|rm|perl|awk|gre
 // own default.
 const AUDIT = ('ls|xargs|jq|python|python3|openssl|df|du|chmod|chown|dd|tar|wc|sort|uniq|tr|cut'
              + '|expr|seq|tee|env|timeout|gtimeout|dirname|realpath|install|who|uname|logger'
-             + '|say|afplay|md5|shasum|sha256sum|diff|patch|nc|ssh|scp|rsync|git').split('|');
+             + '|say|afplay|md5|md5sum|shasum|sha256sum|diff|patch|nc|ssh|scp|rsync|git').split('|');
 const PATS = [
   ['exec',     new RegExp('(?<![\\w./$-])(' + BINARIES + ')(?![\\w./-])')],
   ['exec',     /\$(NODE|CLAUDE_BIN)\b/],

@@ -12,7 +12,7 @@ A seat that wakes for any reason republishes that file from its own in-memory no
 Measured 2026-08-25, minutes apart, in one sweep:
 `2b9a9ca6` was guarded (verified from the file, `blocked`, 143,313 tokens).
 Retiring the seat it supervised made its own stall-watchdog fire `TERMINAL`, which woke it.
-On waking it rewrote `state.json` — guard **gone**, tokens up to 155,886, and `detail` reverted to a line from *before* you ran `apply-do-not-revive-v2.py` ("69 targets, 0 currently guarded"), silently resurrecting a stale claim as though it were current.
+On waking it rewrote `state.json` — guard **gone**, tokens up to 155,886, and `detail` reverted to a line from *before* the user ran `apply-do-not-revive-v2.py` ("69 targets, 0 currently guarded"), silently resurrecting a stale claim as though it were current.
 
 This is the same shape as [[a-gate-may-not-read-its-verdict-from-the-gated-party]]: the flag lives in the artifact the gated party authors, so the gated party can clear it.
 

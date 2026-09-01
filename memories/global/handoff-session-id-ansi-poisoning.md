@@ -37,6 +37,14 @@ and it fails toward "the thing is gone" — the direction that disarms safety ma
 tripping it. Prefer the structured channel; where you must scrape, strip control bytes at the capture
 site and assert the value's SHAPE before storing it.
 
+**"It's a captured pipe, not a terminal" is no defense.** Measured 2026-08-30: `code=$(node -e
+'…console.log(r.status)…')` in a watcher predicate captured `ESC[33m500ESC[39m` — node colourises
+`console.log(<number>)` even into a non-TTY subshell capture when the environment forces colour
+(Claude Code's Bash env does) — so the `case 500` hold arm never matched and the watcher false-fired
+its "state changed" arm on an unchanged 500. Emit machine-bound values with
+`process.stdout.write(String(v))` (raw strings are never colourised), filter at the capture site
+(`| tr -cd '0-9'`), and control-test BOTH arms byte-exact (`od -c`) before arming.
+
 **STILL UNFIXED at the class as of 2026-08-25T02:1xZ, and the obvious fix is a trap.** Verified at the
 capture site: `hooks/handoff.sh:2660` runs `_short_backgrounded` (awk `$NF` over colourised stdout)
 **first**, and `_short_hexid` — the already-clean `\b[0-9a-f]{8}\b` regex — is reached only when the

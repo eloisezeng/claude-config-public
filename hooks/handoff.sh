@@ -49,6 +49,100 @@ RETIRE_GRACE_SEC="${CLAUDE_HANDOFF_RETIRE_GRACE:-10}"
 # hooks/context-watchdog.mjs reads the same two variables in the same order, so
 # the writer and the guard cannot end up looking at different directories.
 STATE_DIR="${CLAUDE_HANDOFF_STATE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/session-state}"
+# The operational ledger (2026-08-31 lifecycle decision, docs/notes/
+# LIFECYCLE-DECISION-context-vs-handoff-2026-08-31.md in your-other-project).
+# Dispatch records stay the source of truth for ownership, but they live next
+# to their handoff files, scattered across every repo — undiscoverable to a
+# coordinator reconstructing after a death. dispatches/ holds one symlink per
+# OPEN dispatched lane, pointing at the record; --close and the retire-time
+# supersession are the only things that remove one. Resolution order matches
+# inject-ops-lanes.sh, or the writer and its readers disagree about where the
+# ledger is.
+OPS_DIR="${CLAUDE_OPS_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/ops}"
+
+# lane_key <resolved-handoff-path> -> stdout <base>-<8hex>; nonzero if no hash.
+# The basename half is for humans; the hash suffix is the identity — two
+# handoff files with one basename in different directories are different lanes,
+# and one file re-dispatched lands on the same lane every time because the key
+# is derived from the RESOLVED path, the same identity authority the record and
+# the lock use.
+lane_key() {
+  _lk_b="${1##*/}"; _lk_b="${_lk_b%.md}"
+  _lk_b="$(printf '%s' "$_lk_b" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-48)"
+  [ -n "$_lk_b" ] || _lk_b="handoff"
+  if command -v md5 >/dev/null 2>&1; then _lk_h="$(printf '%s' "$1" | md5 -q 2>/dev/null)"
+  else _lk_h="$(printf '%s' "$1" | md5sum 2>/dev/null)"; fi
+  _lk_h="${_lk_h%% *}"
+  case "$_lk_h" in
+    *[!0-9a-f]*|'') return 1 ;;
+  esac
+  printf '%s-%.8s' "$_lk_b" "$_lk_h"
+}
+
+# close_lane <lane-key> <completed|cancelled|superseded> [note...] — the one
+# explicit exit from the open dispatched set. A lane is open until a
+# disposition closes it: a seat dying, stalling or being killed never closes
+# its lane, and worker completion does not imply merge/push/deploy. The
+# disposition is written into the record FIRST (the audit line), the symlink
+# removed second — a failure between the two leaves the lane open with the
+# disposition already recorded, and the next --close of the same lane repairs
+# it (rec_put appends; the last write wins).
+# SERIALIZED against dispatch: a dispatch registers the lane link and then
+# holds the record's lock across its prelaunch checks and the launch itself,
+# so a close that ran unlocked could read the link, write a disposition, and
+# remove a lane whose successor was about to launch — an unregistered live
+# successor, the exact disappearance the ledger exists to stop. So the close
+# takes the SAME lock (nonblocking: an in-flight dispatch wins and the close
+# refuses), and then re-verifies the link still names the record it validated,
+# because a --force re-dispatch can retarget the link between the first read
+# and the lock. The legacy .lock sweep is dispatch-only: no close predates the
+# .flock design, so there is no legacy claim a close could be racing.
+close_lane() {
+  _cl_lane="${1:-}"; _cl_disp="${2:-}"
+  [ $# -ge 2 ] || die "usage: handoff.sh --close <lane-key> <completed|cancelled|superseded> [one-line note]"
+  shift 2
+  _cl_note="$*"
+  case "$_cl_lane" in
+    ''|*[!0-9A-Za-z._-]*) die "--close: the lane key must be one token of [0-9A-Za-z._-] (got: ${_cl_lane:-empty}) — it is a pathname under $OPS_DIR/dispatches" ;;
+  esac
+  case "$_cl_disp" in
+    completed|cancelled|superseded) ;;
+    *) die "--close: the disposition must be completed, cancelled or superseded (got: ${_cl_disp:-empty}) — a lane leaves the open set only by an explicit disposition" ;;
+  esac
+  if [ -n "$_cl_note" ]; then
+    rec_ok_value "$_cl_note" || die "--close: the note must be a single line — a record value that spans lines can forge another field"
+  fi
+  _cl_link="$OPS_DIR/dispatches/$_cl_lane"
+  [ -L "$_cl_link" ] || die "--close: no open dispatched lane named $_cl_lane in $OPS_DIR/dispatches — already closed, or never registered (non-dispatched lanes close by editing their file in $OPS_DIR/lanes)"
+  _cl_rec="$(readlink "$_cl_link" 2>/dev/null)" || _cl_rec=""
+  [ -n "$_cl_rec" ] && [ -f "$_cl_rec" ] || die "--close: lane $_cl_lane points at a record that is missing (${_cl_rec:-unreadable link}) — refusing to silently drop the lane; investigate, then remove $_cl_link by hand if the work is truly closed"
+  # The lock path derives from the record, so the record had to be read first;
+  # that read is therefore UNLOCKED and is re-verified below, under the lock.
+  # Test seam: the recheck closes a two-instruction race — a colliding dispatch
+  # retargeting the link between the readlink above and the lock — that no
+  # fixture can reach from outside (both reads run microseconds apart in this
+  # one process). The seam performs exactly that retarget, here, so the recheck
+  # is reachable by a test; it is inert unless the debug variable is set.
+  if [ -n "${CLAUDE_HANDOFF_CLOSE_RETARGET_DEBUG:-}" ]; then
+    ln -sfn "$CLAUDE_HANDOFF_CLOSE_RETARGET_DEBUG" "$_cl_link" 2>/dev/null || true
+  fi
+  lock_hold 9 "$_cl_rec.flock"; _cl_lk=$?
+  [ "$_cl_lk" = 2 ] && die "--close: could not take the lane's dispatch lock at $_cl_rec.flock — the path is unopenable, a symlink, or the lock backend did not answer; refusing, because a close that cannot exclude an in-flight dispatch can remove the lane that dispatch just registered"
+  if [ "$_cl_lk" != 0 ]; then
+    _cl_lw="$( exec 9>&- 8>&- 7>&-; tail -1 "$_cl_rec.flock" 2>/dev/null || true )"
+    die "--close: a dispatch of this handoff is running right now and holds the lock${_cl_lw:+ (the lock file says: $_cl_lw)} — closing under it could remove the lane the dispatch is registering; retry when the dispatch has finished"
+  fi
+  _cl_rec2="$(readlink "$_cl_link" 2>/dev/null)" || _cl_rec2=""
+  [ "$_cl_rec2" = "$_cl_rec" ] || die "--close: lane $_cl_lane was re-registered while this close was taking the lock (it now points at ${_cl_rec2:-nothing}, was $_cl_rec) — a re-dispatch owns it again; re-run --close only if the NEW dispatch is also to be closed"
+  rec_put "$_cl_rec" disposition "$_cl_disp" || die "--close: cannot write the disposition into $_cl_rec — refusing to remove the lane from the open set without an audit line"
+  if [ -n "$_cl_note" ]; then
+    rec_put "$_cl_rec" disposition_note "$_cl_note" || die "--close: the disposition landed in $_cl_rec but the note did not — the lane is still open; re-run --close to finish"
+  fi
+  rec_stamp "$_cl_rec" closed_at || true
+  if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then rec_put "$_cl_rec" closed_by "${CLAUDE_CODE_SESSION_ID%%-*}" || true; fi
+  rm -f "$_cl_link" || die "--close: the disposition is recorded in $_cl_rec but the link $_cl_link could not be removed — the lane still reads open; remove it by hand"
+  printf 'closed lane %s (%s)\n  record: %s\n' "$_cl_lane" "$_cl_disp" "$_cl_rec"
+}
 
 POLL_SEC=60
 HEARTBEAT_MIN=20
@@ -1317,7 +1411,7 @@ resolve_path() { # $1=path  $2=noun for the messages -> RESOLVED
 # class is the other part and is NOT in that list: it is closed by construction
 # and countable instead of readable:
 #
-#     grep -c '^[^#]*( exec 9>&- 8>&- 7>&-' hooks/handoff.sh   # SPAWN_SUBSHELLS=19
+#     grep -c '^[^#]*( exec 9>&- 8>&- 7>&-' hooks/handoff.sh   # SPAWN_SUBSHELLS=20
 #
 # (anchored past a leading `#` so this very line does not count itself — a
 # self-counting probe is a probe that can never fall behind the code)
@@ -1376,9 +1470,11 @@ resolve_path() { # $1=path  $2=noun for the messages -> RESOLVED
 #     9 arm_watch, the arm-proof `sleep 0.1`, which holds fd 9
 #    10 dispatch, `claude --bg` — the successor itself, the site that matters most
 #    11 watch_loop, `sleep "$POLL_SEC"`, which holds fd 8 for hours
-#   NOTHING IS HELD, so nothing to close (2): watch_loop's lease-retry `sleep 0.1`
+#   NOTHING IS HELD, so nothing to close (3): watch_loop's lease-retry `sleep 0.1`
 #     (the lease is not taken yet and fd 9 was closed at spawn); claim_lock's
-#     `tail -1` of the diagnostic line, which runs only after the take FAILED.
+#     `tail -1` of the diagnostic line, which runs only after the take FAILED;
+#     close_lane's `tail -1` of the same diagnostic shape, which likewise runs
+#     only in the branch where lock_hold answered "someone else holds it".
 #   DELIBERATE INHERITANCE (1): lock_take's perl, which must receive the TARGET
 #     descriptor open — locking OUR description is the entire point. It closes
 #     the OTHER two: taking the alert lock must not hand perl the lease.
@@ -2445,12 +2541,16 @@ _mark_terminal() {   # $1=sentinel  $2=state.json  $3=successor short  $4=backup
   ' -- "$1" "$2" "$3" "$4"
 }
 
-# retire_self <successor-short-id> <record> -> sets RETIRED; 0 armed or skipped,
-# 2 REFUSED. A refusal is a reportable outcome, never a silent no-op: "dispatched"
-# and "retired" are separate claims exactly as "dispatched" and "watched" already
-# are, and a retirement that did not happen must be visible in the same report.
+# retire_self <successor-short-id> <record> [<successor-lane>] -> sets RETIRED;
+# 0 armed or skipped, 2 REFUSED. A refusal is a reportable outcome, never a
+# silent no-op: "dispatched" and "retired" are separate claims exactly as
+# "dispatched" and "watched" already are, and a retirement that did not happen
+# must be visible in the same report. The optional third argument is the lane
+# key of the successor just dispatched: when this seat is itself a worker
+# (CLAUDE_HANDOFF_LANE set) handing off to a DIFFERENT lane, retirement is the
+# "this seat is replaced" signal, so the old lane is closed as superseded.
 retire_self() {
-  _rt_short="$1"; _rt_rec="$2"
+  _rt_short="$1"; _rt_rec="$2"; _rt_newlane="${3:-}"
 
   RETIRED="no (--no-retire)"
   [ "$NORETIRE" = 0 ] || return 0
@@ -2525,11 +2625,47 @@ retire_self() {
   rec_put "$_rt_rec" retire_state retire_pending || true
   logline "{\"hook_event_name\":\"HandoffRetire\",\"session\":\"$_rt_me\",\"successor\":\"$_rt_short\"}"
 
+  # LANE SUPERSESSION — coupled to retirement on purpose. Only a dispatch that
+  # RETIRES this seat replaces it; a side dispatch with --no-retire leaves the
+  # dispatcher's own lane untouched (this code is unreachable there: retire_self
+  # returned at the --no-retire gate above). This side only VALIDATES: the
+  # writes and the link removal happen in retire_exec, AFTER its act-time
+  # re-check decides the retirement is real — a supersession written here and
+  # a retirement aborted there would leave a live seat whose lane says it was
+  # replaced, and the abort path cannot restore what a dead process wrote.
+  # Every validation failure errs OPEN (the old lane stays visible; nothing
+  # vanishes). A re-dispatch of the SAME handoff file derives the SAME lane key
+  # and skips this — the registration's `ln -sfn` already repointed the link.
+  #
+  # OWNERSHIP, not just presence: CLAUDE_HANDOFF_LANE is a filter hint any
+  # plain `claude --bg` child inherits from its parent, so the marker alone
+  # must never authorize superseding the lane — the parent may still own it.
+  # The record's session_id is the job short id of the seat that was LAUNCHED
+  # for the lane; only the seat whose own job dir carries that id may replace
+  # it. A mismatch (an inherited marker, a resumed seat under a new job id, a
+  # record that predates session_id) skips the supersession — open twice beats
+  # vanished, and --close repairs it with an audit line.
+  _rt_oldlane="${CLAUDE_HANDOFF_LANE:-}"
+  _rt_lane_ok=""
+  if [ -n "$_rt_newlane" ] && [ -n "$_rt_oldlane" ] && [ "$_rt_newlane" != "$_rt_oldlane" ] \
+     && [ -L "$OPS_DIR/dispatches/$_rt_oldlane" ]; then   # CLAIM:d — a filetest on the ops ledger (the user's home config dir); unbounded if that filesystem hangs, and best-effort by design: a skip errs OPEN
+    _rt_oldrec="$(readlink "$OPS_DIR/dispatches/$_rt_oldlane" 2>/dev/null)" || _rt_oldrec=""   # CLAIM:d — reads the link target from the same ledger; a failure leaves _rt_oldrec empty and the check below skips, erring open
+    _rt_oldsid=""
+    if [ -n "$_rt_oldrec" ] && [ -f "$_rt_oldrec" ] && rec_read "$_rt_oldrec" session_id; then _rt_oldsid="$REC_VAL"; fi   # CLAIM:d — filetest + record read on the old lane's record; a failure leaves the ownership check unsatisfied, erring open
+    if [ "$_rt_oldsid" = "$_rt_me" ] && [ -n "$_rt_me" ]; then
+      _rt_lane_ok=1
+    else
+      logline "{\"hook_event_name\":\"HandoffLaneNotOurs\",\"lane\":\"$_rt_oldlane\",\"recorded\":\"${_rt_oldsid:-none}\",\"seat\":\"$_rt_me\"}"
+    fi
+  fi
+  _rt_lane7=""; _rt_rec7=""
+  if [ -n "$_rt_lane_ok" ]; then _rt_lane7="$_rt_oldlane"; _rt_rec7="$_rt_oldrec"; fi
+
   # The stop runs DETACHED, for the same reason the watchdog does: it is about to
   # kill this process's own ancestor, so it cannot be this process. fds 9/8/7 are
   # closed in the spawn -- a child that inherited the dispatch lock would hold it
   # for as long as it lived, and this child deliberately outlives the seat.
-  nohup "$0" --retire-exec "$_rt_jd" "$_rt_pid" "$_rt_short" "$_rt_sent" "$_rt_rec" "$_rt_bak" >/dev/null 2>&1 9>&- 8>&- 7>&- &   # CLAIM:b
+  nohup "$0" --retire-exec "$_rt_jd" "$_rt_pid" "$_rt_short" "$_rt_sent" "$_rt_rec" "$_rt_bak" "$_rt_lane7" "$_rt_newlane" "$_rt_me" "$_rt_rec7" >/dev/null 2>&1 9>&- 8>&- 7>&- &   # CLAIM:b
   RETIRED="pending (state=done, sentinel written; stopping pid $_rt_pid)"
   return 0
 }
@@ -2554,7 +2690,9 @@ retire_self() {
 retire_exec() {
   _re_jd="${1:-}"; _re_pid="${2:-}"; _re_short="${3:-}"
   _re_sent="${4:-}"; _re_rec="${5:-}"; _re_bak="${6:-}"
-  [ -n "$_re_pid" ] && [ -n "$_re_short" ] || die "--retire-exec needs <jobdir> <pid> <short> <sentinel> <record> <backup>"
+  _re_oldlane="${7:-}"; _re_newlane="${8:-}"
+  _re_me="${9:-}"; _re_oldrec="${10:-}"
+  [ -n "$_re_pid" ] && [ -n "$_re_short" ] || die "--retire-exec needs <jobdir> <pid> <short> <sentinel> <record> <backup> [oldlane] [newlane] [me] [oldrec]"
 
   _re_reason=""
   if ! read_agents; then
@@ -2595,6 +2733,72 @@ retire_exec() {
   fi
 
   rm -f "$_re_bak" 2>/dev/null || true
+
+  # LANE SUPERSESSION, here and not in retire_self, because only THIS side has
+  # decided the retirement is real: the re-check above passed, the successor is
+  # positively live, and the abort path that restores state.json can no longer
+  # run. Writing the supersession before that decision left the ledger saying a
+  # live seat was replaced whenever the abort fired — the rollback restored the
+  # state file and the sentinel but could not un-write the lane.
+  #
+  # But retire_self's validation is a SNAPSHOT this detached process outlives:
+  # between it and this point, a --force re-dispatch of the old handoff can
+  # rewrite the SAME record for a NEW live seat and re-register the lane — an
+  # act on the stale snapshot would then mark the new seat's record superseded
+  # and unlink its lane, removing a LIVE dispatch from the ledger. So the
+  # validated record path and owner arrive as ARGUMENTS (never re-derived by
+  # following the link, which can have moved), and both facts are re-verified
+  # HERE, under the record's dispatch lock — the same lock a dispatch of that
+  # handoff holds, so an in-flight re-dispatch wins by holding it. Every
+  # failure errs OPEN: the old lane stays visible, closable later by --close
+  # with an audit line; open twice beats vanished.
+  if [ -n "$_re_oldlane" ] && [ -n "$_re_newlane" ] && [ -n "$_re_me" ] \
+     && [ -n "$_re_oldrec" ] && [ -f "$_re_oldrec" ]; then
+    lock_hold 9 "$_re_oldrec.flock"; _re_lk=$?
+    # Every nonzero status skips identically — "do not act" — and only the
+    # audit event differs: 1 is an OBSERVED holder, everything else is "could
+    # not tell", where naming a cause would be inventing one.
+    if [ "$_re_lk" = 0 ]; then
+      _re_now="$(readlink "$OPS_DIR/dispatches/$_re_oldlane" 2>/dev/null)" || _re_now=""
+      _re_sid=""
+      if [ "$_re_now" = "$_re_oldrec" ] && rec_read "$_re_oldrec" session_id; then _re_sid="$REC_VAL"; fi
+      if [ "$_re_sid" = "$_re_me" ]; then
+        # SUPERSEDE-ORDER-BEGIN
+        # Write-before-remove: the link comes off only after BOTH record writes
+        # land, so a failure errs OPEN (a lane that looks open twice) and never
+        # CLOSED (work that vanished). The ORDER inside the `&&` chain is an
+        # intent pin, not an outcome-testable property: both rec_put calls
+        # append to the same file with the same permissions and internally
+        # generated, pre-validated values, so no reachable input fails the
+        # second write while the first succeeds — a reordered mutant is
+        # outcome-unobservable, and the suite pins the order STRUCTURALLY (it
+        # asserts these lines' relative positions) instead of pretending a
+        # fixture could reach the difference.
+        if rec_put "$_re_oldrec" disposition superseded \
+           && rec_put "$_re_oldrec" superseded_by "$_re_newlane"; then
+          rm -f "$OPS_DIR/dispatches/$_re_oldlane" 2>/dev/null || true
+          logline "{\"hook_event_name\":\"HandoffLaneSuperseded\",\"lane\":\"$_re_oldlane\",\"by\":\"$_re_newlane\"}"
+        fi
+        # SUPERSEDE-ORDER-END
+      else
+        logline "{\"hook_event_name\":\"HandoffLaneMovedAtAct\",\"lane\":\"$_re_oldlane\",\"recorded\":\"${_re_sid:-none}\",\"seat\":\"$_re_me\"}"
+      fi
+    elif [ "$_re_lk" = 1 ]; then
+      # lock_hold's 1 is "someone else holds it", and the only other taker of
+      # this lock is a dispatch of the old handoff — busy is a fact here.
+      logline "{\"hook_event_name\":\"HandoffLaneLockBusyAtAct\",\"lane\":\"$_re_oldlane\"}"
+    else
+      # Status 2 collapses causes (unopenable path, symlink at the lock path,
+      # dead lock backend) and no holder was observed — this event states only
+      # that the lock was not acquired and names NO cause, so none of the
+      # collapsed causes can be named falsely.
+      logline "{\"hook_event_name\":\"HandoffLaneLockNotAcquiredAtAct\",\"lane\":\"$_re_oldlane\"}"
+    fi
+    # Release before the kill loop below: holding the dispatch lock through a
+    # grace period would block a re-dispatch of the old handoff for its length.
+    exec 9>&-
+  fi
+
   kill -TERM "$_re_pid" 2>/dev/null || true
   _re_n=0
   while [ "$_re_n" -lt "$RETIRE_GRACE_SEC" ]; do
@@ -2637,11 +2841,23 @@ dispatch() {
     esac
     OBJ="$1"; shift
   fi
-  # you 2026-08-21: a CONTINUED session defaults to Fable, so the fleet does
+  # the user 2026-08-21: a CONTINUED session defaults to Fable, so the fleet does
   # not silently run a whole shift on the expensive tier. `${VAR-default}`,
   # not `:-`, so CLAUDE_HANDOFF_MODEL="" still means "inherit whatever
   # `claude --bg` picks"; an explicit --model always wins over both.
-  CWD="$PWD"; MODEL="${CLAUDE_HANDOFF_MODEL-claude-fable-5[1m]}"; PMODE=""; FORCE=0; DRY=0; NOWATCH=0; NORETIRE=0
+  # the user 2026-08-28: "whenever handing off to new sessions, use auto mode,
+  # ideally bypass permissions." This used to be PMODE="" — the flag was omitted
+  # entirely and the successor booted in the PROMPTING class, which is the one
+  # mode that parks an unattended seat forever on a tool-approval prompt that no
+  # `SendMessage` can drain (the seat never reaches a tool round, so the message
+  # is never read). The default lives here so it holds for every caller, not only
+  # the ones who remember the flag. A seat that SHOULD still gate something is
+  # given `--permission-mode auto`; one that should prompt like a human session,
+  # `--permission-mode manual`. Deliberately NOT an env-var default: a bg seat
+  # exports CLAUDE_HANDOFF_MODEL into every seat it dispatches, which is exactly
+  # how the Fable default above became dead code inside the fleet — a constant
+  # cannot be defeated that way.
+  CWD="$PWD"; MODEL="${CLAUDE_HANDOFF_MODEL-claude-fable-5[1m]}"; PMODE="bypassPermissions"; FORCE=0; DRY=0; NOWATCH=0; NORETIRE=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --cwd) need_val "$1" $# "${2:-}"; CWD="$2"; shift 2 ;;
@@ -2740,6 +2956,9 @@ dispatch() {
   REC="$FILE_ABS.dispatch"
   resolve_path "$REC" "dispatch record"
   REC="$RESOLVED"
+  # Derived here, from the resolved path, so the prompt below can name it and
+  # the registration write cannot disagree with it.
+  LANE="$(lane_key "$FILE_ABS")" || die "cannot derive a lane key for $FILE_ABS (no usable md5 on this box) — refusing to dispatch a successor whose lane could not be registered in $OPS_DIR/dispatches"
   CWD_ABS="$( exec 9>&- 8>&- 7>&-; cd "$CWD" 2>/dev/null && pwd -P )" || die "cwd is not a directory: $CWD"
   # Both of these become record VALUES, and a value that spans lines forges a
   # field: a handoff filename ending in $'\nfinished=1' wrote a literal
@@ -2773,6 +2992,7 @@ dispatch() {
     printf 'handoff: would run in %s:\n  %s --bg%s%s --append-system-prompt <charter> <prompt>\n' \
       "$SHQ_CWD" "$SHQ_BIN" "$SHQ_MODEL" "$SHQ_PMODE"
     printf 'handoff: prompt would name %s with objective: %s\n' "$SHQ_FILE" "$OBJ"
+    printf 'handoff: would register lane %s in %s\n' "$LANE" "$OPS_DIR/dispatches"
     return 0
   fi
 
@@ -2870,7 +3090,8 @@ dispatch() {
 
   PROMPT="Read the handoff file at $FILE_ABS. It is your only context: nothing from the session that wrote it carries over.
 Objective: $OBJ
-Record progress back into that file as you go, so a stall is legible from the artifact."
+Record progress back into that file as you go, so a stall is legible from the artifact.
+This work is lane $LANE in the operational ledger (~/.claude/ops/ — read its README.md once). Your session ending does NOT close the lane: when the objective is COMPLETE (or the work is cancelled or superseded), run: ~/dotfiles/claude/hooks/handoff.sh --close $LANE completed (or cancelled/superseded) with a one-line note; handing off onward with handoff.sh moves the lane automatically. Anything unresolved you discover and are NOT handing forward must be written to ~/.claude/ops/lanes/ before your window ends."
 
   # ADVISORY, not enforced: this is prose in a system prompt, and a same-user
   # session can do anything the user could. The launcher enforces ownership,
@@ -2931,6 +3152,34 @@ Record progress back into that file as you go, so a stall is legible from the ar
   rec_put "$REC" cwd "$CWD_ABS" || die "$_recfail"
   rec_put "$REC" handoff "$FILE_ABS" || die "$_recfail"
   rec_put "$REC" objective "$OBJ" || die "$_recfail"
+  # LANE REGISTRATION — the discoverability half of the 2026-08-31 decision.
+  # Fail-closed like every record write: a dispatched successor that a
+  # reconstructing coordinator cannot find is the RCA defect with extra steps.
+  # `ln -sfn` is idempotent for a re-dispatch (same lane, same record). The
+  # link lands BEFORE the prelaunch re-checks and the launch, so a prelaunch
+  # failure leaves an open lane pointing at state=prelaunch_failed — which is
+  # TRUE: the work exists and is not running.
+  rec_put "$REC" lane "$LANE" || die "$_recfail"
+  mkdir -p "$OPS_DIR/dispatches" "$OPS_DIR/lanes" 2>/dev/null || die "cannot create the operational ledger at $OPS_DIR — refusing to launch a successor that could not be registered"   # CLAIM:d — creates the ledger dirs in the user's home; unbounded on a hung filesystem, and fail-CLOSED on purpose: no ledger, no launch
+  # The lane key's hash half is 8 hex digits, so two DIFFERENT handoff paths
+  # can derive one key; `ln -sfn` would then silently repoint the first
+  # dispatch's registration at the second's record, leaving the first's live
+  # successor with no lane. Same identity, same record (a re-dispatch) passes;
+  # anything else refuses. And an occupant that is NOT a symlink refuses too,
+  # because `ln -sfn` into a real directory does not fail — it creates the
+  # link INSIDE the directory, a registration every reader of the ledger would
+  # miss (measured on this platform). RESIDUAL: this runs under the RECORD's
+  # lock, which colliding paths do not share, so two simultaneous first
+  # dispatches of a colliding pair can still interleave past it; closing that
+  # needs a per-lane lock, which is not built. The sequential case — the one a
+  # human or a coordinator actually produces — refuses loudly.
+  if [ -L "$OPS_DIR/dispatches/$LANE" ]; then   # CLAIM:d — a filetest on the ops ledger; unbounded if that filesystem hangs, fail-closed like the registration it guards
+    _lncur="$(readlink "$OPS_DIR/dispatches/$LANE" 2>/dev/null)" || _lncur=""   # CLAIM:d — reads the current registration's target; an unreadable target refuses below rather than overwriting it
+    [ "$_lncur" = "$REC" ] || die "lane $LANE is already registered for a different handoff (its record is ${_lncur:-unreadable}, this dispatch's is $REC) — two handoff paths can derive the same lane key, and overwriting the registration would leave the other dispatch's successor with no lane; close or rename one of the two handoff files first"
+  elif [ -e "$OPS_DIR/dispatches/$LANE" ]; then   # CLAIM:d — same ledger filetest as above; a non-link occupant refuses because ln -sfn would silently create the link inside a directory
+    die "something that is not a lane link occupies $OPS_DIR/dispatches/$LANE — refusing to register over it, because \`ln -sfn\` onto a directory silently creates the link inside it and the lane would look registered while no reader can find it; investigate and remove the occupant by hand"
+  fi
+  ln -sfn "$REC" "$OPS_DIR/dispatches/$LANE" 2>/dev/null || die "cannot register lane $LANE in $OPS_DIR/dispatches — refusing to launch an unregistered successor"   # CLAIM:d — registers the lane; same property as the mkdir above: a successor a coordinator cannot find must not be launched
 
   # Last fence before the irreversible step — and the lock is not the only thing
   # that has to still be true. Every check on the handoff file happened before
@@ -2984,12 +3233,12 @@ Record progress back into that file as you go, so a stall is legible from the ar
   # can background a session, print its id, and still exit nonzero afterwards on
   # a client-side error. Recording that as `failed` — the one previous state a
   # retry walks straight past — is what pays for the second successor. This is
-  # the money lesson already written down for a payment API: "intent sent, outcome
+  # the money lesson already written down for Dynadot: "intent sent, outcome
   # unknown" is its own state, and it is not the retryable one. So the exit
   # status decides nothing on its own; the id does, and failing that, the
   # registry.
   _lrc=0
-  OUT="$( exec 9>&- 8>&- 7>&-; cd "$CWD_ABS" 2>/dev/null && "$CLAUDE_BIN" "$@" 2>&1 )" || _lrc=$?   # CLAIM:d — the operation the claim EXISTS to protect, not work done incidentally under it. A ceiling is coherent (expiry maps onto the existing state=unknown + bg_here path) but choosing it wrong turns a slow cold start into a false "may be running". Proposed 600s; filed in docs/handoff-successor.md, "Still open on this branch"
+  OUT="$( exec 9>&- 8>&- 7>&-; cd "$CWD_ABS" 2>/dev/null && CLAUDE_HANDOFF_LANE="$LANE" "$CLAUDE_BIN" "$@" 2>&1 )" || _lrc=$?   # CLAIM:d — the operation the claim EXISTS to protect, not work done incidentally under it. A ceiling is coherent (expiry maps onto the existing state=unknown + bg_here path) but choosing it wrong turns a slow cold start into a false "may be running". Proposed 600s; filed in docs/handoff-successor.md, "Still open on this branch"
   # Both parses run under the held dispatch lock, between the launch and the
   # record write — the one window where a wedged fork costs a successor nobody
   # is watching. They read a string already in memory, so a deadline can only
@@ -3099,7 +3348,7 @@ Record progress back into that file as you go, so a stall is legible from the ar
   # the report is a claim about what happened, so everything it claims must
   # already have happened. retire_self only ARMS -- the irreversible stop runs in
   # the detached child, well after this process has printed and exited.
-  retire_self "$SHORT" "$REC" || true
+  retire_self "$SHORT" "$REC" "$LANE" || true
 
   # Nothing to release: process exit closes fd 9 and the kernel drops the lock.
   shq "$SHORT"
@@ -3109,7 +3358,7 @@ Record progress back into that file as you go, so a stall is legible from the ar
 }
 
 # ---------------------------------------------------------------------- main
-[ $# -gt 0 ] || die "usage: handoff.sh <handoff-file> <objective> [options] | --status | --watch <record>"
+[ $# -gt 0 ] || die "usage: handoff.sh <handoff-file> <objective> [options] | --status | --watch <record> | --close <lane> <completed|cancelled|superseded> [note]"
 
 MODE_TAKEN=""
 case "$1" in
@@ -3164,6 +3413,9 @@ case "$1" in
   --retire-exec)
     MODE_TAKEN="--retire-exec"; shift
     retire_exec "$@"; exit 0 ;;
+  --close)
+    MODE_TAKEN="--close"; shift
+    close_lane "$@"; exit 0 ;;
   --*) die "unknown option: $1" ;;
 esac
 
@@ -3174,6 +3426,6 @@ esac
 # reporting a shell error instead of the actual failure. Worse, with arguments
 # left over it would have DISPATCHED a successor nobody asked for.
 [ -z "$MODE_TAKEN" ] || die "$MODE_TAKEN did not complete (it failed before it could exit; see $LOG) — refusing to fall through to a dispatch"
-[ $# -gt 0 ] || die "usage: handoff.sh <handoff-file> <objective> [options]   (also --status, --watch <record>, --watch-once <record>, --help; --no-retire keeps this seat alive)"
+[ $# -gt 0 ] || die "usage: handoff.sh <handoff-file> <objective> [options]   (also --status, --watch <record>, --watch-once <record>, --close <lane> <disposition> [note], --help; --no-retire keeps this seat alive)"
 
 dispatch "$@"

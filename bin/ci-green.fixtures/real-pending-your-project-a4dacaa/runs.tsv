@@ -1,0 +1,4 @@
+analyzer — pytest	in_progress	
+deploy — shellcheck + Caddyfile validate (with rate-limit plugin)	queued	
+web — typecheck, unit (incl. Postgres contract), e2e	in_progress	
+GitGuardian Security Checks	completed	success

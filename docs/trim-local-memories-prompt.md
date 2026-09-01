@@ -2,7 +2,7 @@
 
 Project memory indexes (`~/.claude/projects/<project>/memory/MEMORY.md`) load into every session of that project, and grow as sessions append entries.
 The CLAUDE.md memory-hygiene rule keeps new writes distilled; this prompt cleans up an index that has already grown.
-Paste it into a Claude Code session **in the project whose memory needs trimming** (reference run: your_other_project, 16.4 KB → 10.6 KB, 2026-07-31 — per-session lesson hooks deliberately kept).
+Paste it into a Claude Code session **in the project whose memory needs trimming** (reference run: your-other-project, 16.4 KB → 10.6 KB, 2026-07-31 — per-session lesson hooks deliberately kept).
 
 ```text
 Trim this project's Claude memory index (~/.claude/projects/<this-project>/memory/MEMORY.md) without losing information.
