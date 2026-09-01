@@ -11,7 +11,7 @@ It does nothing to the **shell-side watchers**, which are separate processes tha
 
 Measured 2026-08-25, one day after a stand-down that read fully complete on `state.json` (92 blocked / 40 failed / 163 done / 1 working, 69 corpses guarded): a process sweep still found **nine** live residues —
 two armed `handoff.sh --watch` dispatchers on objectives that had *completed* (their `.dispatch` records stuck at `state=launching`, so the watcher never saw the finish and stayed armed with `--heartbeat-min 20`);
-a `your-review-tool poll --agent-reply` writing into a blocked seat's job dir (an `--agent-reply` poll emits **model** replies, so it bills);
+a `lavish-axi poll --agent-reply` writing into a blocked seat's job dir (an `--agent-reply` poll emits **model** replies, so it bills);
 a 300s `git ls-remote` gate watch, 2d old, whose stdout was a dead session's socket;
 a **15s** `git status` sampler, 3d old, on handed-off work;
 and four zsh holds permanently wedged on `until [ "$(pgrep -f killall30 | wc -l)" -eq 0 ]` — **the `pgrep -f` pattern matches the waiter's own argv**, so the predicate can never reach 0 and the loop cannot exit.

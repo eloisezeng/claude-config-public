@@ -1,6 +1,6 @@
 ---
-name: gh-rest-truncates-long-fields
-description: "gh's REST renderer silently truncates long string fields (~2KB), so any absence-check on a PR/issue body through it is structurally blind — use GraphQL"
+name: gh-axi-rest-truncates-long-fields
+description: "gh-axi's REST renderer silently truncates long string fields (~2KB), so any absence-check on a PR/issue body through it is structurally blind — use GraphQL"
 metadata: 
   node_type: memory
   scope: global
@@ -9,19 +9,19 @@ metadata:
   modified: 2026-08-26T19:14:53.911Z
 ---
 
-`gh api <rest-path>` renders responses as YAML and **silently truncates long string values at
+`gh-axi api <rest-path>` renders responses as YAML and **silently truncates long string values at
 roughly 2 KB**, with no marker, ellipsis, or warning.
 
-Measured 2026-08-26 on `repos/kunchenguid/your-review-tool/pulls/295`: a body of **36,527 B** rendered as
+Measured 2026-08-26 on `repos/kunchenguid/lavish-axi/pulls/295`: a body of **36,527 B** rendered as
 **2,017 B**, and the whole PR object as **3,313 B**. `grep -c 'no-mistakes-pipeline-attestation'` over
-that raw response returned **0** on a PR that *did* contain the marker. `gh pr view` truncates too
+that raw response returned **0** on a PR that *did* contain the marker. `gh-axi pr view` truncates too
 (926 B for the same PR). The truncation is per-field, so short fields (`state`, `conclusion`, `sha`,
 `updated_at`) are trustworthy and long ones (`body`, `description`, log text) are not.
 
 **Use GraphQL for any long field** — it does not truncate:
 
 ```
-gh api POST graphql --field query='query{repository(owner:"O",name:"N"){pullRequest(number:N){body}}}'
+gh-axi api POST graphql --field query='query{repository(owner:"O",name:"N"){pullRequest(number:N){body}}}'
 ```
 
 `userContentEdits(last:N){editedAt editor{login} diff}` is the same route's bonus: it recovers **prior

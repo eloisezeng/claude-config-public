@@ -35,10 +35,13 @@ This repo is the single source of truth; config directories symlink into it.
   (the `gsd-statusline.js` statusLine) was removed from `settings.json`
   2026-07-31; `settings.windows.json` still carries gsd hooks and is cleaned
   up on the Windows side.
-- **`-axi` CLI tools** — `your-review-tool` (human review / visualization),
-  `gh` (GitHub), `chrome-devtools` (browser automation), the tools
-  `CLAUDE.md` mandates. They're npm globals, not Claude plugins:
-  `npm i -g your-review-tool gh chrome-devtools`. They want **Node ≥ 20**
+- **`-axi` CLI tools** — `lavish-axi` (human review / visualization),
+  `gh-axi` (GitHub), `chrome-devtools-axi` (browser automation), the tools
+  `CLAUDE.md` mandates. Two are plain npm globals, not Claude plugins:
+  `npm i -g gh-axi chrome-devtools-axi`. **`lavish-axi` is the exception** —
+  `CLAUDE.md` mandates a fork that is not published to npm, so install it with
+  `bin/install-lavish-fork.sh` (clone + build + `npm link`); a plain
+  `npm i -g lavish-axi` silently gives you the upstream package instead. They want **Node ≥ 20**
   (they run on 18 but warn); install Node 20+ (e.g. via nvm) if anything misbehaves.
   No-sudo tip: `npm config set prefix ~/.local` puts the binaries in
   `~/.local/bin` (usually already on `PATH`).
@@ -68,7 +71,8 @@ to the launchd auto-sync watcher — a clone there fails with
 "Operation not permitted" and never auto-pushes.
 
 Then reinstall plugins (per the manifest) and install the `-axi` CLI tools
-(`npm i -g your-review-tool gh chrome-devtools`).
+(`npm i -g gh-axi chrome-devtools-axi`, then `bin/install-lavish-fork.sh` for the
+forked `lavish-axi`).
 
 `install.sh` also sets up cross-machine auto-sync (see below) so every machine
 keeps the newest config and pushes its own edits automatically.

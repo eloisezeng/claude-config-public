@@ -577,9 +577,9 @@ grep -rl 'scope: global' claude claude1 | sort
 ```
 For each file, add a row to `memories/global/MIGRATION-MANIFEST.md` with: source path, proposed destination slug, decision (`move` / `merge-into:<slug>` / `downgrade-to-local`), original `MEMORY.md` pointer line, origin session IDs, `shasum` of the body. Use the known dedup clusters from the spec:
 - `prefer-playwright-e2e-convergence` + `execution-verification-prefs` → merge into `execution-verification-prefs`.
-- `use-your-review-tool-for-visualization` + `visualize-means-your-review-tool` + `visualize-in-browser` → merge into `visualize-in-browser`.
+- `use-lavish-for-visualization` + `visualize-means-lavish` + `visualize-in-browser` → merge into `visualize-in-browser`.
 - `notify-only-on-convergence-or-blocked` + `notify-on-response` → merge into `notify-on-response`.
-- Tool-internal candidates (e.g. `your-review-tool-fork-sse-hardening`, `your-review-tool-threading-and-collapsibles`) → evaluate with the promotion test; `downgrade-to-local` if not universal.
+- Tool-internal candidates (e.g. `lavish-fork-sse-hardening`, `lavish-axi-threading-and-collapsibles`) → evaluate with the promotion test; `downgrade-to-local` if not universal.
 
 - [ ] **Step 2: CHECKPOINT — present the manifest for approval**
 

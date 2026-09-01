@@ -13,7 +13,7 @@
 - [background-subagent-parallel-workflow](background-subagent-parallel-workflow.md) — fire off messages; have the heavier ones answered by background subagents in parallel
 - [budget-reservations-cover-call-multiplicity](budget-reservations-cover-call-multiplicity.md) — a reservation must cover the metered path's REAL call multiplicity (retries/resumes/fan-out), and artifact-counted quotas need an in-process reservation released only on the artifact's commit
 - [conflicted-pr-gets-no-ci](conflicted-pr-gets-no-ci.md) — a PR conflicting with its base runs NO CI and reports "no checks configured"; check mergeable_state before blaming the workflow, and re-check before reporting
-- [brainstorm-in-your-review-tool](brainstorm-in-your-review-tool.md) — conduct brainstorming/design Q&A through your-review-tool, not terminal AskUserQuestion
+- [brainstorm-in-lavish](brainstorm-in-lavish.md) — conduct brainstorming/design Q&A through lavish-axi, not terminal AskUserQuestion
 - [check-memory-before-asking-user](check-memory-before-asking-user.md) — search existing memory before asking you to re-supply context
 - [claude1-second-profile](claude1-second-profile.md) — how the `claude1` command launches a second Claude Code profile separate from default `claude`
 - [cloud-synced-edits-bypass-dev-server-watcher](cloud-synced-edits-bypass-dev-server-watcher.md) — in a OneDrive/Dropbox folder the dev server misses sync-delivered edits and serves a stale bundle; looks like a code regression, fix is a server restart
@@ -28,12 +28,12 @@
 - [grill-defer-domain-judgment](grill-defer-domain-judgment.md) — defer to Claude's judgment on niche industry-convention details; reserve questions for product/scope decisions
 - [instagram-oauth-professional-only-no-email](instagram-oauth-professional-only-no-email.md) — Instagram OAuth: professional accounts only, never returns an email — offer "connect", not "sign in"
 - [latex-math-in-docs](latex-math-in-docs.md) — write math as LaTeX `$...$` in markdown docs and matplotlib mathtext in figures; never bare unicode/ASCII
-- [your-review-tool-artifact-prefs](your-review-tool-artifact-prefs.md) — how to build your-review-tool review artifacts — interactive radios, working submit, notifications
-- [your-review-tool-fork](your-review-tool-fork.md) — your-review-tool must be your fork (~/Coding/your-review-tool-fork, npm-linked), not upstream
-- [your-review-tool-threading-and-collapsibles](your-review-tool-threading-and-collapsibles.md) — your-review-tool gotchas — thread replies via `stream --reply-to`; avoid `<details>` collapsibles
-- [your-review-tool-no-redisplay-answered-questions](your-review-tool-no-redisplay-answered-questions.md) — in your-review-tool surfaces, never re-display a question the user already answered
+- [lavish-artifact-prefs](lavish-artifact-prefs.md) — how to build lavish-axi review artifacts — interactive radios, working submit, notifications
+- [lavish-axi-fork](lavish-axi-fork.md) — lavish-axi must be your fork (~/Coding/lavish-axi-fork, npm-linked), not upstream
+- [lavish-axi-threading-and-collapsibles](lavish-axi-threading-and-collapsibles.md) — lavish-axi gotchas — thread replies via `stream --reply-to`; avoid `<details>` collapsibles
+- [lavish-no-redisplay-answered-questions](lavish-no-redisplay-answered-questions.md) — in lavish surfaces, never re-display a question the user already answered
 - [mark-fixture-data](mark-fixture-data.md) — mark placeholder/stub data shaped like real data with a FIXTURE marker
-- [mermaid-id-collision-your-review-tool](mermaid-id-collision-your-review-tool.md) — Mermaid v11 startOnLoad same-ms SVG ids collide in multi-diagram artifacts; render each manually with unique ids
+- [mermaid-id-collision-lavish](mermaid-id-collision-lavish.md) — Mermaid v11 startOnLoad same-ms SVG ids collide in multi-diagram artifacts; render each manually with unique ids
 - [parse-xlsx-with-claude-for-excel](parse-xlsx-with-claude-for-excel.md) — use the Claude for Excel add-in to parse .xlsx files, not stdlib XML
 - [playwright-forcedcolors-fixture-noops](playwright-forcedcolors-fixture-noops.md) — `test.use({ forcedColors })` silently no-ops; use page.emulateMedia, assert the mode is ON as line one
 - [playwright-pins-page-visibility](playwright-pins-page-visibility.md) — Playwright pins visibilityState to "visible" on every driven page; hidden-tab behavior is untestable in-harness — emulate the regime in unit tests
@@ -43,7 +43,7 @@
 - [user-profile-template](user-profile-template.md) — template for a `type: user` memory: role, prior work an agent may assume, how you delegate and correct, environment facts that change the plan
 - [detached-work-dies-with-its-allocation](detached-work-dies-with-its-allocation.md) — under a cgroup-scoped scheduler, ending an allocation kills its whole cgroup and setsid/nohup do not escape; long-lived processes belong on the submit host, long work in a batch job
 - [verify-the-bottleneck-before-building-the-fix](verify-the-bottleneck-before-building-the-fix.md) — before building a throughput fix, measure which stage is actually binding; a plausible first diagnosis is routinely the wrong stage
-- [visualize-in-browser](visualize-in-browser.md) — when you say "visualize" for web/UI work, deliver via your-review-tool (not a plain browser tab / superpowers companion); scientific figures go to matplotlib, not your-review-tool
+- [visualize-in-browser](visualize-in-browser.md) — when you say "visualize" for web/UI work, deliver via lavish-axi (not a plain browser tab / superpowers companion); scientific figures go to matplotlib, not lavish-axi
 - [namespace-run-artifacts-per-arc](namespace-run-artifacts-per-arc.md) — parallel arcs share one scratchpad; generic run-log names clobber silently and the round then proves nothing
 - [mocks-blind-to-the-mechanism-they-replace](mocks-blind-to-the-mechanism-they-replace.md) — a mock cannot see behaviour the mocked thing itself implements (redirects, retries); enforce at a choke point, not per call site
 - [context-mode WebFetch blocks artifact reads](context-mode-webfetch-blocks-artifact-reads.md) — the interceptor redirects to unauthenticated fetchers that cannot read claude.ai artifacts; verify base via git-object provenance, then force-publish deliberately

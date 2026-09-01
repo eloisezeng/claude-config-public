@@ -58,7 +58,7 @@ These are always-on. The one-line rule lives here; the why/how is in the linked 
 - A result that beats the pre-registered expectation by a wide margin is a DEFECT SIGNAL first: before reporting it, prove both sides of the comparison are the same statistic from the same artifact (print each side's metric definition; read both from one result object), never a summary-file number against a per-run one — `[[surprising-result-check-metric-identity]]`.
 - Before nudging or re-dispatching a seat, READ its `detail` — `failed` is two facts (cap-killed is revivable, retired-by-decision never is) and a SendMessage wave wakes a session regardless of `state.json`, handing it stale live instructions; preserve the prior `detail`, and attribute a revival by ORDERING rather than by re-reading state — `[[a-revival-wave-must-read-detail-before-nudging]]`.
 - Continue/revive/re-dispatch every session on **Fable** (`claude-fable-5[1m]`) unless Fable's own limit is spent — established by a THROWAWAY PROBE dispatch that failed turn 1 just now, never inferred from corpses in a window — or it died on the turn-1 safeguard — `opus[1m]` is the fallback, not the default; it is already handoff.sh's default, so do not hand-pass a tier to defeat it — `[[continued-sessions-default-to-fable]]`.
-- Model-route your-review-tool annotation replies by complexity (Haiku/Sonnet/Opus), label the model used, and honor your override — `[[your-review-tool-triage-model-routing]]`.
+- Model-route Lavish annotation replies by complexity (Haiku/Sonnet/Opus), label the model used, and honor your override — `[[lavish-triage-model-routing]]`.
 - When building any data-driven UI, apply the product defaults and verify on the live page — `[[data-product-ui-defaults]]`.
 - After a batch of corrections, codify the recurring classes as durable rules without being asked — `[[extract-learnings-proactively]]`.
 - Never conclude a step succeeded from a status flag, log line, or assumption — verify against the artifact it should have produced — `[[verify-claims-against-artifacts]]`.
@@ -115,6 +115,6 @@ These are always-on. The one-line rule lives here; the why/how is in the linked 
 
 ## Tools
 
-- For GitHub operations, use `gh`.
-- For browser automation, use `chrome-devtools`.
-- For human review, use `your-review-tool` — this must be your fork (the updated version), at `~/Coding/your-review-tool-fork` (remote `your-org/your-review-tool`, forked from `kunchenguid/your-review-tool`). The global `your-review-tool` command is `npm link`'d to the fork, so the command name is unchanged; just confirm it resolves to `~/Coding/your-review-tool-fork` rather than the upstream package.
+- For GitHub operations, use `gh-axi`.
+- For browser automation, use `chrome-devtools-axi`.
+- For human review, use `lavish-axi` — this must be your fork (the updated version), at `~/Coding/lavish-axi-fork` (remote `eloise-idealab/lavish-axi`, forked from `kunchenguid/lavish-axi`). The global `lavish-axi` command is `npm link`'d to the fork, so the command name is unchanged; just confirm it resolves to `~/Coding/lavish-axi-fork` rather than the upstream package. Install or repair that link with `bin/install-lavish-fork.sh` (clone + build + `npm link`, idempotent).
