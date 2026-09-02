@@ -36,6 +36,17 @@ compound line ending in a formatting command — which is where the status was l
 cannot fail the way the real measurement failed is not a control for it; it is a second, unrelated
 measurement that happens to be green.
 
+**A second shape, measured the same day, worth naming separately: a tool that resolves what it
+inspects from a FIXED path cannot be controlled by copying the tool.** `fleet doctor` reports whether
+each of its dependencies is installed, reading them from `BIN="$HOME/.claude/bin"` — a hardcoded
+absolute path, not its own location. My control copied `bin/` into a sandbox, deleted one dependency
+from the copy, and ran the copy: doctor read the *real* install, found the file present, and printed
+`ok`. The control looked exactly right — break it, run it, expect MISSING — and could not possibly
+have failed, because the thing it broke was not the thing under inspection. The fix was to build a
+whole fake install under a sandbox `$HOME` and run with `HOME=` pointed at it. **Ask what the tool
+DEREFERENCES, not what you executed** — and note this control was only diagnosable because it FAILED
+loudly; the same mistake in a passing direction is a green test of nothing.
+
 So: before trusting a control, state the exact shape of the thing that failed and check the control
 has that shape. And when a striking result rests on one probe you wrote yourself, re-read the probe's
 own full output before writing it up — the refutation is often already in it.

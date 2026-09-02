@@ -21,6 +21,8 @@ The loop's cost was not the number of stages — it was that rounds 3–6 all la
    The only real serialisation is "never edit tracked files while a lens or mutation run reads them".
 3. **Reuse the round mechanics.**
    `~/dotfiles/claude/skills/codex-converge/mutate.py` is the vendored mutation harness (mutants JSON → `KILLED`/`SURVIVED`/`MISARMED` per expectation, armed on a copy, `--census 'REGEX=N'` completeness guard, sha256 asserts on tracked files; use a session-unique copy dir).
+   Give every `expect: killed` mutant a `"test"` key naming the test that must kill it: it becomes vitest's `-t` filter, so a 9-mutant round over a 52-test file runs 9 tests instead of 468, and it is the STRONGER assertion because it pins which test does the killing.
+   A zero-match filter is reported MISARMED, never SURVIVED — vitest exits 0 when `-t` matches nothing, so the unguarded version turns every `killed` expectation green.
    One `make-prompts.py` per arc, written at round 1 and parameterised by round/HEAD/previous results — hand-editing three lens prompts per round costs wall-clock comparable to a lens run.
 4. **Start the human's clock at first green.**
    A human-gated ship step (an inbox card whose approval releases N of the affected items) surfaced at first green runs in parallel with the loop; surfaced in the final report it runs after it.
