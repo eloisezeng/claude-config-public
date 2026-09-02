@@ -45,16 +45,23 @@ its "state changed" arm on an unchanged 500. Emit machine-bound values with
 `process.stdout.write(String(v))` (raw strings are never colourised), filter at the capture site
 (`| tr -cd '0-9'`), and control-test BOTH arms byte-exact (`od -c`) before arming.
 
-**STILL UNFIXED at the class as of 2026-08-25T02:1xZ, and the obvious fix is a trap.** Verified at the
-capture site: `hooks/handoff.sh:2660` runs `_short_backgrounded` (awk `$NF` over colourised stdout)
-**first**, and `_short_hexid` — the already-clean `\b[0-9a-f]{8}\b` regex — is reached only when the
-first returns EMPTY. The colourised line is never empty, so the poisoned value always wins; reordering
-those two lines is the whole fix. But `$HOME/dotfiles/claude` is a clean checkout of
-`claude-config` **on `main`** *and it auto-commits* (`auto: sync config`, ~20-minute cadence). So an
-unattended seat that "just edits the hook" has committed to `main` of a repo every session reads,
-without ever running `git commit` — the forbidden action arriving through a side door
-(`[[never-arm-a-fault-in-an-auto-syncing-tree]]`). Fix it on a branch with a test alongside AB2/AB3/AB4
-in `tests/handoff.test.sh`; do not hand it to an unattended seat.
+**FIXED 2026-08-25 17:38 in `0480d84`** — both capture sites now strip control bytes before parsing:
+`_strip_csi()` sits in front of BOTH `_short_backgrounded` (awk `$NF`) and `_short_hexid`
+(`\b[0-9a-f]{8}\b`), so the ordering trap this memory used to describe — the colourised line never
+being empty, so the poisoned value always beat the clean fallback — no longer exists. It is not
+reordering; it is stripping at the capture site, which is what the rule above prescribes.
+Pinned by the call census in `tests/handoff.test.sh` (`_strip_csi` is listed in the closure).
+
+Dated by ORDERING, not by a re-read: the fix commit is 2026-08-25, and this file's own last edit was
+2026-08-30 — five days LATER, still carrying "STILL UNFIXED". A stale "unfixed" note is a standing
+invitation to redo finished work, which is why it is corrected in place rather than appended to
+(`[[re-read-cannot-tell-wrong-from-acted-on]]`).
+
+What survives as standing practice: the repo still auto-commits to `main` (`auto: sync config`), so an
+unattended seat that "just edits the hook" has pushed to a repo every session reads without ever
+running `git commit` — fix things here on a branch with a test alongside AB2/AB3/AB4 in
+`tests/handoff.test.sh` (`[[never-arm-a-fault-in-an-auto-syncing-tree]]`). And `od -c` on a value you
+are about to match byte-exact stays worth doing on its own merits, not as a workaround for this bug.
 
 Related: [[absence-needs-a-probe-that-could-see-presence]] — the script's own comment cites that rule
 at the very branch this poisoning defeats from underneath; [[an-armed-watcher-holds-its-boot-config]];

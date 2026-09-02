@@ -149,12 +149,39 @@ assert_eq "$(grep '^ExecStart=' "$unit")" \
 # would make the quote characters part of the watched path.
 g4path='re po%%x&y<z>"q\w'
 g4root="$tmp/g4/home/$g4path/claude"
-# The COMPLETE five-line set, exactly. `assert_contains` accepted a wrong
-# filename (`CLAUDE.md.bak` contains `CLAUDE.md`), a missing line and an extra
-# one -- and a watcher pointed at the backup file is invisible until syncs stop.
-g4want="$(printf 'PathModified=%s/CLAUDE.md\nPathModified=%s/settings.json\nPathModified=%s/settings.linux.json\nPathModified=%s/skills\nPathModified=%s/memories' \
-  "$g4root" "$g4root" "$g4root" "$g4root" "$g4root")"
+# The COMPLETE set, exactly, in emission order. `assert_contains` accepted a
+# wrong filename (`CLAUDE.md.bak` contains `CLAUDE.md`), a missing line and an
+# extra one -- and a watcher pointed at the backup file is invisible until syncs
+# stop. Written out by hand rather than recomputed from install.sh's WATCH_ITEMS:
+# a fixture that reads the array under test agrees with any edit to it.
+g4items='CLAUDE.md AGENTS.md README.md .gitignore
+settings.json settings.linux.json settings.windows.json
+install.sh sync.sh sync.ps1 watch.ps1 sync-memories.sh
+inject-global-memory.sh inject-global-memory.mjs inject-ops-lanes.sh
+bin docs hooks memories plugins skills tests'
+g4want=""
+for g4i in $g4items; do g4want="$g4want${g4want:+
+}PathModified=$g4root/$g4i"; done
 assert_eq "$(grep '^PathModified=' "$pathunit")" "$g4want" G4-pathmodified
+# ...and the macOS watcher watches the SAME set. Two platforms, one array: the
+# whole point of WATCH_ITEMS is that they cannot drift, so assert it rather than
+# trusting that they were edited together.
+# (deferred until $plist exists, below)
+
+# G4b. The set is DERIVED, not curated: "every tracked top-level entry except
+# .git". Asserted against the real repo in BOTH directions, because each
+# direction catches a different failure and neither catches the other. A missing
+# entry is a file whose edits fire no watcher and sit unbacked (measured
+# 2026-09-01: 105 commits over four days, because the list covered 5 of 22).
+# An extra entry is a watch on something that does not exist -- which is what a
+# typo or a stale name looks like, and it is silent.
+g4real="$(cd "$REPO" && git ls-files 2>/dev/null | sed 's|/.*||' | sort -u)"
+if [ -n "$g4real" ]; then
+  g4have="$(printf '%s\n' $g4items | sort -u)"
+  assert_eq "$g4have" "$g4real" G4b-watchset-matches-repo
+else
+  echo "SKIP[G4b]: $REPO is not a git checkout, cannot derive the tracked top-level set"
+fi
 # ...and the macOS branch, whose grammar is XML.
 shim_bin "$tmp/g4/bin-mac" Darwin
 run_install "$tmp/g4/home/$g4dir/claude" "$tmp/g4/home" "$tmp/g4/bin-mac" "$tmp/g4/home/.claude"
@@ -164,6 +191,25 @@ plist="$tmp/g4/home/Library/LaunchAgents/com.your-org.claude-config-autopush.pli
 # One positive assertion carrying all three escapes, so deleting ANY of them
 # fails it; `"` and `\` are not XML-reserved and must survive verbatim.
 assert_contains 're po%x&amp;y&lt;z&gt;"q\w/claude/sync.sh' "$(cat "$plist")" G4-xml
+# Two platforms, ONE array. Compare the plist's watched basenames against the
+# same hand-written set the systemd half was checked against, so a change that
+# widens one watcher and not the other is red.
+# ProgramArguments' own `<string>.../claude/sync.sh</string>` matches this too;
+# `sync.sh` is a legitimate member of the watch set, so `sort -u` collapses the
+# duplicate rather than the line being filtered out. The log paths sit under
+# $HOME/Library/Logs and contain no `/claude/`, so they do not match.
+g4mac="$(sed -n 's|^ *<string>.*/claude/\([^/<]*\)</string>$|\1|p' "$plist" | sort -u)"
+assert_eq "$g4mac" "$(printf '%s\n' $g4items | sort -u)" G4-mac-watchset
+# The backstop, asserted as an artifact fact rather than trusted. A directory
+# WatchPath does NOT fire on an in-place edit of a file already inside it, so
+# events alone lose changes silently; StartInterval is the only thing bounding
+# how long a local change can sit unbacked. Deleting it leaves every other
+# assertion here green, which is exactly why it needs its own.
+assert_contains '<key>StartInterval</key>' "$(cat "$plist")" G4-backstop
+if command -v plutil >/dev/null 2>&1; then
+  g4int="$(plutil -extract StartInterval raw -o - "$plist" 2>/dev/null)"
+  assert_eq "$g4int" "900" G4-backstop-seconds
+fi
 # ...plus the raw forms, each spelled so it can only match its own escape being
 # dropped: `y<z` appears if `<` was left bare even when `>` was escaped, and
 # `z>"` appears if `>` was left bare even when `<` was escaped.

@@ -11,7 +11,9 @@
 
 set -uo pipefail
 
-RUNNER="$HOME/dotfiles/claude/skills/codex-converge/run-codex.sh"
+# Derived, not hardcoded: this skill lives beside codex-converge in whatever checkout it was
+# installed from ($HOME/dotfiles/claude on macOS, $HOME/claude-config on Linux).
+RUNNER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../codex-converge" && pwd)/run-codex.sh"
 TIER=luna
 WORKDIR="$PWD"
 OUTDIR="${CLAUDE_JOB_DIR:-${TMPDIR:-/tmp}}/tmp"
@@ -74,7 +76,9 @@ FRAME
 } > "$PROMPT" || die "cannot write prompt to $PROMPT"
 
 # Both the tier AND the effort, always: profile defaults are per-machine and luna's is `low`.
-"$RUNNER" "$PROMPT" "$VERDICT" "$LOG" "$WORKDIR" \
+# --policy-version is REQUIRED by run-codex.sh since 2026-08-30; without it the launcher
+# refuses the call as a stale-session launch (measured 2026-09-01, rc=2).
+"$RUNNER" --policy-version 2026-08-30-regression-v1 "$PROMPT" "$VERDICT" "$LOG" "$WORKDIR" \
   -p "$TIER" -c model_reasoning_effort="high"
 rc=$?
 

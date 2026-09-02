@@ -8,7 +8,8 @@ metadata:
 
 The user, 2026-08-28: "whenever handing off to new sessions, use auto mode, ideally bypass permissions" — then, asked whether to make it mechanical: "flip handoff.sh's default".
 
-**`handoff.sh` now supplies it:** `PMODE="bypassPermissions"` (`hooks/handoff.sh:2656`), forwarded to `claude --bg` at `:2904`.
+**`handoff.sh` now supplies it:** `PMODE="bypassPermissions"` is the default in `hooks/handoff.sh`'s option-parse block, forwarded to `claude --bg` where the argv is assembled.
+Cited by symbol rather than line number: measured 2026-09-01, the line numbers this memory used to carry (2656 / 2904) had drifted to 2860 / 2991 and pointed at unrelated code.
 Pinned by `tests/handoff.test.sh` AB5 (no flag → the dispatch carries `--permission-mode bypassPermissions`) and AB6 (an explicit flag still wins, with an `assert_missing` control that fails if the default is APPENDED alongside the explicit one rather than overwritten — argv would accept that silently and `claude` would resolve whichever it read last).
 
 **Why the old `PMODE=""` was not a neutral default.**

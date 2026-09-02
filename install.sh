@@ -85,7 +85,7 @@ PRIMARY="${1:-$HOME/.claude}"
 MIRROR="${2:-}"
 
 # Files/dirs to link from the repo into the primary config dir.
-ITEMS=(CLAUDE.md AGENTS.md bin skills/email-drafter skills/codex-converge skills/no-mistakes skills/scientific-figures)
+ITEMS=(CLAUDE.md AGENTS.md bin skills/email-drafter skills/codex-converge skills/codex-opinion skills/no-mistakes skills/scientific-figures)
 # `bin` holds the fleet tooling (`fleet` and the helpers it execs). It is linked rather
 # than copied because `~/.local/bin/fleet` is itself a symlink into it, so an edit made
 # through either path lands in the repo and is version-controlled like everything else.
@@ -214,13 +214,16 @@ shq_in_dq() { printf '%s' "$1" | sed -e 's/[\\"`$]/\\&/g'; }
 # "it is already escaped over there" is never an answer. Enumerated with counts,
 # because whether every site got encoded is not a question you can answer by
 # looking at any one of them:
-#   * launchd plist (XML)  — 9 interpolations: 1 Label, 1 ProgramArguments script
-#     path, 5 WatchPaths, 2 log paths.  Encoder: xml_text.
+#   * launchd plist (XML)  — 26 interpolations: 1 Label, 1 ProgramArguments
+#     script path, 22 WatchPaths, 2 log paths.  Encoder: xml_text.  The 22 is
+#     ${#WATCH_ITEMS[@]} and both watchers loop over that ONE array, so this
+#     count moves when the array does — see the WATCH_ITEMS comment below.
 #   * systemd .service     — 1 interpolation: ExecStart.  Encoder: systemd_arg.
 #     Left bare, a repo at `/repo space/` generates `ExecStart=/repo space/sync.sh`
 #     whose executable token is `/repo`; the unit enables successfully and every
 #     sync then fails, which is the worst shape a bug can have.
-#   * systemd .path        — 5 interpolations: PathModified.  Encoder: systemd_path.
+#   * systemd .path        — 22 interpolations: PathModified (same WATCH_ITEMS
+#     array as the plist above).  Encoder: systemd_path.
 #     These take a bare path and are NOT unquoted, so quoting them would make the
 #     quote characters part of the watched path; only `%` needs doubling.
 #   * settings.json hook   — 1 interpolation, encoded at its own choke point
@@ -520,11 +523,36 @@ if [[ -d "$REPO_DIR/memories" ]]; then
   restore_memories "$REPO_DIR/memories"
 fi
 
+# --- What the auto-sync watchers watch ----------------------------------------
+# ONE array, two encoders (launchd XML below, systemd further down), so the two
+# platforms cannot drift apart. The rule is "every top-level entry except .git",
+# NOT a hand-picked shortlist. The old shortlist was CLAUDE.md, settings.json,
+# settings.linux.json, skills and memories — 5 of this repo's 22 entries — so an
+# edit to sync.sh, hooks/, bin/, docs/ or plugins/ fired nothing at all and sat
+# unbacked until something happened to touch one of the five. Measured 2026-09-01:
+# 105 commits, four days, never pushed.
+# The repo ROOT is still deliberately not watched: it contains .git, and the
+# watcher's own commit writes would re-trigger it in a loop.
+# Adding a top-level file? Add it here. tests/install-guards.test.sh G4 asserts
+# this set against the real repo listing in both directions, so a forgotten entry
+# is a red test, not a silent gap.
+WATCH_ITEMS=(
+  CLAUDE.md AGENTS.md README.md .gitignore
+  settings.json settings.linux.json settings.windows.json
+  install.sh sync.sh sync.ps1 watch.ps1 sync-memories.sh
+  inject-global-memory.sh inject-global-memory.mjs inject-ops-lanes.sh
+  bin docs hooks memories plugins skills tests
+)
+
 # --- macOS: auto-sync agent (launchd) ---
 # Runs sync.sh (commit + pull-if-remote-advanced + push) the instant a tracked
 # file changes (WatchPaths) - so your own edits push immediately and also pull
-# anything new. There is NO periodic poll: remote changes are pulled by the async
-# SessionStart hook in settings.json (and whenever a local edit fires the sync).
+# anything new, PLUS a 15-minute StartInterval backstop. The backstop is not
+# belt-and-braces: macOS WatchPaths on a DIRECTORY fires when an entry is added
+# or removed and NOT when an existing file is edited in place, which is what
+# most edits are. Without the interval, an in-place edit to a watched directory
+# is invisible until something else fires the agent. The interval bounds how
+# long any local change can sit unbacked at 15 minutes.
 # Skipped on non-macOS. Disable with: SKIP_WATCHER=1 ./install.sh
 if [[ "$(uname)" == "Darwin" && "${SKIP_WATCHER:-0}" != "1" ]]; then
   LABEL="com.your-org.claude-config-autopush"
@@ -535,6 +563,11 @@ if [[ "$(uname)" == "Darwin" && "${SKIP_WATCHER:-0}" != "1" ]]; then
   # runs while the install reports success. $PLIST itself is a filesystem path
   # and stays unencoded.
   L_XML="$(xml_text "$LABEL")"; R_XML="$(xml_text "$REPO_DIR")"; H_XML="$(xml_text "$HOME")"
+  WATCH_XML=""
+  for _w in "${WATCH_ITEMS[@]}"; do
+    WATCH_XML+="        <string>$R_XML/$(xml_text "$_w")</string>"$'\n'
+  done
+  WATCH_XML="${WATCH_XML%$'\n'}"
   cat > "$PLIST" <<PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -547,19 +580,21 @@ if [[ "$(uname)" == "Darwin" && "${SKIP_WATCHER:-0}" != "1" ]]; then
         <string>/bin/bash</string>
         <string>$R_XML/sync.sh</string>
     </array>
-    <!-- Watch the live-edited content only. NOT the repo root: it contains
-         .git, and recursive fsevents would make git's own commit writes
-         re-trigger the watcher in a loop. skills/ is safe (no .git inside). -->
+    <!-- Every top-level entry except .git (see WATCH_ITEMS above). NOT the
+         repo root itself: it contains .git, and recursive fsevents would make
+         git's own commit writes re-trigger the watcher in a loop. -->
     <key>WatchPaths</key>
     <array>
-        <string>$R_XML/CLAUDE.md</string>
-        <string>$R_XML/settings.json</string>
-        <string>$R_XML/settings.linux.json</string>
-        <string>$R_XML/skills</string>
-        <string>$R_XML/memories</string>
+$WATCH_XML
     </array>
     <key>ThrottleInterval</key>
     <integer>5</integer>
+    <!-- The backstop. A directory WatchPath does not fire on an in-place edit
+         of a file already inside it, so events alone lose changes silently;
+         this bounds unbacked local work at 15 minutes. sync.sh is a no-op when
+         the tree is clean and the remote has not moved. -->
+    <key>StartInterval</key>
+    <integer>900</integer>
     <key>StandardOutPath</key>
     <string>$H_XML/Library/Logs/claude-config-autopush.log</string>
     <key>StandardErrorPath</key>
@@ -569,17 +604,19 @@ if [[ "$(uname)" == "Darwin" && "${SKIP_WATCHER:-0}" != "1" ]]; then
 PLISTEOF
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
-  echo "  auto-sync agent loaded ($LABEL): syncs on file change (no poll)"
+  echo "  auto-sync agent loaded ($LABEL): ${#WATCH_ITEMS[@]} paths watched, plus a 15-min backstop"
 fi
 
-# --- Linux: auto-sync watcher (systemd user .path unit) ---
-# An event watch (inotify, via a systemd .path unit - no inotify-tools needed),
-# NOT a timer: sync.sh fires the instant a tracked file changes, so your edits
-# push immediately and also pull anything new. There is NO periodic poll; remote
-# changes are pulled by the async SessionStart hook in settings.linux.json (and
-# whenever a local edit fires the sync). Directory watches aren't recursive, so a
-# deeply-nested edit made entirely outside Claude is caught at the next
-# SessionStart rather than instantly. Disable with: SKIP_WATCHER=1 ./install.sh
+# --- Linux: auto-sync watcher (systemd user .path unit + backstop timer) ---
+# An event watch (inotify, via a systemd .path unit - no inotify-tools needed)
+# so sync.sh fires the instant a tracked file changes, PLUS a 15-minute timer.
+# The timer is back deliberately: an earlier install removed it as "polling",
+# and the macOS side then lost 105 commits over four days because an event
+# watch only sees what it can see. Directory watches aren't recursive, so a
+# deeply-nested edit fires nothing; the timer is what bounds that at 15 minutes
+# instead of "until something else happens". Both units are cheap — sync.sh
+# exits immediately on a clean tree with an unmoved remote.
+# Disable with: SKIP_WATCHER=1 ./install.sh
 if [[ "$(uname)" == "Linux" && "${SKIP_WATCHER:-0}" != "1" ]]; then
   UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
   mkdir -p "$UNIT_DIR"
@@ -590,6 +627,11 @@ if [[ "$(uname)" == "Linux" && "${SKIP_WATCHER:-0}" != "1" ]]; then
   # specifier-doubling only.
   EXEC_ARG="$(systemd_arg "$REPO_DIR/sync.sh")"
   R_UNIT="$(systemd_path "$REPO_DIR")"
+  PATH_MOD=""
+  for _w in "${WATCH_ITEMS[@]}"; do
+    PATH_MOD+="PathModified=$R_UNIT/$(systemd_path "$_w")"$'\n'
+  done
+  PATH_MOD="${PATH_MOD%$'\n'}"
   cat > "$UNIT_DIR/claude-config-sync.service" <<UNITEOF
 [Unit]
 Description=Sync Claude config repo (commit, pull if remote advanced, push)
@@ -603,24 +645,37 @@ UNITEOF
 Description=Watch Claude config files and sync on change
 
 [Path]
-PathModified=$R_UNIT/CLAUDE.md
-PathModified=$R_UNIT/settings.json
-PathModified=$R_UNIT/settings.linux.json
-PathModified=$R_UNIT/skills
-PathModified=$R_UNIT/memories
+$PATH_MOD
 
 [Install]
 WantedBy=default.target
 UNITEOF
+  cat > "$UNIT_DIR/claude-config-sync.timer" <<UNITEOF
+[Unit]
+Description=Backstop for the Claude config sync (an event watch only sees what it can see)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=claude-config-sync.service
+
+[Install]
+WantedBy=timers.target
+UNITEOF
   if command -v systemctl >/dev/null 2>&1; then
-    # Migrate off the old polling timer if a previous install left one behind.
-    systemctl --user disable --now claude-config-sync.timer 2>/dev/null || true
-    rm -f "$UNIT_DIR/claude-config-sync.timer"
     systemctl --user daemon-reload 2>/dev/null || true
     if systemctl --user enable --now claude-config-sync.path 2>/dev/null; then
-      echo "  systemd watch loaded (claude-config-sync.path): syncs on file change (no poll)"
+      echo "  systemd watch loaded (claude-config-sync.path): ${#WATCH_ITEMS[@]} paths watched"
     else
       echo "  (could not enable systemd user .path unit - is the user bus up?)"
+    fi
+    # Persistent=true so a machine that was asleep or logged out at the due
+    # time runs the sync once on the next boot rather than skipping it.
+    if systemctl --user enable --now claude-config-sync.timer 2>/dev/null; then
+      echo "  systemd backstop timer loaded (claude-config-sync.timer): every 15 min"
+    else
+      echo "  (could not enable systemd user .timer unit - is the user bus up?)"
     fi
     # Keep the watch running across logout / when WSL has no active login.
     if command -v loginctl >/dev/null 2>&1; then

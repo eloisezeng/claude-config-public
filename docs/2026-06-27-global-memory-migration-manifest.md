@@ -1,3 +1,8 @@
+<!-- Moved out of memories/global/ on 2026-09-01: this is a historical migration RECORD, not a
+     memory. It has no memory frontmatter, so neither load path (the MEMORY.md index, a CLAUDE.md
+     [[link]]) could ever reach it, and sync-memories.sh's warn_unindexed had been logging it as
+     UNINDEXED ever since. -->
+
 # Global memory migration manifest (pre-approval snapshot)
 
 Date: 2026-06-27. 31 `scope: global` memories across both config dirs / 4 projects → flat `memories/global/`.

@@ -78,7 +78,17 @@ case "${1:-}" in
     echo "  node         : ${NODE:-*** NOT FOUND ***} $([ -n "$NODE" ] && "$NODE" -v 2>/dev/null)"
     echo "  claude       : ${CLAUDE:-*** NOT FOUND ***}"
     echo "  trusted dir  : $TRUSTED $([ -d "$TRUSTED" ] && echo '(exists)' || echo '*** MISSING ***')"
-    for f in fleet-watch.mjs fleet-tail.mjs fleet-open.sh; do
+    # DERIVED from what the entrypoints actually import, never hand-maintained. The literal
+    # list this replaces named three files and had ALREADY gone stale: fleet-flags.mjs became a
+    # dependency of both viewers and was never added here, so a partial install printed three
+    # cheerful `ok` lines and then died on a missing import. A doctor that cannot see a missing
+    # dependency is worse than no doctor -- it certifies the broken install.
+    deps="fleet-watch.mjs fleet-tail.mjs fleet-open.sh"
+    for e in fleet-watch.mjs fleet-tail.mjs; do
+      [ -f "$BIN/$e" ] || continue
+      deps="$deps $(sed -n "s|.*from '\\./\\([A-Za-z0-9._-]*\\)'.*|\\1|p" "$BIN/$e")"
+    done
+    for f in $(printf '%s\n' $deps | sort -u); do
       [ -f "$BIN/$f" ] && echo "  $f : ok" || echo "  $f : *** MISSING ***"
     done
     if [ -t 1 ]; then echo "  stdout TTY   : yes"; else echo "  stdout TTY   : NO — 'fleet write' needs a real terminal"; fi

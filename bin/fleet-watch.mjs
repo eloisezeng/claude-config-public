@@ -14,6 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { parseFlags } from './fleet-flags.mjs'
+import { readRange, clip, hhmm, blocks, renderable } from './fleet-common.mjs'
 
 const HOME = os.homedir()
 const JOBS = path.join(HOME, '.claude', 'jobs')
@@ -41,42 +42,6 @@ const R = '\x1b[0m', DIM = '\x1b[2m', B = '\x1b[1m'
 const PALETTE = [36, 32, 33, 35, 34, 91, 92, 93, 95, 96, 94, 31].map((n) => `\x1b[${n}m`)
 const width = () => Math.max(60, process.stdout.columns || 110)
 
-// ONE guarded read of a byte range, for the same two reasons as in fleet-tail.mjs.
-// (1) The transcript belongs to another process. 3 of this machine's 51 working/blocked
-// rows already point at a linkScanPath that is GONE, and every openSync here used to sit
-// outside any try, inside a setInterval callback -- so ONE deleted transcript did not drop
-// ONE session from the view, it terminated the whole fleet-wide viewer. (2) It bounds
-// memory: `Buffer.alloc(size - offset)` let a single appended tool_result decide the
-// footprint of the process whose whole pitch is 35 MB instead of a gigabyte.
-const CHUNK = 64 * 1024
-function readRange(file, from, to) {
-  if (to <= from) return { text: '', end: from }
-  let fd = null
-  try {
-    fd = fs.openSync(file, 'r')
-    const buf = Buffer.alloc(Math.min(CHUNK, to - from))
-    const parts = []
-    let at = from
-    while (at < to) {
-      const want = Math.min(buf.length, to - at)
-      const got = fs.readSync(fd, buf, 0, want, at)
-      if (got <= 0) break
-      parts.push(Buffer.from(buf.subarray(0, got)))
-      at += got
-    }
-    return { text: Buffer.concat(parts).toString('utf8'), end: at }
-  } catch {
-    return null
-  } finally {
-    if (fd !== null) { try { fs.closeSync(fd) } catch {} }
-  }
-}
-
-const clip = (s, n) => {
-  s = String(s ?? '').replace(/\s+/g, ' ').trim()
-  return s.length > n ? s.slice(0, n - 1) + '…' : s
-}
-const hhmm = (ts) => { try { return new Date(ts).toISOString().slice(11, 19) } catch { return '--:--:--' } }
 
 /** @type {Map<string,{color:string,offset:number,carry:string,state:string,tokens:number,name:string,cwd:string,transcript:string}>} */
 const tracked = new Map()
@@ -163,18 +128,6 @@ function toolSummary(name, input) {
   return k.length ? clip(k.join(','), 36) : ''
 }
 
-// The daemon writes a plain user turn as `message.content: "<the prompt>"`, not as an
-// array of blocks, so requiring an array dropped every one: 555 across 163 of this
-// machine's 170 readable transcripts, all of them `type: 'user'`, and they are the
-// dispatch prompts. A fleet view that shows the answers and never the instructions is
-// worse than incomplete -- it invites the wrong conclusion about what a session is doing.
-const blocks = (d) => {
-  const c = d.message?.content
-  if (typeof c === 'string') return c.trim() ? [{ type: 'text', text: c }] : []
-  return Array.isArray(c) ? c : null
-}
-const renderable = (d) =>
-  (d.type === 'assistant' || d.type === 'user') && blocks(d) !== null
 
 function render(short, t, line) {
   let d

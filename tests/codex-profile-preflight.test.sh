@@ -42,10 +42,51 @@ chmod +x "$SANDBOX/bin/codex"
 export PATH="$SANDBOX/bin:$PATH"
 export CODEX_STUB_MARKER="$SANDBOX/codex-was-invoked"
 
+# run-codex.sh refuses any launch that does not acknowledge the CURRENT convergence policy,
+# and it refuses FIRST -- before it looks at -p. From 2026-08-30 until this was fixed
+# (2026-09-01) every case below therefore passed for the wrong reason: `expect_refused`
+# saw exit 2 from the policy gate and reported the profile guard as working, while the
+# profile guard was never reached at all. Read the version out of the script rather than
+# repeating it, so bumping the policy does not redden a test about something else -- the
+# gate itself is pinned once, deliberately, in case 0.
+POLICY="$(sed -n 's/^POLICY_VERSION="\(.*\)"$/\1/p' "$RUN")"
+[ -n "$POLICY" ] || { echo "FAIL: could not read POLICY_VERSION out of $RUN"; exit 1; }
+
 run() {
   rm -f "$CODEX_STUB_MARKER" "$SANDBOX/art/out.json"
-  bash "$RUN" "$SANDBOX/prompt.txt" "$SANDBOX/art/out.json" "$SANDBOX/art/run.log" \
+  bash "$RUN" --policy-version "$POLICY" \
+       "$SANDBOX/prompt.txt" "$SANDBOX/art/out.json" "$SANDBOX/art/run.log" \
        "$SANDBOX/work" "$@" >"$SANDBOX/stdout" 2>"$SANDBOX/stderr"
+}
+
+# The same call with an EXPLICIT acknowledgement, so the two ways the gate can be defeated are
+# pinned separately. Passing "" reproduces "no --policy-version at all"; passing a wrong version
+# reproduces the case the gate actually exists for -- a session that read an OLD policy and is
+# still quoting it. Testing only the empty case leaves `[ "$ACK" != "$POLICY" ]` mutable to
+# `[ -z "$ACK" ]` with the whole suite still green, which is the same vacuity that let the
+# 2026-08-30 breakage hide for two days, one level up.
+run_acked() {
+  local ack="$1"; shift
+  rm -f "$CODEX_STUB_MARKER" "$SANDBOX/art/out.json"
+  if [ -n "$ack" ]; then set -- --policy-version "$ack" \
+       "$SANDBOX/prompt.txt" "$SANDBOX/art/out.json" "$SANDBOX/art/run.log" "$SANDBOX/work" "$@"
+  else set -- "$SANDBOX/prompt.txt" "$SANDBOX/art/out.json" "$SANDBOX/art/run.log" "$SANDBOX/work" "$@"
+  fi
+  bash "$RUN" "$@" >"$SANDBOX/stdout" 2>"$SANDBOX/stderr"
+}
+
+expect_policy_refusal() {
+  local what="$1"; shift
+  run_acked "$@"; local rc=$?
+  [ "$rc" -eq 2 ] \
+    && echo "  ok: $what refused (exit 2)" \
+    || { echo "FAIL: $what expected exit 2, got $rc"; cat "$SANDBOX/stderr"; fail=1; }
+  [ -e "$CODEX_STUB_MARKER" ] \
+    && { echo "FAIL: $what — codex was LAUNCHED anyway"; fail=1; } \
+    || echo "  ok: $what — codex never launched"
+  grep -q "policy" "$SANDBOX/stderr" \
+    && echo "  ok: $what — said why (policy), so it is not confusable with the -p guard" \
+    || { echo "FAIL: $what — refusal did not mention the policy"; cat "$SANDBOX/stderr"; fail=1; }
 }
 
 expect_refused() {
@@ -59,6 +100,12 @@ expect_refused() {
     echo "  ok: $what — codex never launched"
   fi
 }
+
+echo "case 0: a launch that does not acknowledge the current policy is refused, and refused FIRST"
+expect_policy_refusal "unacknowledged launch" "" -p sol
+
+echo "case 0b: a STALE acknowledgement is refused too — the case the gate actually exists for"
+expect_policy_refusal "stale --policy-version" "2026-08-01-some-older-policy" -p sol
 
 echo "case 1: an unknown -p is refused before codex is launched"
 expect_refused "-p nope" -p nope

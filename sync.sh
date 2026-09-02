@@ -87,6 +87,112 @@ fail() {
   exit 1
 }
 
+# A macOS desktop toast is not a channel that reaches an unattended operator: it
+# shows for a few seconds and is gone, and the non-Mac EMAIL fallback below has no
+# Mac equivalent (postfix here is unconfigured, so `mail` would drop it silently --
+# a fake fix). Measured 2026-09-01: this script correctly detected a broken backup
+# and raised 8 toasts across two days while 105 commits sat unbacked, unnoticed.
+#
+# So ALSO write an operational lane. ~/.claude/ops/lanes/*.md is injected into every
+# new Claude session's context by inject-ops-lanes.sh, which means a broken backup is
+# restated to the operator at the start of every session until it is fixed -- a
+# channel that persists instead of one that expires.
+OPS_DIR="${CLAUDE_OPS_DIR:-$HOME/.claude/ops}"
+OPS_LANE="$OPS_DIR/lanes/config-backup-broken.md"
+
+ops_lane_open() {
+  [ -d "$OPS_DIR/lanes" ] || return 0
+  local unbacked
+  unbacked="$(git rev-list --count '@{u}..HEAD' 2>/dev/null || echo '?')"
+  cat > "$OPS_LANE" <<LANE
+---
+lane: config-backup-broken
+status: open
+owner: none
+project: $REPO
+objective: The Claude config auto-push is BROKEN and $unbacked commits are unbacked -- $1
+pointer: $LOG_FILE
+updated: $(date '+%Y-%m-%d')
+---
+Written automatically by sync.sh. This lane closes itself on the next successful push.
+
+The desktop notification for this fires at most once every 6h and does not persist;
+this lane is the channel that does. Diagnose with:
+
+    cd "$REPO" && git push        # see the real error
+    tail -40 "$LOG_FILE"
+
+Do NOT close this lane by hand while the push still fails.
+LANE
+  log "wrote ops lane $OPS_LANE"
+}
+
+# --- credential self-repair -------------------------------------------------
+# 2026-09-01: this repo stopped backing up for four days (105 commits) because
+# the machine-wide keychain entry for github.com belonged to a DIFFERENT GitHub
+# account of the same operator, which has no access here. GitHub answers such a
+# request with "Repository not found" -- byte-identical to a deleted repo.
+#
+# The durable half of that fix cannot live in .git/config: that file is untracked,
+# so it is lost on a re-clone and never reaches a second machine. It lives HERE
+# instead. On an auth failure, ask the `gh` CLI for a token belonging to the
+# account that OWNS the remote; if it has one, wire a repo-local helper that asks
+# gh at call time. No token is ever written to disk, and the machine-wide keychain
+# is left alone.
+#
+# Returns 0 if it changed something and the caller should retry, 1 otherwise.
+credential_self_repair() {
+  local url owner tok
+  url="$(git remote get-url "${1:-origin}" 2>/dev/null)" || return 1
+  case "$url" in
+    https://github.com/*) ;;
+    *) return 1 ;;                      # ssh or a local path: nothing to repair
+  esac
+  owner="${url#https://github.com/}"; owner="${owner%%/*}"
+  [ -n "$owner" ] || return 1
+  command -v gh >/dev/null 2>&1 || { log "credential repair: gh CLI not installed"; return 1; }
+  tok="$(gh auth token --user "$owner" 2>/dev/null)" || tok=""
+  [ -n "$tok" ] || { log "credential repair: gh has no token for account '$owner'"; return 1; }
+  tok=""                                # proved one exists; never keep it around
+
+  # Already wired? Then the credential is not what is wrong -- do not loop.
+  # Has a gh-backed helper already been wired FOR THIS OWNER? A bare grep for
+  # "gh auth token" answers a different question: it is also true of a helper
+  # wired for a DIFFERENT account, which is precisely the case a repair exists to
+  # fix -- so the repair declined to act and logged a message asserting an owner
+  # its own predicate had never checked. Reachable whenever the remote's owner
+  # changes after a previous repair (a `git remote set-url` is the write site).
+  # Match the owner, so the mention is the property.
+  if git config --local --get-all credential.helper 2>/dev/null \
+     | grep -qF -- "gh auth token --user $owner"; then
+    log "credential repair: a gh-backed helper for '$owner' is already wired; the failure is something else"
+    return 1
+  fi
+  # Reset the inherited helper list FIRST. git uses the first helper that answers,
+  # so a stale system keychain entry would shadow this one forever.
+  git config --local --unset-all credential.helper 2>/dev/null || true
+  git config --local --add credential.helper ''
+  # Built by substitution rather than nested printf so the stored value is
+  # readable in .git/config and obviously contains no token.
+  local helper
+  helper='!f(){ [ "$1" = get ] && printf "username=OWNER\npassword=%s\n" "$(gh auth token --user OWNER)"; }; f'
+  git config --local --add credential.helper "${helper//OWNER/$owner}"
+  git config --local --add credential.helper osxkeychain
+  git config --local "credential.https://github.com.username" "$owner"
+  log "credential repair: wired a gh-backed helper for account '$owner'; retrying"
+  return 0
+}
+
+ops_lane_close() {
+  [ -f "$OPS_LANE" ] || return 0
+  # Only ever flips open -> closed; never deletes, so the record survives.
+  if grep -q '^status: open' "$OPS_LANE" 2>/dev/null; then
+    local tmp="$OPS_LANE.tmp.$$"
+    sed 's/^status: open$/status: closed/' "$OPS_LANE" > "$tmp" && mv "$tmp" "$OPS_LANE"
+    log "closed ops lane $OPS_LANE (push succeeded)"
+  fi
+}
+
 # Debounce: editors often write a temp file then rename, firing WatchPaths in a
 # burst. A brief pause lets the dust settle before we read the tree.
 sleep 1
@@ -152,8 +258,23 @@ if ! ls_out="$(git ls-remote "$remote" "refs/heads/$branch" 2>&1)"; then
     *"Repository not found"*|*"Authentication failed"*|*"could not read Username"*|\
     *"Permission denied"*|*"access denied"*|*"Invalid username or password"*|*"403"*)
       log "AUTH/OWNERSHIP FAILURE (not an outage): $(printf '%s' "$ls_out" | head -1)"
+      # Try to fix the credential ourselves before waking anybody up. Only a
+      # SUCCESSFUL retry counts as recovery -- a repair that wires a helper the
+      # remote still refuses must fall through to the alarm, not read as green.
+      auth_recovered=0
+      if credential_self_repair "$remote"; then
+        if ls_retry="$(git ls-remote "$remote" "refs/heads/$branch" 2>&1)"; then
+          log "credential repair SUCCEEDED; backup resumed"
+          ls_out="$ls_retry"; auth_recovered=1
+          ops_lane_close
+        else
+          ls_out="$ls_retry"
+        fi
+      fi
+      if [ "$auth_recovered" = "0" ]; then
       # This fires on every file change, so alarm at most once every 6h --
       # loud enough to be seen, not so loud it trains her to ignore it.
+      ops_lane_open "$(printf '%s' "$ls_out" | head -1)"
       stamp="${TMPDIR:-/tmp}/claude-config-sync-authfail.stamp"
       last=0; now="$(date +%s)"
       [ -e "$stamp" ] && last="$(stat -f %m "$stamp" 2>/dev/null || stat -c %Y "$stamp" 2>/dev/null || echo 0)"
@@ -162,12 +283,17 @@ if ! ls_out="$(git ls-remote "$remote" "refs/heads/$branch" 2>&1)"; then
         fail "config backup BROKEN: $remote refuses this credential. Not an outage -- $(git rev-list --count '@{u}..HEAD' 2>/dev/null || echo '?') commits unbacked." "$ls_out"
       fi
       echo "sync.sh: config backup broken (auth/ownership); see $LOG_FILE" >&2
-      exit 1 ;;
+      exit 1
+      fi ;;
   esac
+  if [ "${auth_recovered:-0}" = "1" ]; then
+    remote_sha="$(printf '%s' "$ls_out" | awk 'NR==1{print $1}')"
+  else
   log "offline or remote unreachable; skipped pull/push ($(printf '%s' "$ls_out" | head -1))"
   exit 0
+  fi
 fi
-remote_sha="$(printf '%s' "$ls_out" | awk 'NR==1{print $1}')"
+remote_sha="${remote_sha:-$(printf '%s' "$ls_out" | awk 'NR==1{print $1}')}"
 
 if [ -n "$remote_sha" ] && [ "$remote_sha" != "$head_sha" ] && [ "$remote_sha" != "$tracked_sha" ]; then
   if ! err="$(git pull --rebase --autostash -q 2>&1)"; then
@@ -230,6 +356,7 @@ $pull_err"
     fi
   fi
   log "pushed $(git rev-parse --short HEAD)"
+  ops_lane_close
 fi
 
 exit 0

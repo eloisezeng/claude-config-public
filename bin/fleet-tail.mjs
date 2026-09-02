@@ -11,6 +11,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { parseFlags } from './fleet-flags.mjs'
+import { readRange, clip, hhmm, blocks, renderable } from './fleet-common.mjs'
 
 const JOBS = path.join(os.homedir(), '.claude', 'jobs')
 
@@ -66,43 +67,6 @@ function header(st) {
   console.log(`${C.bold}${'─'.repeat(w)}${C.reset}`)
 }
 
-// ONE guarded read of a byte range. Every fs call on the transcript lives here because
-// the transcript belongs to another process: 3 of this machine's 51 working/blocked job
-// rows already point at a linkScanPath that is GONE (measured 2026-08-21), and every
-// openSync in this file used to sit outside any try -- inside a setInterval callback,
-// where an uncaught ENOENT does not skip a session, it terminates the viewer.
-//
-// It is also the memory bound. `Buffer.alloc(size - offset)` let one appended tool_result
-// decide the process footprint, which is the opposite of what the header advertises; this
-// reads in fixed CHUNKS and stops at the caller's boundary.
-const CHUNK = 64 * 1024
-function readRange(file, from, to) {
-  if (to <= from) return { text: '', end: from }
-  let fd = null
-  try {
-    fd = fs.openSync(file, 'r')
-    const buf = Buffer.alloc(Math.min(CHUNK, to - from))
-    const parts = []
-    let at = from
-    while (at < to) {
-      const want = Math.min(buf.length, to - at)
-      const got = fs.readSync(fd, buf, 0, want, at)
-      if (got <= 0) break
-      parts.push(Buffer.from(buf.subarray(0, got)))
-      at += got
-    }
-    return { text: Buffer.concat(parts).toString('utf8'), end: at }
-  } catch {
-    return null                       // gone, or unreadable: the caller decides what that means
-  } finally {
-    if (fd !== null) { try { fs.closeSync(fd) } catch {} }
-  }
-}
-
-const clip = (s, n) => {
-  s = String(s ?? '').replace(/\s+/g, ' ').trim()
-  return s.length > n ? s.slice(0, n - 1) + '…' : s
-}
 
 function wrap(text, indent) {
   const w = width() - indent.length
@@ -130,24 +94,6 @@ function toolSummary(name, input) {
   return keys.length ? clip(keys.join(','), 40) : ''
 }
 
-const hhmm = (ts) => {
-  try { return new Date(ts).toISOString().slice(11, 19) } catch { return '--:--:--' }
-}
-
-// The daemon writes a plain user turn as `message.content: "<the prompt>"`, NOT as an
-// array of blocks. Requiring an array therefore dropped EVERY such turn: 555 of them
-// across 163 of this machine's 170 readable transcripts, 100% of them `type: 'user'`,
-// and they are the dispatch prompts -- "Read the handoff file at ..." . So the read-only
-// panes showed Claude's answers with the instruction that produced them missing, which
-// is not a gap in a log, it is a misleading account of what a session was told to do.
-// Normalise here, at the ONE place both the initial paint and the follow loop go through.
-const blocks = (d) => {
-  const c = d.message?.content
-  if (typeof c === 'string') return c.trim() ? [{ type: 'text', text: c }] : []
-  return Array.isArray(c) ? c : null
-}
-const renderable = (d) =>
-  (d.type === 'assistant' || d.type === 'user') && blocks(d) !== null
 
 function render(line) {
   let d

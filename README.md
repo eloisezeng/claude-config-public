@@ -18,23 +18,35 @@ This repo is the single source of truth; config directories symlink into it.
   `~/.claude/settings.json` — see the Windows note under "Cross-machine auto-sync".
 - `sync.ps1` / `watch.ps1` — the **Windows** auto-sync core and file watcher,
   PowerShell ports of `sync.sh` and the launchd/systemd watcher.
-- `skills/` — personally authored/adopted skills (`email-drafter`, `codex-converge`, `no-mistakes`, `scientific-figures`).
+- `skills/` — personally authored/adopted skills (`email-drafter`, `codex-converge`,
+  `codex-opinion`, `no-mistakes`, `scientific-figures`). All five are in `install.sh`'s `ITEMS`;
+  `codex-opinion` was tracked and hand-linked but missing from `ITEMS` until 2026-09-01, so a fresh
+  install silently lacked it.
 - `plugins/` — reinstall manifest only, not the plugin code itself.
 
 ## What's NOT tracked, and why
 
 - **Plugins** come from marketplaces and are reinstalled, not vendored.
-  See `plugins/known_marketplaces.json` (the 3 marketplaces) and
-  `plugins/installed_plugins.json` (5 installed: skill-creator, superpowers,
-  frontend-design, context-mode, claude-mem — claude-mem **disabled**
-  2026-07-31 via `enabledPlugins` in `settings.json`; redundant with the
-  hand-curated memory system and its observer pipeline burned tokens).
+  See `plugins/known_marketplaces.json` (4 marketplaces: `claude-plugins-official`,
+  `context-mode`, `openai-codex`, `thedotmack`) and `plugins/installed_plugins.json`
+  (15 installed). Both are **snapshots of `~/.claude/plugins/*.json`** — refresh them by
+  copying, not by hand. They had drifted badly (3 marketplaces / 5 plugins, missing the
+  `openai-codex` marketplace entirely) until 2026-09-01, which mattered because
+  `install.sh` sends a fresh machine to exactly these two files: it would have installed
+  a subset and had no way to reach the marketplace hosting `codex@openai-codex`, a plugin
+  `CLAUDE.md` depends on throughout.
+  Six plugins are wired in `settings.json`'s `enabledPlugins`, five of them **on**;
+  `claude-mem@thedotmack` is deliberately **disabled** (2026-07-31 — redundant with the
+  hand-curated memory system, and its observer pipeline burned tokens).
+  `settings.windows.json` carries neither the codex plugin nor its marketplace; that is
+  untouched here because nobody has confirmed whether it is deliberate.
 - **GSD** (`gsd-*` skills/agents/hooks) was **retired 2026-07-31** (unused: no
   `.planning/` anywhere). Archived to `~/.claude/{skills,agents}-archive` on
   the original machine; do not reinstall anywhere. The last reference
   (the `gsd-statusline.js` statusLine) was removed from `settings.json`
-  2026-07-31; `settings.windows.json` still carries gsd hooks and is cleaned
-  up on the Windows side.
+  2026-07-31; `settings.windows.json` no longer carries gsd hooks either
+  (verified 2026-09-01: `git grep -i gsd` hits only this README and
+  `docs/replicate-setup-prompt.md`).
 - **`-axi` CLI tools** — `lavish-axi` (human review / visualization),
   `gh-axi` (GitHub), `chrome-devtools-axi` (browser automation), the tools
   `CLAUDE.md` mandates. Two are plain npm globals, not Claude plugins:
@@ -85,6 +97,23 @@ keeps the newest config and pushes its own edits automatically.
 ```sh
 ./install.sh ~/.claude ~/.claude1
 ```
+
+## Tests
+
+```sh
+tests/run-all.sh            # every tracked *.test.sh, one scoreboard, exit 0 iff all pass
+tests/run-all.sh -v         # ...streaming each suite's own output
+tests/run-all.sh handoff    # only suites whose path contains "handoff"
+```
+
+The suite list is derived from `git ls-files '*.test.sh'`, so a new test file is picked up by
+existing; an *untracked* test file is reported as not-run rather than silently skipped.
+
+There is no CI. Until there is, `tests/run-all.sh` is the only thing that runs these together —
+and that gap is not theoretical: `tests/codex-profile-preflight.test.sh` sat red for two days
+(2026-08-30 → 09-01) with nobody looking, and the failure was hiding a second problem, that its
+guard assertions had gone vacuous. `tests/handoff.test.sh` alone takes over five minutes; every
+other suite finishes in seconds.
 
 ## Collaborators use forks, not write access
 

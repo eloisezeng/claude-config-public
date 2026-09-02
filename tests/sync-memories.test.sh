@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -u
-SRC="$(cd "$(dirname "$0")/.." && pwd)/sync-memories.sh"
+ORIG="$(cd "$(dirname "$0")/.." && pwd)/sync-memories.sh"
 fail=0
 assert_true()  { eval "$1" && return; echo "FAIL: $2"; fail=1; }
 assert_false() { eval "$1" && { echo "FAIL: $2"; fail=1; }; return 0; }
@@ -8,6 +8,15 @@ assert_false() { eval "$1" && { echo "FAIL: $2"; fail=1; }; return 0; }
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 export HOME="$tmp"
 mkdir -p "$tmp/dotfiles/claude/memories"
+
+# Run a COPY placed inside the sandbox, never the repo script in place. sync-memories.sh derives its
+# repo from its own location (as sync.sh / install.sh / inject-global-memory.* all do), so invoking
+# the real file with a fake $HOME would aim its writes at the LIVE memory store -- measured
+# 2026-09-01, exactly that put a 47-byte test fixture into memories/global/ and autosync committed
+# it. The old hardcoded REPO="$HOME/dotfiles/claude" made this test look hermetic when its isolation
+# was actually coming from the bug it was meant to be independent of.
+SRC="$tmp/dotfiles/claude/sync-memories.sh"
+cp "$ORIG" "$SRC"
 proj="$tmp/.claude1/projects/-Some-Proj/memory"
 mkdir -p "$proj"
 printf -- '---\nname: g\nmetadata:\n  scope: global\n---\nbody\n' > "$proj/g.md"
