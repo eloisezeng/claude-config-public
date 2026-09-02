@@ -41,9 +41,21 @@ trap _sm_fail_alert EXIT
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
-REPO="$HOME/dotfiles/claude"
+# Repo is wherever this script lives, the same derivation sync.sh / install.sh /
+# inject-global-memory.* all use. It used to be hardcoded to "$HOME/dotfiles/claude", which is the
+# macOS location ONLY: settings.linux.json runs this from "$HOME/claude-config" (a location
+# tests/settings-portable-paths.test.sh pins), so on Linux every promoted memory was mv'd into a
+# directory that does not exist there -- invisibly, because the hook runs under `>/dev/null 2>&1 || true`.
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MEM_ROOT="$REPO/memories"
-LOG="$HOME/Library/Logs/claude-config-autopush.log"
+# Same reason for the log: ~/Library/Logs does not exist on Linux, so every log() was silently
+# discarded there -- including warn_unindexed, the one thing that reports a memory nothing can load.
+case "$(uname)" in
+  Darwin) LOG_DIR="$HOME/Library/Logs" ;;
+  *)      LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}" ;;
+esac
+mkdir -p "$LOG_DIR" 2>/dev/null
+LOG="$LOG_DIR/claude-config-autopush.log"
 
 log() { { echo "[$(date '+%Y-%m-%d %H:%M:%S')] sync-memories: $*" >>"$LOG"; } 2>/dev/null; }
 

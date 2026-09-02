@@ -4,20 +4,20 @@
     "skill-creator@claude-plugins-official": [
       {
         "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/skill-creator/unknown",
-        "version": "unknown",
+        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/skill-creator/e18ff5086423",
+        "version": "e18ff5086423",
         "installedAt": "2026-05-29T21:36:03.992Z",
-        "lastUpdated": "2026-07-31T18:05:23.350Z",
+        "lastUpdated": "2026-09-01T18:52:18.054Z",
         "gitCommitSha": "6ec4b4020230e4c600407a1c46d76bc4f28a0d48"
       }
     ],
     "superpowers@claude-plugins-official": [
       {
         "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/superpowers/6.2.0",
-        "version": "6.2.0",
+        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0",
+        "version": "6.3.0",
         "installedAt": "2026-05-29T21:36:21.462Z",
-        "lastUpdated": "2026-07-24T15:52:17.878Z",
+        "lastUpdated": "2026-08-12T23:52:04.960Z",
         "gitCommitSha": "f2cbfbefebbfef77321e4c9abc9e949826bea9d7"
       }
     ],
@@ -27,7 +27,7 @@
         "installPath": "$HOME/.claude/plugins/cache/context-mode/context-mode/1.0.169",
         "version": "1.0.169",
         "installedAt": "2026-05-29T21:37:06.487Z",
-        "lastUpdated": "2026-07-31T18:10:32.986Z",
+        "lastUpdated": "2026-08-31T07:36:17.715Z",
         "gitCommitSha": "f66230d94f03e5ae43d14c1d267f9b037e06e895"
       }
     ],
@@ -44,11 +44,102 @@
     "frontend-design@claude-plugins-official": [
       {
         "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/frontend-design/unknown",
-        "version": "unknown",
+        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/frontend-design/e18ff5086423",
+        "version": "e18ff5086423",
         "installedAt": "2026-05-29T21:37:51.842Z",
-        "lastUpdated": "2026-07-31T18:05:23.345Z",
+        "lastUpdated": "2026-09-01T18:52:18.056Z",
         "gitCommitSha": "6ec4b4020230e4c600407a1c46d76bc4f28a0d48"
+      }
+    ],
+    "codex@openai-codex": [
+      {
+        "scope": "user",
+        "installPath": "$HOME/.claude/plugins/cache/openai-codex/codex/1.0.6",
+        "version": "1.0.6",
+        "installedAt": "2026-08-02T15:30:28.616Z",
+        "lastUpdated": "2026-08-02T15:30:28.616Z",
+        "gitCommitSha": "db52e28f4d9ded852ab3942cea316258ae4ef346"
+      }
+    ],
+    "code-review@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/code-review/e18ff5086423",
+        "version": "e18ff5086423",
+        "installedAt": "2026-09-01T23:15:10.271Z",
+        "lastUpdated": "2026-09-01T23:15:10.271Z"
+      }
+    ],
+    "context7@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/context7/e18ff5086423",
+        "version": "e18ff5086423",
+        "installedAt": "2026-09-01T23:15:11.766Z",
+        "lastUpdated": "2026-09-01T23:15:11.766Z"
+      }
+    ],
+    "code-simplifier@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/code-simplifier/1.0.0",
+        "version": "1.0.0",
+        "installedAt": "2026-09-01T23:15:13.486Z",
+        "lastUpdated": "2026-09-01T23:15:13.486Z"
+      }
+    ],
+    "playwright@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/playwright/e18ff5086423",
+        "version": "e18ff5086423",
+        "installedAt": "2026-09-01T23:15:15.624Z",
+        "lastUpdated": "2026-09-01T23:15:15.624Z"
+      }
+    ],
+    "github@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/github/e18ff5086423",
+        "version": "e18ff5086423",
+        "installedAt": "2026-09-01T23:15:17.799Z",
+        "lastUpdated": "2026-09-01T23:15:17.799Z"
+      }
+    ],
+    "claude-md-management@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/claude-md-management/1.0.0",
+        "version": "1.0.0",
+        "installedAt": "2026-09-01T23:15:20.100Z",
+        "lastUpdated": "2026-09-01T23:15:20.100Z"
+      }
+    ],
+    "feature-dev@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/feature-dev/e18ff5086423",
+        "version": "e18ff5086423",
+        "installedAt": "2026-09-01T23:15:22.405Z",
+        "lastUpdated": "2026-09-01T23:15:22.405Z"
+      }
+    ],
+    "security-guidance@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/security-guidance/2.0.7",
+        "version": "2.0.7",
+        "installedAt": "2026-09-01T23:15:27.277Z",
+        "lastUpdated": "2026-09-01T23:15:27.277Z"
+      }
+    ],
+    "typescript-lsp@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/typescript-lsp/1.0.0",
+        "version": "1.0.0",
+        "installedAt": "2026-09-01T23:15:29.532Z",
+        "lastUpdated": "2026-09-01T23:15:29.532Z"
       }
     ]
   },

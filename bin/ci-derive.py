@@ -1,6 +1,33 @@
-import re, sys, os, glob
+import re, sys, os, glob, itertools
 sha, D = sys.argv[1], sys.argv[2]
-expected = set()
+
+# A matrix job's `name:` is a TEMPLATE, and GitHub registers one check per expanded leg. Taking the
+# template literally makes the required set UNSATISFIABLE: measured 2026-09-01 on this repo, the
+# expected set carried `e2e (chromium layout) ${{ matrix.shard }}/${{ matrix.shardTotal }}`, a name
+# no check-run can ever have, so the predicate reported NOT-GREEN forever and could not pass at all.
+# Expanding against the inline matrix is also STRICTER than dropping the entry: it requires all 19
+# shard check-runs by name, where the un-expandable template required nothing that exists.
+def matrix_values(body):
+    m = re.search(r"^      matrix:\n((?:        .*\n|\n)*)", body, re.M)
+    if not m: return {}
+    out = {}
+    for k, v in re.findall(r"^        ([A-Za-z0-9_-]+):\s*\[(.*?)\]\s*$", m.group(1), re.M):
+        vals = [x.strip().strip('"\'') for x in v.split(",") if x.strip()]
+        if vals: out[k] = vals
+    return out
+
+def expand(name, mtx):
+    """-> list of concrete names, or None if the template cannot be resolved (caller fails closed)."""
+    keys = sorted(set(re.findall(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}", name)))
+    if not keys: return [name]
+    if any(k not in mtx for k in keys): return None
+    names = [name]
+    for k in keys:
+        pat = re.compile(r"\$\{\{\s*matrix\." + re.escape(k) + r"\s*\}\}")
+        names = [pat.sub(v, n) for n in names for v in mtx[k]]
+    return names
+
+expected, unresolved = set(), set()
 for f in sorted(glob.glob(os.path.join(D, "*.yml"))):
     yml = open(f).read()
     if "\njobs:\n" not in yml: continue
@@ -9,7 +36,13 @@ for f in sorted(glob.glob(os.path.join(D, "*.yml"))):
     body = re.split(r"\n(?=\S)", body)[0]
     for m in re.finditer(r"^  ([A-Za-z0-9_-]+):\n((?:    .*\n|\n)*)", body, re.M):
         nm = re.search(r"^    name:\s*(.+?)\s*$", m.group(2), re.M)
-        expected.add(nm.group(1) if nm else m.group(1))
+        raw = nm.group(1) if nm else m.group(1)
+        exp = expand(raw, matrix_values(m.group(2)))
+        # An unresolvable template must NOT become a literal expectation (that is the unsatisfiable
+        # guard above) and must NOT be silently dropped (that is a fail-OPEN hole in the required
+        # set). Record it and refuse below.
+        if exp is None or any("${{" in e for e in exp): unresolved.add(raw)
+        else: expected.update(exp)
 # One NAME can have SEVERAL check-runs on one sha (a workflow_dispatch alongside the pull_request run;
 # a rerun that adds a run rather than replacing it). Keying by name would silently keep only one of
 # them, and which one is unspecified -- so every row is kept and EVERY row must be green. That fails
@@ -28,6 +61,7 @@ if len(rows) != len(names):
     print(f"  NOTE: {len(rows)} check-runs for {len(names)} names; duplicated: {dups} -- all must be green")
 why = []
 if not expected: why.append("derived an EMPTY required-job set (parser failure, not a pass)")
+if unresolved: why.append(f"could not resolve templated job name(s) {sorted(unresolved)} -- the required set is INCOMPLETE, which is a parser failure, not a pass")
 missing = expected - names
 if missing: why.append(f"workflow jobs never registered: {sorted(missing)}")
 if not rows: why.append("no check-runs at all")

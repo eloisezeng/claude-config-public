@@ -418,6 +418,9 @@ makes the round LONGER than doing it all inline. Do it inline when it is the rou
 when it is trivial (a grammar fix, a constant), or when the mechanical queue would outlast the
 judgment stream. The DEFAULT stays "route mechanical to Codex" on mixed-set rounds — this is the
 exception, not the reverse.
+
+**Route by sub-task, and write the table first.** The routing UNIT is the sub-task, not the finding: write the routing table BEFORE the first fix lands, and carve each judgment finding's mechanical tail (a golden regeneration, a guard copied from an existing rule, a test scaffold) onto the Codex queue so it runs under the judgment work — the judgment stream is the critical path and it shortens only by moving work OFF it (measured 2026-09-01, treecue r1: 17 accepted, 7 mechanical ones ran on Codex in parallel, then the last three judgment items each carried such a tail and ran it serially on the judgment seat). A "mirror X inline in the UI" finding is an IMPORT of the existing predicate, never a second copy (share one predicate with the backend).
+
 Expect `LAUNCHER_EXIT=4` as normal in shared-`.git` repos: `workspace-write` cannot reach the
 repo's `.git/worktrees` dir, so Codex edits but cannot commit. Quarantined ≠ failed — gate the tree
 against START_SHA as usual and commit on its behalf.
@@ -444,7 +447,9 @@ zero-HIGH rounds. So when a round's fixes land, do not go straight to the next f
 fast counter-party pass over just the fix commits (`<prev-round-HEAD>..HEAD`; `-p sol`
 when the fixes touch money, lifecycle or migrations), fix what it finds, and only then launch the
 panel. The panel then confirms instead of discovering, and a fix-induced defect costs a micro-loop,
-not a whole round. Scope discipline: the micro-pass supplements the full-range rounds — it never
+not a whole round. Scope it to the commits that have not yet had a counter-party review — the
+Claude-authored judgment fixes; a Codex-authored fix was reviewed hunk by hunk at merge and needs
+no second pass, so a round whose fixes were all mechanical goes straight to the panel. Scope discipline: the micro-pass supplements the full-range rounds — it never
 substitutes for the confirming full-range round that closes the gate, and its reviewer must never
 be the fix's author.
 
@@ -532,6 +537,29 @@ Carry adjudicated disputes into the next round's `<verified_environment_facts>` 
 The gate above defines *when* you are done; these rules keep the number of rounds it takes small.
 They were extracted from a real loop that ran 30+ rounds, roughly half of them grinding a single validator family one finding at a time.
 
+**Read each round by REMEDY SHAPE, and leave the document stage when the findings turn code-shaped.**
+A finding is **code-shaped** when discharging it means writing a function, a case table or a test-matrix row — "this rule has no implementable signature", "this matrix covers one of three kinds", "this named mutant survives".
+It is **document-shaped** when discharging it changes what the design DECIDES — a wrong ordering, a missing failure branch, a claim about existing behaviour that is false.
+Tally both counts in the dispositions ledger beside the severity scorecard.
+
+Once a round is majority code-shaped, the document has run out of prose-answerable questions: stop the panel and implement.
+Code-shaped findings resolve in minutes at the keyboard and are proven by a test going red; in prose they resolve into wording the next lens re-opens, one sibling site at a time.
+Measured 2026-09-01 on an alerting spec: five document rounds, zero lines of code, and round 5 returned one signature finding plus two test-matrix findings that the first implementation commit would have settled for free — while round 4's own FIX minted round 5's blocking HIGH.
+An extra prose round is not merely slow; past that point it manufactures defects.
+
+**This does not weaken the gate above.** Those HIGHs are not deferred and not adjudicated away — they are re-typed as implementation tasks and discharged in the SAME commit as the code they describe, which is a stronger disposition than a spec edit promising them.
+Group them by shape first: "a named matrix covers only one of N kinds" at two sites is ONE class, so fix the class.
+
+**`--write` serializes per TREE, not globally.**
+The one-run-at-a-time, nothing-else-dirties-the-tree constraint is a property of the worktree the launcher checks, so independent tracks touching disjoint files have no reason to queue behind each other.
+Give each track its own linked worktree and run their implementations concurrently, committing with `-o <paths>` while siblings are live.
+Measured on the same lane: three tracks with disjoint file sets ran strictly sequentially for no reason but a shared cleanliness check.
+Read-only review lenses never had this constraint — keep running them panel-wide.
+
+**Ship the independent slice rather than the whole document.**
+When a spec has two halves joined only by a shared dependency and every blocking finding sits in one half, split at the seam and ship the clean half now.
+Measured: a disk-headroom alert (a probe, two thresholds, two templates) sat blocked for rounds behind the agent-health half that owned every HIGH — and it was the half the operator could act on soonest.
+
 **Detect the enumeration treadmill.**
 When consecutive rounds concentrate their findings in one family (textual money forms, Unicode digit tricks, encoding variants), the reviewer is winning a game that fixing instances cannot close.
 Stop fixing instance-by-instance: give the family a generated corpus (next rule), and raise whether the contract itself should change — an allow-list beats a deny-list wherever a safe fallback makes over-rejection free.
@@ -544,6 +572,24 @@ Where no property-level assertion exists, accept the limit, record it in the spe
 Any family whose membership is enumerable by code — currency and sign forms, Unicode digit blocks, spacing/grouping variants, spelled numbers, date formats — gets a programmatic adversarial corpus wired into the test suite as property tests.
 The reviewer's job then shrinks to auditing the generator's coverage once, instead of imagining one bypass per round.
 A frontier model at `xhigh` is the most expensive fuzzer money can buy; a script fuzzes better and permanently.
+
+**Close a region with a census, then declare the NEXT panel its last.**
+When three consecutive rounds land their findings in one region, the rate is falling but it is not converging — measured 2026-09-01 on a shelf-draft validator: rounds 3–6 all hit one Unicode fold pipeline, findings 15→10→14→9→7→6, each round's fix minting the next round's boundary case.
+Stop dispositioning that region one finding at a time.
+Enumerate its input space by code (every assigned code point, every enum value, every call site), derive the accepted and refused sets FROM THE CODE, pin both directions in the test, record the rule and its boundaries in the spec, and write in the scorecard that the next panel is the last for that region.
+After it, a finding inside the region is dispositioned against the census: a member the census admits by rule is DECLINED with the rule cited; a member the census missed is a census bug, so fix the census, not the instance.
+`enumerate-recurring-defect-classes` says trigger on the second repeat; the census is what the trigger produces, and the "last panel" line is what stops the region absorbing rounds 7, 8 and 9.
+
+**Overlap the stages that read a frozen sha.**
+The micro-review of a fix diff reads a COMMITTED sha, and Phase C mutation runs on a COPY of the tree; neither waits on the other.
+Commit the fix, launch the micro-review lens against that sha in a second linked worktree, and run Phase C in the working worktree meanwhile.
+The one real serialisation is never editing tracked files while a lens or a mutation run is reading them — the harness's sha256 assert fails the run if you do, which is the guard working.
+
+**Reuse the round mechanics instead of rewriting them each arc.**
+`mutate.py` beside this file is the mutation harness: a mutants JSON in (`label`, `old`, `new`, `expect: killed|survived|unobservable`), one line per mutant out (`KILLED`/`SURVIVED`/`MISARMED` against its expectation), armed only on a copy, with `--census 'REGEX=N'` as the completeness guard for an enumerated class and sha256 asserts on the tracked files.
+Give it a copy dir unique to your session, and expect the census to correct you: on its first run it refused a site count of 13 carried from memory — the code had 12.
+Write one `make-prompts.py` per arc at round 1, parameterised by round number, HEAD and the previous round's results, and re-run it each round; hand-editing three lens prompts per round costs wall-clock comparable to a lens run.
+Surface the human-gated ship steps (an inbox card whose approval releases N of the affected items) at the FIRST green, not in the final report — the human's clock runs in parallel with the loop's only if you start it.
 
 **After a clean full sweep, review deltas.**
 Once a full-range round has come back clean, scope the next rounds to the fix commits (`<last-clean-swept-HEAD>..HEAD`) plus a fixed invariant checklist, at full reviewer strength.

@@ -83,7 +83,9 @@ fi
 rm -rf "$tmp"
 
 # The macOS settings' repo-path hooks must agree with portable_hook_cmd's
-# canonical location, ~/dotfiles/claude (sync-memories.sh hardcodes it too) —
+# canonical location, ~/dotfiles/claude. (sync-memories.sh used to hardcode that path too; as of
+# 2026-09-01 it derives it from BASH_SOURCE, because settings.linux.json runs it from ~/claude-config
+# and the hardcode silently mv'd Linux memories into a directory that does not exist there.) —
 # and there must be EXACTLY ONE inject hook: a mismatched install (e.g. run
 # through a symlinked repo path) appends a duplicate beside the canonical entry.
 njq='[.hooks.SessionStart[]?.hooks[]? | select((.command? // "") | test("inject-global-memory"))]'
@@ -155,7 +157,6 @@ if mkdir -p "$nl_dir" 2>/dev/null; then
   # and an ordinary path must still be accepted by that same guard
   mkdir -p "$t/home/plain"
   out="$(run "HOME=$(printf '%q' "$t/home") portable_hook_cmd $(printf '%q' "$t/home/plain")")"; code=$?
-  assert_ok() { :; }
   [ "$code" = 0 ] || { echo "FAIL[newline]: the guard refused an ordinary path: $out"; fail=1; }
   case "$out" in 'bash "$HOME/plain/inject-global-memory.sh"') ;; *) echo "FAIL[newline]: ordinary path emitted '$out'"; fail=1 ;; esac
 else

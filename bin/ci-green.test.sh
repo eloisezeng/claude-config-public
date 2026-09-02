@@ -146,6 +146,42 @@ open(p,"w").write("".join("\t".join(r)+"\n" for r in rows))
 PY
 case_run "skipped/neutral count as successful -> GREEN" 0 "VERDICT: GREEN" "$d"
 
+# 11b. ci-green.sh is documented as a directly-executed command (`~/.claude/bin/ci-green.sh <sha>`)
+#      and it uses bash-only syntax (`${FULL:0:7}`). With no shebang the kernel returns ENOEXEC and
+#      the caller's shell reruns it under /bin/sh -- bash-as-sh here, dash on Linux, where that
+#      expansion is a syntax error. Pin the shebang, not just "it works on this Mac".
+if head -1 "$SELF_DIR/ci-green.sh" | grep -q '^#!.*bash'; then
+  PASS=$((PASS+1)); echo "ok    ci-green.sh declares a bash shebang"
+else
+  FAIL=$((FAIL+1)); echo "FAIL  ci-green.sh has no bash shebang (bash-only syntax would run under sh)"
+fi
+# ...and it refuses a missing sha as a USAGE error, before spending any API call. `set -u` alone
+# does not do this: the unbound `$1` dies inside the command substitution, leaving FULL empty and
+# the script querying the API for the empty sha. `gh` is shadowed by a recorder that would make
+# any call visible, so this asserts silence rather than assuming it.
+usage_t=$(mktemp -d); mkdir -p "$usage_t/bin"
+printf '#!/bin/sh\necho called >> "%s/gh-calls"\nexit 0\n' "$usage_t" > "$usage_t/bin/gh"
+chmod +x "$usage_t/bin/gh"
+usage_out=$(PATH="$usage_t/bin:$PATH" "$SELF_DIR/ci-green.sh" 2>&1); usage_rc=$?
+if [ "$usage_rc" -eq 2 ] && printf '%s' "$usage_out" | grep -q '^usage:'; then
+  PASS=$((PASS+1)); echo "ok    ci-green.sh with no sha -> usage error, exit 2"
+else
+  FAIL=$((FAIL+1)); echo "FAIL  ci-green.sh with no sha: expected exit 2 + usage, got rc=$usage_rc: $usage_out"
+fi
+if [ -e "$usage_t/gh-calls" ]; then
+  FAIL=$((FAIL+1)); echo "FAIL  ci-green.sh called gh before validating its arguments"
+else
+  PASS=$((PASS+1)); echo "ok    ci-green.sh spent no API call on a missing sha"
+fi
+# Control: the recorder must be able to see a call, or the silence above proves nothing.
+PATH="$usage_t/bin:$PATH" gh anything >/dev/null 2>&1
+if [ -e "$usage_t/gh-calls" ]; then
+  PASS=$((PASS+1)); echo "ok    gh recorder control: a real call IS recorded"
+else
+  FAIL=$((FAIL+1)); echo "FAIL  gh recorder never records -- the no-call assertion above is vacuous"
+fi
+rm -rf "$usage_t"
+
 # 12. ci-green.sh must not have grown a `gh pr checks` call. The string appears in its header
 #     comment, which is why comments are stripped first: a MENTION is not a call.
 code=$(sed 's/#.*$//' "$SELF_DIR/ci-green.sh")
@@ -180,6 +216,58 @@ d=$(dupe_case dupe_stale_last in_progress "" completed success)
 case_run "duplicate names, running FIRST + green second -> NOT-GREEN" 1 "still running" "$d"
 d=$(dupe_case dupe_both_green completed success completed success)
 case_run "duplicate names, BOTH green -> GREEN (the rule is satisfiable)" 0 "VERDICT: GREEN" "$d"
+
+# 16. MATRIX EXPANSION. A matrix job's `name:` is a template and GitHub registers one check per leg.
+#     Measured 2026-09-01 on your-companyAI/your-other-project: taking the template literally put
+#     `e2e (chromium layout) ${{ matrix.shard }}/${{ matrix.shardTotal }}` in the required set -- a
+#     name no check-run can ever carry -- so the predicate reported NOT-GREEN forever. This case is
+#     the SATISFIABILITY control for expansion: the legs are present, so it must go GREEN.
+d=$(mk matrix)
+cat > "$d/head.yml" <<'YML'
+name: ci
+on:
+  push:
+jobs:
+  e2e:
+    name: leg ${{ matrix.shard }}/${{ matrix.total }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+        total: [3]
+    steps:
+      - run: true
+YML
+cp "$d/head.yml" "$d/base.yml"
+printf 'leg 1/3\tcompleted\tsuccess\t1\nleg 2/3\tcompleted\tsuccess\t2\nleg 3/3\tcompleted\tsuccess\t3\n' > "$d/runs.tsv"
+case_run "matrix name expands to its legs -> GREEN (expansion is satisfiable)" 0 "VERDICT: GREEN" "$d"
+
+# 17. ...and it is EXACT, not merely satisfiable: dropping one leg must fail on PRESENCE. A wrong
+#     implementation that matched the template loosely (e.g. by prefix) would pass this too, so the
+#     missing leg is named in the expectation.
+d2=$(mk matrix_missing); cp "$d/head.yml" "$d/base.yml" "$d2/"
+head -2 "$d/runs.tsv" > "$d2/runs.tsv"
+case_run "a missing matrix leg -> NOT-GREEN, naming that leg" 1 "'leg 3/3'" "$d2"
+
+# 18. FAIL CLOSED on a template the parser cannot resolve. The two wrong answers are symmetrical:
+#     keeping the raw template makes the set unsatisfiable (case 16's bug), and silently dropping it
+#     makes the set INCOMPLETE -- a fail-open hole in the very presence check this tool exists for.
+#     Here `matrix.shard` is referenced but never defined, and the legs are otherwise all green, so
+#     nothing but the unresolved-template branch can produce a failure.
+d3=$(mk matrix_unresolvable)
+cat > "$d3/head.yml" <<'YML'
+name: ci
+on:
+  push:
+jobs:
+  e2e:
+    name: leg ${{ matrix.shard }}
+    steps:
+      - run: true
+YML
+cp "$d3/head.yml" "$d3/base.yml"
+printf 'leg 1\tcompleted\tsuccess\t1\n' > "$d3/runs.tsv"
+case_run "unresolvable templated name -> NOT-GREEN (incomplete set, not a pass)" 1 "could not resolve templated job name" "$d3"
 
 
 echo "----"
@@ -216,6 +304,10 @@ PY
   mutate allow-empty-expected 'if not expected: why.append' 'if False: why.append'
   mutate dedupe-by-name 'rows.append((p[0], p[1], p[2] if len(p) > 2 else "", p[3] if len(p) > 3 else ""))' 'rows[:] = [r for r in rows if r[0] != p[0]] + [(p[0], p[1], p[2] if len(p) > 2 else "", p[3] if len(p) > 3 else "")]'
   mutate head-only-derivation 'for f in sorted(glob.glob(os.path.join(D, "*.yml"))):' 'for f in [os.path.join(D, "head.yml")]:'
+  # The two ways expansion goes wrong, one mutant each: expand to a single leg (loses the presence
+  # check on the others), and drop an unresolvable template instead of refusing (fail-open hole).
+  mutate expand-only-first-leg 'names = [pat.sub(v, n) for n in names for v in mtx[k]]' 'names = [pat.sub(mtx[k][0], n) for n in names]'
+  mutate ignore-unresolved-template 'if unresolved: why.append' 'if False: why.append'
   AFTER=$(md5 -q "$DERIVE_DEFAULT" 2>/dev/null || md5sum "$DERIVE_DEFAULT" | cut -d' ' -f1)
   if [ "$BEFORE" = "$AFTER" ]; then
     echo "ok    the real ci-derive.py is byte-identical after the mutant run ($BEFORE)"

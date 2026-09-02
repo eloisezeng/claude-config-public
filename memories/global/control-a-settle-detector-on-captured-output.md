@@ -53,6 +53,31 @@ rows the other way round passes under both implementations, so the fixture, not 
 what made the property observable. The both-green case is there to prove the rule SATISFIABLE, not
 just failable.
 
+**The presence half then failed its own satisfiability test — twice, in `ci-green.sh` itself.**
+Measured 2026-09-01 on `your-companyAI/your-other-project` PR #339:
+
+- It hard-coded `GH_TOKEN=$(gh auth token --user your-org)`, an account with no read on that org's
+  repo. The `check-runs` call 404'd, the unchecked redirect left an EMPTY `runs.tsv`, and the
+  deriver faithfully rendered that as `VERDICT: NOT-GREEN -- jobs never registered; no check-runs at
+  all`. A **permission failure printed as a CI result** — and a private repo answers 404 for "you may
+  not read this" byte-identically to "it is not there", so nothing in the output said auth. An
+  errored read is not evidence about CI: check the API call's exit status and abort on a distinct
+  code, because an empty result only means something when the call SUCCEEDED. Never pin a tool to one
+  named account; honour the ambient token.
+- A matrix job's `name:` is a TEMPLATE. Taking it literally put
+  `e2e (chromium layout) ${{ matrix.shard }}/${{ matrix.shardTotal }}` — a name no check-run can ever
+  carry — into the required set, so the predicate could report **NOT-GREEN forever**: unsatisfiable,
+  exactly the class [[a-guard-must-be-satisfiable-not-just-failable]] warns about, hiding inside the
+  fix for the previous fail-open. Expand against the inline matrix (19 concrete leg names): strictly
+  STRICTER than dropping the entry, which would have required nothing that exists. The two wrong
+  repairs are symmetrical — keeping the raw template is unsatisfiable, silently dropping it is a
+  fail-open hole in the presence check — so an UNRESOLVABLE template must refuse as a parser failure.
+  Both are pinned by mutants (`expand-only-first-leg`, `ignore-unresolved-template`).
+
+Note the ordering that found these: the *negative* control (force a 404 → must ABORT) surfaced the
+auth bug, and the *positive* one (real repo → must yield a real verdict) surfaced the unsatisfiable
+set. Running only the failure side would have left a detector that could never say GREEN.
+
 **How to apply.** Prefer a structural terminal condition over string-matching a summary line
 (the exit status or a state enum over prose), read the per-commit API rather than a PR rollup,
 require presence as well as non-pendingness, and never collapse rows by a key the API does not
