@@ -86,9 +86,14 @@ case "${1:-}" in
     deps="fleet-watch.mjs fleet-tail.mjs fleet-open.sh"
     for e in fleet-watch.mjs fleet-tail.mjs; do
       [ -f "$BIN/$e" ] || continue
-      deps="$deps $(sed -n "s|.*from '\\./\\([A-Za-z0-9._-]*\\)'.*|\\1|p" "$BIN/$e")"
+      # Either quote style, and any relative specifier -- './x.mjs' and '../lib/x.mjs' both.
+      # The narrower `'\./...'` form silently derived NOTHING from an import written any other way,
+      # which is the same failure the hand-written list had: a dependency the doctor cannot see is
+      # reported by its absence from a healthy-looking report, not by a MISSING line.
+      deps="$deps $(sed -n "s|.*from [\"']\\(\\.[^\"']*\\)[\"'].*|\\1|p" "$BIN/$e")"
     done
-    for f in $(printf '%s\n' $deps | sort -u); do
+    # Normalise a leading ./ so the seeded name and the derived specifier are ONE entry, not two.
+    for f in $(printf '%s\n' $deps | sed 's|^\./||' | sort -u); do
       [ -f "$BIN/$f" ] && echo "  $f : ok" || echo "  $f : *** MISSING ***"
     done
     if [ -t 1 ]; then echo "  stdout TTY   : yes"; else echo "  stdout TTY   : NO — 'fleet write' needs a real terminal"; fi

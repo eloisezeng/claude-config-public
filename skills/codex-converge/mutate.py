@@ -26,7 +26,17 @@ Usage (paths relative to --root, which defaults to the cwd):
 
 mutants.json is a list of objects:
   {"label": "G4 dash-family drop", "old": "exact source text", "new": "replacement",
-   "expect": "killed" | "survived" | "unobservable"}
+   "expect": "killed" | "survived" | "unobservable",
+   "test": "exact name of the test that must kill it"}
+
+`test` is OPTIONAL but wanted on every `expect: killed` mutant: it becomes vitest's
+`-t` filter, so the mutant runs the ONE test that is supposed to catch it instead of
+the whole file (a 52-test file x 9 mutants = 468 test executions becomes 9).  It is
+also a stronger assertion than the unfiltered run — it pins WHICH test does the
+killing, so a mutant killed by some unrelated neighbour no longer reads as OK.
+A filter that selects NO test is reported MISARMED, never SURVIVED: vitest exits 0
+when its name filter matches nothing, so an unguarded filter would silently convert
+every `killed` expectation into a passing `survived` one.
 `old` must occur EXACTLY ONCE in the source (a zero or multi-site match aborts that
 mutant as MISARMED).  `old`/`new` may be parallel LISTS for a mutant made of several
 edits (a move = delete here + insert there), applied in order, each asserted unique.
@@ -48,6 +58,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -56,6 +67,19 @@ import sys
 def sha256(path: str) -> str:
     with open(path, 'rb') as fh:
         return hashlib.sha256(fh.read()).hexdigest()
+
+
+def tests_ran(out: str) -> int:
+    """How many tests actually EXECUTED, from vitest's `Tests ...` summary line.
+
+    Skipped tests do not count: a `-t` filter that matches nothing reports them as
+    skipped and exits 0, and that must not be readable as a surviving mutant.
+    Returns 0 when no summary line is present (no run happened at all).
+    """
+    line = next((ln.strip() for ln in out.splitlines() if ln.strip().startswith('Tests ')), None)
+    if line is None:
+        return 0
+    return sum(int(n) for n in re.findall(r'(\d+)\s+(?:passed|failed)', line))
 
 
 def main() -> int:
@@ -69,7 +93,7 @@ def main() -> int:
     ap.add_argument('--mutants', required=True, help='JSON file: [{label, old, new, expect}]')
     ap.add_argument('--tracked', action='append', default=[], help='extra tracked files whose sha256 must not change (repeatable)')
     ap.add_argument('--census', action='append', default=[], metavar='REGEX=N', help='assert exactly N source lines match REGEX (repeatable)')
-    ap.add_argument('--test-cmd', default='npx vitest run {test}', help='command template; {test} is the copied test path')
+    ap.add_argument('--test-cmd', default='npx vitest run {test} {filter}', help="command template; {test} is the copied test path, {filter} the -t name filter from the mutant's `test` key (empty when it has none)")
     ap.add_argument('--keep-copy', action='store_true', help='leave the copy dir in place after the last mutant (default: removed)')
     ap.add_argument('--only', help='run only mutants whose label contains this substring')
     args = ap.parse_args()
@@ -159,9 +183,19 @@ def main() -> int:
             test_copy = os.path.join(copy_dir, test_base)
             with open(test_copy, 'w', encoding='utf-8') as fh:
                 fh.write(test_copy_text)
-            cmd = args.test_cmd.format(test=os.path.relpath(test_copy, root))
+            name = m.get('test')
+            filt = f'-t {shlex.quote(name)}' if name else ''
+            cmd = args.test_cmd.format(test=os.path.relpath(test_copy, root), filter=filt)
             proc = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True)
             out = proc.stdout + proc.stderr
+            # A vitest name filter that matches nothing marks every test skipped and exits 0,
+            # which would read as SURVIVED and turn each `killed` expectation green by default.
+            # Require that the filtered run actually EXECUTED a test; fail closed if it did not.
+            if name and tests_ran(out) == 0:
+                print(f"MISARMED  {m['label']}: -t {name!r} selected 0 tests "
+                      f"(a zero-match filter exits 0 and would read as SURVIVED)")
+                results.append((m['label'], m['expect'], 'misarmed', False))
+                continue
             outcome = 'survived' if proc.returncode == 0 else 'killed'
             want = 'survived' if m['expect'] == 'unobservable' else m['expect']
             matched = outcome == want
