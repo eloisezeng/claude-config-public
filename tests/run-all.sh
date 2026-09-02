@@ -41,7 +41,12 @@ done
 #  - `kill 9, $p` reaps only `bash <suite>`. tests/handoff.test.sh backgrounds ~20 long-lived
 #    `handoff.sh --watch` pollers; killing the leader alone orphans them to ppid 1, still armed and
 #    still polling. Put the child in its own process group and signal the GROUP.
-SUITE_TIMEOUT="${RUN_ALL_TIMEOUT:-600}"
+# 900s, not 600. Measured 2026-09-01 on an idle-ish Mac with ~13 sibling Claude sessions live:
+# tests/handoff.test.sh takes 436s, which is 73% of a 600s cap -- and it is the suite that
+# backgrounds ~20 pollers, so it is exactly the one that stretches under load. A ceiling here is
+# a hang-stopper, not an assertion about speed, so buy the headroom; a TIMEOUT that means "the
+# machine was busy" trains people to ignore the word.
+SUITE_TIMEOUT="${RUN_ALL_TIMEOUT:-900}"
 run_capped() {
   perl -e '
     use POSIX ();
