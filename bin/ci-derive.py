@@ -66,7 +66,17 @@ missing = expected - names
 if missing: why.append(f"workflow jobs never registered: {sorted(missing)}")
 if not rows: why.append("no check-runs at all")
 for n, st, cc, rid in rows:
-    if st != "completed": why.append(f"still running: {n} ({st})")
-    elif cc not in ("success", "neutral", "skipped"): why.append(f"not successful: {n} ({cc})")
+    # A check-run that carries a CONCLUSION is FINISHED, whatever its `status` field says. Measured
+    # 2026-09-02 on your-companyAI/your-other-project sha 0f566b00: GitHub served the job
+    # `deploy freeze check` as status="in_progress" WITH conclusion="success", while the run itself
+    # was completed/success and every other job read completed/success. Requiring status=="completed"
+    # therefore reported NOT-GREEN forever and a watcher timed out ~40 min after CI had gone green.
+    # This is not fail-open: `conclusion` is written only at finalization, so an unfinished check has
+    # an empty one and still lands in the "still running" branch below; and a check that says
+    # completed with NO conclusion falls through to the not-successful branch rather than passing.
+    if st == "completed" or cc:
+        if cc not in ("success", "neutral", "skipped"): why.append(f"not successful: {n} ({cc})")
+    else:
+        why.append(f"still running: {n} ({st})")
 if why: print("VERDICT: NOT-GREEN --", "; ".join(why)); sys.exit(1)
 print(f"VERDICT: GREEN -- {len(rows)} checks, all completed successfully"); sys.exit(0)

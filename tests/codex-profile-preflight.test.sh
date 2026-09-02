@@ -54,7 +54,7 @@ POLICY="$(sed -n 's/^POLICY_VERSION="\(.*\)"$/\1/p' "$RUN")"
 
 run() {
   rm -f "$CODEX_STUB_MARKER" "$SANDBOX/art/out.json"
-  bash "$RUN" --policy-version "$POLICY" \
+  bash "$RUN" --policy-version "$POLICY" --one-off \
        "$SANDBOX/prompt.txt" "$SANDBOX/art/out.json" "$SANDBOX/art/run.log" \
        "$SANDBOX/work" "$@" >"$SANDBOX/stdout" 2>"$SANDBOX/stderr"
 }

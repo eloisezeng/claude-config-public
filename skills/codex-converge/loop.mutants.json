@@ -1,0 +1,190 @@
+[
+ {
+  "label": "M1 name-filter zero-match no longer MISARMED",
+  "old": "    if name_filtered and tests_ran(out) == 0:\n",
+  "new": "    if name_filtered and tests_ran(out) < 0:\n",
+  "expect": "killed",
+  "test": "test_verdict_truth_table"
+ },
+ {
+  "label": "M2 missing Test Files summary passes as green",
+  "old": "    if no_tests_found(out) or files is None or files == 0:\n",
+  "new": "    if no_tests_found(out) or files == 0:\n",
+  "expect": "killed",
+  "test": "test_verdict_truth_table"
+ },
+ {
+  "label": "M3 gate ignores whether the previous round is closed",
+  "old": "    return (prev_closed and not missing), missing\n",
+  "new": "    return (not missing), missing\n",
+  "expect": "killed",
+  "test": "test_decision_sweep"
+ },
+ {
+  "label": "M4 nine scoped files still class light",
+  "old": "        return 'light' if len(sh['files']) <= SCOPED_MAX_FILES else 'heavy'\n",
+  "new": "        return 'light' if len(sh['files']) <= 100 else 'heavy'\n",
+  "expect": "killed",
+  "test": "test_table"
+ },
+ {
+  "label": "M5 a write takes only a shared tree lock",
+  "old": "        tree_mode = 'ex' if kind == 'write' else 'sh'\n",
+  "new": "        tree_mode = 'sh'\n",
+  "expect": "killed",
+  "test": "test_write_waits_for_reader_of_same_tree"
+ },
+ {
+  "label": "M6 heavy jobs share the CPU lock",
+  "old": "    cpu_mode = {'heavy': 'ex', 'light': 'sh', 'none': None}[cpu]\n",
+  "new": "    cpu_mode = {'heavy': 'sh', 'light': 'sh', 'none': None}[cpu]\n",
+  "expect": "killed",
+  "test": "test_heavy_heavy_serialise"
+ },
+ {
+  "label": "M7 a review is serialised behind heavy work",
+  "old": "'light': 'sh', 'none': None}[cpu]\n",
+  "new": "'light': 'sh', 'none': 'ex'}[cpu]\n",
+  "expect": "killed",
+  "test": "test_review_overlaps_heavy"
+ },
+ {
+  "label": "M8 tree-moved check disabled",
+  "old": "        if after != tree_before:\n",
+  "new": "        if False and after != tree_before:\n",
+  "expect": "killed",
+  "test": "test_tree_moved_during_read_fails_and_quarantines"
+ },
+ {
+  "label": "M9 wide vitest never needs a checkpoint",
+  "old": "    return kind == 'vitest' and cpu == 'heavy' and not (checkpoint or '').strip()\n",
+  "new": "    return False\n",
+  "expect": "killed",
+  "test": "test_wide_without_checkpoint_is_refused_before_launch"
+ },
+ {
+  "label": "M10 the round window admits a row it does not overlap",
+  "old": "        if c['end'] < c['start']:\n            continue\n",
+  "new": "        if False:\n            continue\n",
+  "expect": "killed",
+  "test": "test_round_windows_and_cross_track_overlap"
+ },
+ {
+  "label": "M11 L7 threshold unreachable",
+  "old": "    strays = [r for r in rows if r['source'] == 'dir' and r['span'] >= 30]\n",
+  "new": "    strays = [r for r in rows if r['source'] == 'dir' and r['span'] >= 30000]\n",
+  "expect": "killed",
+  "test": "test_flat_dir_heuristics_and_unattributed"
+ },
+ {
+  "label": "M12 queue wait not measured",
+  "old": "t_req=t_req, queued_s=queued,",
+  "new": "t_req=t_req, queued_s=0.0,",
+  "expect": "killed",
+  "test": "test_heavy_heavy_serialise"
+ },
+ {
+  "label": "M13 declared gap class inverted",
+  "old": "    if declared:\n        return 'declared'",
+  "new": "    if not declared:\n        return 'declared'",
+  "expect": "killed",
+  "test": "test_classes"
+ },
+ {
+  "label": "M14 blocked heartbeats read as active",
+  "old": "        if blocked:\n",
+  "new": "        if False:\n",
+  "expect": "killed",
+  "test": "test_classes"
+ },
+ {
+  "label": "control: docstring wording is unobservable",
+  "old": "Pass iff the previous round is closed and every TRIGGERED lever is dispositioned.",
+  "new": "Passes iff the previous round is closed and every TRIGGERED lever is dispositioned.",
+  "expect": "unobservable"
+ },
+ {
+  "label": "M16 queue wait clamped (a faked measurement)",
+  "old": "        self.queued_s = time.monotonic() - t0\n",
+  "new": "        self.queued_s = min(time.monotonic() - t0, 0.3)\n",
+  "expect": "killed",
+  "test": "test_heavy_heavy_serialise"
+ },
+ {
+  "label": "M17 tree state ignores tracked-change CONTENT",
+  "old": "    h.update(diff)\n",
+  "new": "    h.update(b'')\n",
+  "expect": "killed",
+  "test": "test_tree_detects_in_place_change_of_already_dirty_file"
+ },
+ {
+  "label": "M18 tree state ignores untracked file stat",
+  "old": "            h.update(f'{rel}\\0{st.st_size}\\0{st.st_mtime_ns}\\n'.encode('utf-8'))\n",
+  "new": "            h.update(f'{rel}\\n'.encode('utf-8'))\n",
+  "expect": "killed",
+  "test": "test_tree_detects_in_place_change_of_untracked_file"
+ },
+ {
+  "label": "M19 --flag=value wide flag unrecognised",
+  "old": "        if flag in WIDE_FLAGS:\n",
+  "new": "        if tok in WIDE_FLAGS:\n",
+  "expect": "killed",
+  "test": "test_flag_forms_and_related_bounds"
+ },
+ {
+  "label": "M20 round window opens at start-minus-aggregate-queue, not the recorded request",
+  "old": "    return min(r['t_req'] for r in mine), max(r['end'] for r in mine)\n",
+  "new": "    return min(r['start'] - (r.get('queued') or 0.0) for r in mine), max(r['end'] for r in mine)\n",
+  "expect": "killed",
+  "test": "test_round_window_opens_at_the_recorded_request"
+ },
+ {
+  "label": "M21 a disposition written BEFORE a repeated close counts",
+  "old": "                and i > close_idx and ev.get('state') in ('landed', 'declined')):\n",
+  "new": "                and i >= 0 and ev.get('state') in ('landed', 'declined')):\n",
+  "expect": "killed",
+  "test": "test_disposition_before_a_repeated_close_does_not_count"
+ },
+ {
+  "label": "M22 cross-round job not clipped to the round",
+  "old": "        c['start'] = max(r['start'], a)\n",
+  "new": "        c['start'] = r['start']\n",
+  "expect": "killed",
+  "test": "test_round_profile_clips_cross_round_jobs"
+ },
+ {
+  "label": "M23 backwards clock yields a negative interval",
+  "old": "        if end < start:\n",
+  "new": "        if False and end < start:\n",
+  "expect": "killed",
+  "test": "test_backwards_clock_interval_is_invalid_not_negative"
+ },
+ {
+  "label": "M24 a glob selector counts as one file",
+  "old": "        (files if FILE_RE.search(tok) and not GLOB_RE.search(tok) else dirs).append(tok)\n",
+  "new": "        (files if FILE_RE.search(tok) else dirs).append(tok)\n",
+  "expect": "killed",
+  "test": "test_flag_forms_and_related_bounds"
+ },
+ {
+  "label": "M25 tree snapshot taken before the lock (queued reader false-positive)",
+  "old": "    tree_before = tree_state(tree) if tree else None\n    t_start = now()\n",
+  "new": "    t_start = now()\n",
+  "expect": "killed",
+  "test": "test_reader_queued_behind_a_writer_reads_the_settled_tree"
+ },
+ {
+  "label": "M26 one lock for every tree (a snapshot review would queue behind the write)",
+  "old": "    real = os.path.realpath(tree)\n    return 'tree-' + hashlib.sha1(real.encode('utf-8')).hexdigest()[:16] + '.lock'\n",
+  "new": "    return 'tree-shared.lock'\n",
+  "expect": "killed",
+  "test": "test_a_read_of_a_snapshot_overlaps_a_write_on_the_live_tree"
+ },
+ {
+  "label": "M27 snapshot worktree created at HEAD instead of the pinned sha",
+  "old": "    r = subprocess.run(['git', '-C', repo, 'worktree', 'add', '--detach', path, sha], capture_output=True, text=True)\n",
+  "new": "    r = subprocess.run(['git', '-C', repo, 'worktree', 'add', '--detach', path], capture_output=True, text=True)\n",
+  "expect": "killed",
+  "test": "test_snapshot_pins_a_detached_worktree_and_is_reused"
+ }
+]

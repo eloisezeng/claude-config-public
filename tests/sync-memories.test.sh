@@ -60,4 +60,42 @@ err2="$(bash "$SRC" 2>&1 1>/dev/null)"
 assert_false '[ -e "$tmp/.claude1/projects/-Dup/memory/g.md" ]' "identical dup dropped locally"
 assert_true  'printf "%s" "$err2" | grep -q "UNINDEXED global/g.md"' "dedupe branch must warn UNINDEXED too"
 
+
+# --- opt-in per-project backup -------------------------------------------------
+# A project opts in by HAVING a tree at memories/<root>/<projectdir>/. Its local
+# memories are then moved there and symlinked back. Projects with no tree stay
+# local -- the "-Some-Proj" assertions above are that control, and they must keep
+# passing for these cases to mean anything.
+optin="$tmp/.claude1/projects/-OptIn/memory"
+tree="$tmp/dotfiles/claude/memories/claude1/-OptIn"
+mkdir -p "$optin" "$tree"
+printf -- '---\nname: st\n---\nstate body\n' > "$optin/st.md"
+printf -- '- [St](st.md) - hook\n' > "$optin/MEMORY.md"
+bash "$SRC" >/dev/null 2>&1
+assert_true  '[ -f "$tree/st.md" ]' "opted-in local memory must be backed up into the repo tree"
+assert_true  '[ -L "$optin/st.md" ]' "opted-in local memory must be symlinked back"
+assert_true  '[ "$(cat "$optin/st.md")" = "$(cat "$tree/st.md")" ]' "symlink must read the repo copy"
+# the per-project INDEX travels too (it is the file the session actually loads)
+assert_true  '[ -f "$tree/MEMORY.md" ] && [ -L "$optin/MEMORY.md" ]' "opted-in MEMORY.md must be backed up and linked"
+# ...but a project MEMORY.md must NEVER reach the flat global store, even tagged global
+assert_false '[ -e "$tmp/dotfiles/claude/memories/global/MEMORY.md" ]' "project index must not clobber the global index"
+
+# idempotent: a second run relinks rather than duplicating or failing
+bash "$SRC" >/dev/null 2>&1
+assert_true  '[ -L "$optin/st.md" ] && [ -f "$tree/st.md" ]' "second run must be idempotent"
+
+# a MEMORY.md tagged scope: global still must not be promoted (guard, not the find)
+mkdir -p "$tmp/.claude1/projects/-IdxG/memory" "$tmp/dotfiles/claude/memories/claude1/-IdxG"
+printf -- '---\nname: MEMORY\nmetadata:\n  scope: global\n---\nindex\n' > "$tmp/.claude1/projects/-IdxG/memory/MEMORY.md"
+bash "$SRC" >/dev/null 2>&1
+assert_false '[ -e "$tmp/dotfiles/claude/memories/global/MEMORY.md" ]' "global-tagged MEMORY.md must not be promoted"
+
+# conflict: repo copy differs -> skip, leave the local file real and untouched
+mkdir -p "$tmp/.claude1/projects/-Conf/memory" "$tmp/dotfiles/claude/memories/claude1/-Conf"
+printf -- '---\nname: c\n---\nLOCAL\n' > "$tmp/.claude1/projects/-Conf/memory/c.md"
+printf -- '---\nname: c\n---\nREPO\n' > "$tmp/dotfiles/claude/memories/claude1/-Conf/c.md"
+bash "$SRC" >/dev/null 2>&1
+assert_true  '[ -f "$tmp/.claude1/projects/-Conf/memory/c.md" ] && [ ! -L "$tmp/.claude1/projects/-Conf/memory/c.md" ]' "conflicting local memory must stay a real local file"
+assert_true  '[ "$(tail -1 "$tmp/dotfiles/claude/memories/claude1/-Conf/c.md")" = "REPO" ]' "conflict must not overwrite the repo copy"
+
 [ "$fail" = 0 ] && echo "PASS: sync-memories" || exit 1

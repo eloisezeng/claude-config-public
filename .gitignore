@@ -14,3 +14,7 @@
 *.key
 *.pem
 .credentials*
+
+# Python build artifacts (skills ship sources, not bytecode)
+__pycache__/
+*.py[cod]

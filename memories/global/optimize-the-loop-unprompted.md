@@ -1,6 +1,6 @@
 ---
 name: optimize-the-loop-unprompted
-description: Profiling and speeding up a repeated loop is owed unprompted at every round boundary — if you can answer "any way to speed this up?" with a concrete list, you already had the list and withheld it; land the fix in the shared tool as code, with a guard for whatever it stops verifying
+description: Profiling and speeding up a repeated loop is owed unprompted at every round boundary, and a directive alone does not fire — run codex-converge's `profile-loop.sh` over the round dirs (a checklist step now calls it); if you can answer "any way to speed this up?" with a concrete list, you already had the list and withheld it; land the fix in the shared tool as code, with a guard for whatever it stops verifying
 metadata:
   type: feedback
 scope: global
@@ -14,9 +14,17 @@ The measured instance: a mutation battery ran a whole 52-test file once per muta
 The fix was one `-t` flag and it had been available the whole time.
 Two sibling failures to watch for in the same breath: re-running a 267-file suite to re-count failures when two independent clusters would do, and running independent clusters serially in one worktree.
 
+**A directive no checklist calls is not a mechanism.**
+The user, 2026-09-02, one day after writing this rule: *"i thought you already wrote a skill to automatically detect potential ways to speed up the implementation process. did u forget to activate it?"*
+The rule sat in `CLAUDE.md` and here, and the TREECUE phase-1 seat still hand-rolled cp/sed mutants in the live worktree instead of `mutate.py` on a copy, ran a wide suite ten times where a scoped one answered, and wrote no profile until asked — because nothing in the codex-converge round checklist invoked the rule, so it depended on recall at a busy moment and lost.
+The mechanism is now `~/dotfiles/claude/skills/codex-converge/profile-loop.sh <round-dir>…`, called by the "Profile the loop at EVERY round boundary" step in that skill's "Keeping the loop short" section: it reads the artifacts a round already leaves (codex run logs and verdicts, vitest / tsc / mutant logs, CI watches) and prints the ranked wall-clock table, the wait time with nothing else in flight, every gap ≥ 30 min, and each lever evaluated as TRIGGERED or quiet with its fail-open.
+When a rule keeps needing reminding, the fix is a step with a script, not a louder rule.
+
 **Do this instead.**
-At every boundary of any loop you will run more than twice — review round, fix round, verification battery, sweep — spend one turn on: where did the wall-clock actually go, and what is the top item?
+At every boundary of any loop you will run more than twice — review round, fix round, verification battery, sweep — run the profiler and paste its timeline and levers into the scorecard: where did the wall-clock actually go, and what is the top item?
 Measure it, do not guess it; a stage nobody timed is where the cost is.
+Measured on the TREECUE arc (15 h window, 2026-09-01/02): waits on Codex / `--write` / CI were 1h22m, and 1h13m of that ran with NOTHING else in flight; one 9h24m gap had no artifact at all; ten wide vitest runs of 1–4.5 min stood in for scoped questions; six mutant batteries ran 13 s–1m41s because they re-ran whole files.
+Guesses refuted by the same measurement, so do not repeat them: tsc was already incremental (4 s cold, `tsconfig` "incremental": true); `vitest related` on a core module selected 542 of 545 files, so it is not a selector; a "75 s per mutant" figure was a timeout CEILING, and the real run took 5.75 s.
 The signature to hunt is a repeated stage paying O(N x M) for an O(N) fact — a per-item check that re-runs the whole population, a full-suite run standing in for one file, a serial queue of independent items.
 Then **land the fix as code in the shared tool** (`mutate.py`, the runner, the harness), never as a prose note or a per-arc script, so every session and every future round inherits it instead of rediscovering it.
 

@@ -63,23 +63,41 @@ import shutil
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from loop import Locks, arc_dir, record_job, tests_ran, now as _now  # noqa: E402
+
 
 def sha256(path: str) -> str:
     with open(path, 'rb') as fh:
         return hashlib.sha256(fh.read()).hexdigest()
 
 
-def tests_ran(out: str) -> int:
-    """How many tests actually EXECUTED, from vitest's `Tests ...` summary line.
+# tests_ran (the zero-match guard) is defined ONCE, in loop.py, and imported above.
 
-    Skipped tests do not count: a `-t` filter that matches nothing reports them as
-    skipped and exits 0, and that must not be readable as a surviving mutant.
-    Returns 0 when no summary line is present (no run happened at all).
+
+def worktree_of(path: str) -> str | None:
+    """Top-level dir of the git worktree containing `path` (which need not exist yet), else None."""
+    probe = path
+    while not os.path.isdir(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return None
+        probe = parent
+    r = subprocess.run(['git', '-C', probe, 'rev-parse', '--show-toplevel'], capture_output=True, text=True)
+    return (r.stdout.strip() or None) if r.returncode == 0 else None
+
+
+def git_ignored(top: str, path: str) -> bool:
+    """Whether the mutant copy dir `path` is git-ignored.
+
+    Measured: a directory-only pattern (`copy/`, the form a human actually writes) reads NOT ignored
+    when the directory does not exist yet — which is every FIRST run, so the guard below would refuse
+    a correctly-configured repo and tell it to do what it had already done. Probing a path INSIDE the
+    dir answers correctly for both `copy/` and `copy`, and still answers no when neither covers it.
     """
-    line = next((ln.strip() for ln in out.splitlines() if ln.strip().startswith('Tests ')), None)
-    if line is None:
-        return 0
-    return sum(int(n) for n in re.findall(r'(\d+)\s+(?:passed|failed)', line))
+    probe = os.path.join(path, '.mutant-armed')
+    r = subprocess.run(['git', '-C', top, 'check-ignore', '-q', '--', probe], capture_output=True)
+    return r.returncode == 0
 
 
 def main() -> int:
@@ -96,18 +114,32 @@ def main() -> int:
     ap.add_argument('--test-cmd', default='npx vitest run {test} {filter}', help="command template; {test} is the copied test path, {filter} the -t name filter from the mutant's `test` key (empty when it has none)")
     ap.add_argument('--keep-copy', action='store_true', help='leave the copy dir in place after the last mutant (default: removed)')
     ap.add_argument('--only', help='run only mutants whose label contains this substring')
+    ap.add_argument('--filter-flag', default='-t', help="the runner's name-filter flag that {filter} expands to (default -t; -k for python unittest)")
+    ap.add_argument('--arc', help='ledger this run for loop.py profile (default $CC_ARC / $CLAUDE_JOB_DIR/tmp); needs --track and --round')
+    ap.add_argument('--track', help='track label for the ledger')
+    ap.add_argument('--round', type=int, help='round number for the ledger')
+    ap.add_argument('--no-lock', action='store_true', help='do not take the shared light CPU lock (self-tests only)')
     args = ap.parse_args()
 
     root = os.path.abspath(args.root)
     src = os.path.join(root, args.src)
     test = os.path.join(root, args.test)
-    copy_dir = os.path.join(root, args.copy_dir)
+    # abspath NORMALISES: without it `--copy-dir .` is `<root>/.`, which commonpath calls equal to
+    # root while `== root` calls different, so the guard passed and rmtree destroyed the root;
+    # `../outside` slipped through the same way (commonpath treats `..` as a plain component).
+    copy_dir = os.path.abspath(os.path.join(root, args.copy_dir))
     for p in (src, test):
         if not os.path.isfile(p):
             print(f'usage: not a file: {p}', file=sys.stderr)
             return 4
     if os.path.commonpath([copy_dir, root]) != root or copy_dir == root:
         print('usage: --copy-dir must be a subdirectory of --root', file=sys.stderr)
+        return 4
+    top = worktree_of(copy_dir)
+    if top and not git_ignored(top, copy_dir):
+        print(f'usage: --copy-dir {copy_dir} is inside the git worktree {top} and is NOT git-ignored — '
+              f'a tree that auto-commits (or a `git add -A`) would commit the ARMED mutant; '
+              f'add it to .gitignore or use a --root outside any worktree', file=sys.stderr)
         return 4
 
     with open(args.mutants) as fh:
@@ -153,6 +185,7 @@ def main() -> int:
     test_base = os.path.basename(test)
 
     results: list[tuple[str, str, str, bool]] = []  # label, expect, outcome, matched
+    timings: list[tuple[float, float, float]] = []  # t_req, t_run, t_end per executed mutant
     try:
         for m in mutants:
             # `old`/`new` may be parallel lists: one mutant made of several edits (a MOVE is a
@@ -184,9 +217,15 @@ def main() -> int:
             with open(test_copy, 'w', encoding='utf-8') as fh:
                 fh.write(test_copy_text)
             name = m.get('test')
-            filt = f'-t {shlex.quote(name)}' if name else ''
+            filt = f'{args.filter_flag} {shlex.quote(name)}' if name else ''
             cmd = args.test_cmd.format(test=os.path.relpath(test_copy, root), filter=filt)
-            proc = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True)
+            # Each mutant run is a LIGHT CPU job: it shares the machine with other light jobs
+            # and waits for a heavy one (a full suite, a tsc) instead of fighting it.
+            t_req = _now()
+            with Locks(None, None, None if args.no_lock else 'sh', holder=f"mutate:{m['label'][:40]}"):
+                t_run = _now()
+                proc = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True)
+            timings.append((t_req, t_run, _now()))
             out = proc.stdout + proc.stderr
             # A vitest name filter that matches nothing marks every test skipped and exits 0,
             # which would read as SURVIVED and turn each `killed` expectation green by default.
@@ -202,7 +241,8 @@ def main() -> int:
             summary = next((ln.strip() for ln in out.splitlines() if ln.strip().startswith('Tests ')), '')
             failing = [ln.strip() for ln in out.splitlines() if ln.strip().startswith('×') or ln.strip().startswith('FAIL ')][:4]
             tag = 'OK  ' if matched else 'MISMATCH'
-            print(f"{outcome.upper():8} {tag} {m['label']}  (expect {m['expect']})  {summary}")
+            scope = '' if name or m['expect'] != 'killed' else '  UNSCOPED(whole file; set `test`)'
+            print(f"{outcome.upper():8} {tag} {m['label']}  (expect {m['expect']})  {summary}{scope}")
             for ln in failing:
                 print('   ', ln[:140])
             results.append((m['label'], m['expect'], outcome, matched))
@@ -217,11 +257,24 @@ def main() -> int:
     for label, expect, outcome, matched in results:
         if not matched:
             print(f'  mismatch: {label}: expected {expect}, got {outcome}')
+    unscoped = [m['label'] for m in mutants if m['expect'] == 'killed' and not m.get('test')]
+    if unscoped:
+        print(f"  UNSCOPED: {len(unscoped)} `expect: killed` mutant(s) ran the whole file — set `test` on each: "
+              + ', '.join(unscoped[:6]))
     if changed:
         for p in changed:
             print(f'  TRACKED FILE CHANGED DURING RUN: {os.path.relpath(p, root)}')
-        return 3
-    return 0 if n_ok == len(results) else 2
+    rc = 3 if changed else (0 if n_ok == len(results) else 2)
+    arc = arc_dir(args.arc)
+    if arc and args.track and args.round is not None and timings:
+        # One ledger row for the whole mutant batch, so `loop.py profile` can price the
+        # round's mutation work per mutant (lever L3) and see the queue it waited in.
+        record_job(arc, args.track, args.round, 'mutant', f'mutants-{os.path.splitext(src_base)[0]}',
+                   timings[0][1], timings[-1][2], rc, cpu='light', t_req=timings[0][0],
+                   queued_s=sum(t1 - t0 for t0, t1, _ in timings), mutants=len(timings),
+                   unscoped=len(unscoped), reported=sum(t2 - t1 for _, t1, t2 in timings),
+                   reason=f'{n_ok}/{len(results)} matched; tracked unchanged: {not changed}')
+    return rc
 
 
 if __name__ == '__main__':

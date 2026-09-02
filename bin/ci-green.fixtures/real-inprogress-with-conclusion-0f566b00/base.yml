@@ -1,0 +1,388 @@
+name: ci
+
+# Runs the test suite + type-check + the Next production BUILD on every PR and push to
+# main, so regressions (including the diff scale/memory guard,
+# plugins/your-data-product/zone/diff.scale.test.ts) surface in CI rather than in
+# production. The build step exists because tsc + vitest green does NOT mean the app
+# builds — a `node:` import reaching a client bundle fails only here (it broke the
+# deploy twice: a client-bundle 500 on 2026-08-06, node:crypto on 2026-08-11).
+# Deploy (fly-deploy.yml) runs separately.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # The merge-time half of the deploy interlock. fly-deploy.yml already refuses to deploy
+  # while `.deploy-freeze` exists on main — but a session only finds that out AFTER merging,
+  # by which point main is ahead of production. This surfaces the freeze as a red check on
+  # every open PR, at the moment someone is deciding whether to merge.
+  #
+  # It reads the deploy-control BRANCH, not the PR branch and not main: the freeze is a
+  # property of the repo's current state, and a branch cut before the freeze would otherwise
+  # look clear. It moved off main on 2026-08-18 — see scripts/deploy-freeze.sh for why
+  # (an armed freeze on main was unclearable under the "Protect main" ruleset).
+  #
+  # This WARNS; it does not block. Hard-blocking needs branch protection with this check
+  # marked required (repo admin) — see CLAUDE.md "Freezing deploys".
+  freeze:
+    name: deploy freeze check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      # Shares ONE predicate with the deploy interlock (scripts/deploy-freeze-check.sh), so a
+      # green PR check can never mean something different from what the deploy will decide.
+      # It is checked out rather than inlined for exactly that reason.
+      - uses: actions/checkout@v4
+      - name: Fail while a deploy freeze is active
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bash scripts/deploy-freeze-check.sh pr
+
+  # The repo root refilled with handoff documents, specs and plans at roughly 27 a week, and the
+  # 2026-09-01 sweep moved 381 entries that had accumulated because nothing ever said no. Moving
+  # them again is not prevention; this is. It runs the SAME routing table the sweep moves by
+  # (scripts/handoff-sweep.mjs --check), so a green check here and a quiet sweep cannot disagree.
+  #
+  # WHAT IT CAN SEE, precisely: a CI checkout contains tracked files only, so this catches a
+  # misfiled document somebody COMMITS. It is structurally blind to the untracked working files
+  # that make up most of the root's churn — those are caught by running the sweep locally, and no
+  # CI job can see them. Saying so here matters: a gate whose blind spot is undocumented gets
+  # trusted for coverage it never had.
+  #
+  # It needs no npm install — the sweep is plain Node with no dependencies — so it is seconds, not
+  # minutes, and is deliberately its own job so a layout failure reads on its own rather than
+  # hiding inside the test matrix.
+  #
+  # Like `freeze`, this WARNS: it goes red on the PR but does not block the merge until an admin
+  # marks it required in the "Protect main" ruleset.
+  repo-layout:
+    name: repo layout
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Exit codes are a contract (see runCheck): 0 clean, 1 misfiled, 2 could not read the root.
+      # 2 is a failure on purpose — "I could not tell" must never read as "nothing is wrong".
+      - name: Every root file must be in its documented home
+        run: node scripts/handoff-sweep.mjs --check
+
+  test:
+    name: test + typecheck
+    runs-on: ubuntu-latest
+    # Until vitest 4, a worker whose RPC call never settled was eventually noticed by birpc's 60s
+    # timer — which REPORTED the hang as a spurious failure rather than rescuing the run, and is the
+    # defect this repo upgraded to remove. Removing it removes the only bound that existed, so state
+    # a real one here. Measured over the 26 most recent non-outage runs of this job: median 1181s
+    # (19.7 min), slowest 1231s (20.5 min). 60 minutes is ~2.9x the slowest, so it cannot trip on a
+    # healthy run; it exists to stop a wedged job burning GitHub's 360-minute default.
+    # IF YOU EVER AUDIT WHETHER THIS CEILING HAS FIRED, DO NOT GREP FOR FAILED JOBS. GitHub records
+    # a `timeout-minutes` kill as `cancelled`, not `failure` -- verified against the Actions API in
+    # .review-rounds/2026-08-21-e2e-shard-ceiling/ci-shard-times.tsv, where all SIX kills of the old
+    # 4-shard e2e leg read `cancelled` at 3554-3575s while the only `failure` rows are the billing
+    # outage. That is how the e2e job's ceiling stayed invisible through 6 of 13 runs, and a survey
+    # of failures would have returned a confident zero. Query the conclusion, not the failure count.
+    timeout-minutes: 60
+    steps:
+      # fetch-depth: 0, and it is LOAD-BEARING, not hygiene. The §13 surface guards are statements
+      # about history: they read `scripts/start.sh` at 4343cdee, diff phase 0's file set from
+      # 6d4d53f7, and `git archive` a base tree into a scratch checkout. Under the default depth-1
+      # checkout every one of those is `fatal: Not a valid object name` -- reproduced in a
+      # `git clone --depth 1` of this branch, where `git cat-file -t 6d4d53f7`, `git show
+      # 4343cdee:package.json` and `git diff 6d4d53f7 HEAD` all fail. That is `npm test` red for a
+      # reason that has nothing to do with the code, so a shallow checkout here is not a saving.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build
+      - run: npm test
+        env:
+          # The subject those guards are ABOUT. `HEAD` on a pull_request build is the synthetic
+          # `refs/pull/N/merge` -- this branch merged into the base -- so its diff carries every file
+          # merged by anyone since. Empty on a push build, where HEAD is already right.
+          PHASE0_SUBJECT_REV: ${{ github.event.pull_request.head.sha }}
+          # The commit actually being diffed FROM. The file-set golden's "and no others" half is a
+          # statement about a branch off one particular base; when the base has moved on, the extras
+          # are other people's work and the guard stands down by name rather than accusing them.
+          PHASE0_DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+
+  # Treecue/provider-data is a standalone package with its own Vitest and TypeScript configs.
+  # Keep these checks separate instead of widening root vitest.config.ts: that preserves the
+  # root suite's established collection semantics while making package regressions visible in CI.
+  treecue-provider-data:
+    name: Treecue provider data
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm --prefix Treecue/provider-data test
+      - run: npm --prefix Treecue/provider-data run typecheck
+
+  # The shelf pages' recurring defect class is GEOMETRIC — a tile that looks clickable and
+  # isn't, a container that clips its content. vitest runs jsdom, which has no layout engine,
+  # so those bugs are invisible to `npm test` by construction. This job runs the same rendered
+  # HTML through real Chromium and clicks real coordinates.
+  #
+  # Hermetic: no server, no database, no network (the specs use page.setContent). It is a
+  # separate job rather than a step in `test` so a layout failure is legible on its own and
+  # does not delay the type-check/build signal.
+  e2e:
+    name: e2e (chromium layout) ${{ matrix.shard }}/${{ matrix.shardTotal }}
+    runs-on: ubuntu-latest
+    # SHARDED, and both the count and the reason are MEASURED. Every number below is traceable to a
+    # committed artifact under .review-rounds/2026-08-21-e2e-shard-ceiling/.
+    #
+    # Cost here does NOT track the test count. The 97 tests are wildly unequal: the ten sparse-probe
+    # tests carry most of the suite, and one of them alone is 596 local seconds (MODEL-OUTPUT.txt),
+    # while the MEDIAN test is 0.3s and 50 of the 97 are under a second (recomputed from
+    # durations.json, which MODEL-OUTPUT.txt summarises but does not print a median of). So "how many
+    # tests" tells you nothing about how long a leg runs, and a shard boundary matters far more than
+    # a shard count.
+    #
+    # How this job actually executes, verified rather than assumed:
+    #   * ONE Playwright worker per leg. Playwright's default is `workers: '50%'` and the runner has
+    #     2 vCPU, so each leg runs essentially SERIALLY. Read off a job log: "Running 24 tests using
+    #     1 worker, shard 3 of 4". Raising `--workers` is a REJECTED fix, with evidence: run this
+    #     suite locally at Playwright's default (9 workers on an 18-core box) and 7 of the 10
+    #     `edge discovery` tests take 228-234s where the 1-worker control passes all ten at 18-25s:
+    #     a ~10x per-test inflation, purely from contention. Those seven FAILED when measured,
+    #     against that block's then-current `test.setTimeout(180_000)` — a test cannot outrun its
+    #     own cap and fail by assertion, so the cap is what fired. That guard is 360_000ms since
+    #     2026-08-21 (e2e/__support__/hangGuards.ts), so the same experiment today would show the
+    #     contention as wall-clock rather than as a timeout. The inflation is the durable fact here,
+    #     not the disposition. Parallelism trades a wall-time problem for a timeout-flake one.
+    #   * Playwright assigns CONTIGUOUS blocks of the DECLARATION order — sizes floor(T/N) with the
+    #     first T mod N shards one larger (`node_modules/playwright/lib/runner/index.js`,
+    #     `filterForShard`, v1.62.1; confirmed by mapping `--list --shard=k/N` back to `--list`).
+    #     So the ten every-integer-width sparse tests, which are the expensive ones and are not
+    #     divisible further, sit together and a shard boundary either separates them or does not.
+    #
+    # WHY THIS CHANGED. At FOUR shards, leg 2/4 was being KILLED BY THE CEILING — not once, but in
+    # 6 of the 13 runs where it produced a time, at 3554-3575 `test:e2e` seconds plus ~45s of setup
+    # (ci-shard-times.tsv, 16 runs off the Actions API; 3 carry no seconds because they are the
+    # billing outage). The narrowest survivor was 3520s, i.e. 80 seconds inside the guard. An
+    # earlier version of this comment claimed "shard 2 ~18 minutes, the other three around 8", and a
+    # later one claimed the ceiling was hit "twice ... once passed with 32 seconds to spare". All
+    # three were wrong, which is why the numbers below are now read off artifacts and committed
+    # beside this file.
+    #
+    # EIGHT SHARDS WAS NOT ENOUGH EITHER, and that is a measurement, not a worry. Four complete
+    # 8-leg runs are recorded per-leg in ci-actuals-8-shard.tsv, and every one of them per-test in
+    # e2e/__support__/ci-cap-headroom.tsv — which also carries a fifth run measured at 14 legs, so
+    # that file is 97 tests x 5 = 485 samples while the 8-leg cohort is four. (A run can be
+    # recorded per-test with no legs at a given shard count; the reverse is what the identity
+    # check refuses.) What the four 8-leg runs say:
+    #
+    #   * the worst leg ever measured is 2623s test:e2e / 2672s as a job — 74% of this ceiling.
+    #   * the SAME leg ran 1495s, 2079s, 2575s, 2623s across those four runs, and leg 1/8 ran
+    #     886s..1823s: a 2.06x run-to-run spread on identical code. The per-TEST spread is 2.1x
+    #     (e2e/__support__/hangGuards.ts), so this is one property of the runner seen at two scales.
+    #   * 74% of the ceiling with a 2.06x spread is a gate that is one slow morning from red. An
+    #     earlier version of this comment read a SINGLE run and called it "about 25 minutes of
+    #     margin"; four runs call it 15 minutes on the worst one, and the spread eats that.
+    #
+    # NINETEEN shards, and the count is now CHECKED rather than argued:
+    # scripts/e2e-shard-ceiling.test.ts replays Playwright's real split over those 485 measured
+    # per-test seconds and applies one rule —
+    #
+    #     (worst leg ever seen at N + worst setup ever seen) * measured spread  <=  timeout
+    #
+    # — where every input is read out of a committed artifact, the spread included. At N=19 the
+    # worst leg simulates to 1488s, and so does the pessimal run (every test simultaneously at its
+    # own worst of five); +75s setup and the measured spread gives a 3216s worst case against this
+    # 3600s ceiling. At N=14 the same arithmetic gives 3907s and at N=8 it gives 6043s — 9% and 68%
+    # over. Take the spread operand from the artifact and not from this comment's display: the
+    # spread IS 1823/886, which PRINTS as 2.058x, and none of those three figures reproduces from
+    # the printed value. (1488+75)x2.058 is 3216.65, i.e. 3217; it is the unrounded ratio that
+    # gives 3215.97 -> 3216. Same for 3907 (3908 if you pre-round) and 6043 (6044). The
+    # implementation rounds once, at the end, and a reader who rounds first will not reproduce the
+    # committed numbers — which is why the ratio is quoted here as a ratio.
+    # The test also pins that 19 is the smallest count that clears the bar ON THE FIVE RUNS
+    # RECORDED HERE, so the number cannot quietly inflate.
+    #
+    # READ THAT QUALIFIER LITERALLY, because the count has already moved once under it. This block
+    # said FOURTEEN for as long as the evidence was four runs: at N=14 the pessimal of those four
+    # gave 3488s, a 3% margin. Run 32526213914 — the first ever run at N=14, all 14 legs green in
+    # 29 minutes — then set new per-test worsts on 14 tests, +251s on the pessimal sum, and the
+    # same rule over the same artifacts came out at 3907s, i.e. over. The MODEL is not what moved:
+    # re-simulated from that run's own per-test costs it reproduces every heavy leg to within 1.2%,
+    # and it predicted leg 5/14 at 1830s against a "pessimal" 1620s the four runs had called a
+    # worst case. FOUR RUNS WERE SIMPLY NOT A WORST CASE. Treat any margin quoted here the same
+    # way: the rule is a RATCHET — the pessimal can only rise as runs accumulate, so N is monotone
+    # non-decreasing in evidence and has no fixed point — and it multiplies a
+    # fast-runner-to-slow-runner spread onto a leg that is already a slow-runner observation. The
+    # working is in .review-rounds/2026-08-21-e2e-shard-ceiling/ceiling-run5.md, whose frontier
+    # table pre-registered this exact answer (14 fails at 3907s; 15-18 fail; 19 passes at 3216s)
+    # before the fold was performed, and was confirmed by it.
+    #
+    # 19 IS THE FIRST COUNT SHIPPED HERE WITH NO MEASURED LEGS OF ITS OWN. Eight and fourteen each
+    # have a committed per-leg cohort; nineteen has none until this ships and runs, so what stands
+    # in for the measurement is the model — entitled to speak only because it reproduces BOTH
+    # counts we have measured. When the first 19-leg run lands, record it as a third cohort;
+    # `the measured cohorts` test names the counts we have and will fail the moment that changes.
+    #
+    # The model may speak for counts we have never run ONLY because it reproduces the ones we have:
+    # simulated against measured, every leg above 360s in all four 8-leg runs agrees to within 2.0%
+    # (worst absolute error 16s), and so does every heavy leg of the 14-leg run — a SECOND shard
+    # count, which matters because the 8-leg check cannot see a permutation inside a leg.
+    #
+    # The simulation is biased LOW by a few seconds on every leg, always in the safe direction, and
+    # that bias is a measured constant rather than a hand-wave: across all 46 measured legs of both
+    # counts, measured minus simulated is +5.1s per light leg (range 2..8) and +6.9s per heavy one
+    # (range -5..+16). It is the list reporter's rounding (a sub-second test prints 0.0s) plus
+    # per-test fixture overhead the per-test seconds exclude, not a modelling error. Legs made
+    # entirely of sub-second tests therefore simulate to 0s against a measured 7s; the identity
+    # check names that exclusion instead of widening its tolerance until it disappears.
+    #
+    # More shards is NOT monotonically safer, and the test pins three counterexamples: N=10 is
+    # worse than N=9, N=13 worse than N=12, and 20-22 worse than 19. Playwright splits the
+    # DECLARATION order into contiguous blocks, so what matters is where a boundary lands relative
+    # to the ten every-integer-width sparse-probe tests, and nudging the count by one can put a
+    # boundary in a worse place. 19 is a knife-edge on that frontier: do not interpolate toward it
+    # or away from it — re-run the report.
+    #
+    # Nor is bigger free. Legs queue instantly (2-3s, measured off run 32520303212) and going wider
+    # SHORTENS the gate's wall clock — 14 legs took it from ~45 to ~29 minutes, measured — so the
+    # cost is not latency. It is that every leg is an independent chance of a per-leg
+    # infrastructure failure (`npx playwright install` has wedged once) on a gate that requires all
+    # legs green. That exposure grows linearly in N while the ceiling risk is already negligible on
+    # both sides of the choice, which is why the rule takes the smallest N that clears rather than
+    # the largest that fits. Per-leg fixed setup, re-measured across all 46 legs of both cohorts,
+    # is 34-75s (mean 47.7s; the 8-leg cohort alone means 47.5s, and that is the figure the test
+    # recomputes). Sharding does not change the test WORK, so re-paying that setup N times is the
+    # entire cost: mean per-run test work is 5723.2s over the five runs, so
+    # (5723.2 + 19x47.5) / (5723.2 + 8x47.5) is
+    # +8.6% more runner-seconds than 8 legs, and no extra wall clock. (An
+    # earlier version of this line said "~11%" and named no basis at all.) So runner-seconds are
+    # not what makes the count a real trade — the per-leg infrastructure exposure above is.
+    #
+    # Nor does the count turn on how setup is priced. It enters the rule inside the multiplied
+    # quantity, so it is fair to ask whether charging the worst leg's 75s rather than the 47.5s
+    # mean is what chose 19. It is not: the smallest clearing N is 19 at 0s, at the mean and at the
+    # worst, and the test pins all three.
+    #
+    # What this cost the GATE at four shards — the number that decides whether
+    # `e2e (chromium layout)` is safe to mark required on the ruleset. Counted with an explicit
+    # predicate, so it can be re-derived rather than believed: of the 16 runs in ci-shard-times.tsv,
+    # THREE are the billing outage (every leg `failure` with no seconds recorded), leaving 13 whose
+    # verdict reflects the tests. SIX of those 13 are red, and the red set is EXACTLY the six
+    # ceiling kills — every one of them leg 2/4, at 3554-3575s — so no other cause appears. A
+    # required gate on the 4-shard matrix would have blocked nearly half of all healthy runs, which
+    # is why the count had to move before the check is made required and not after.
+    # `npm test -- e2e-shard-ceiling` reproduces those four numbers from the artifact; an earlier
+    # version of this paragraph said "4 tainted, leaving 12" and cited a fourth run whose four legs
+    # are all `success` in that same file.
+    #
+    # Note when auditing this yourself: GitHub records a `timeout-minutes` kill as **cancelled**,
+    # not `failure`. A survey that greps for failed jobs finds ZERO ceiling kills on a matrix that
+    # was being killed by the ceiling in half its runs.
+    #
+    # `scripts/e2e-shard-plan.mjs` remains the tool for planning a count from a LOCAL duration
+    # vector, and is still worth reading for why it refuses a single scalar calibration. It is not
+    # what chose 14: it predicts, and its largest per-leg residual against the eight checkable legs
+    # was 44% (it projected leg 4 at 1658s; it ran at 929s). Prediction got us off the 4-shard
+    # ceiling; measurement chose the count.
+    #
+    # Before changing this again: add the new runs to BOTH artifacts, run
+    # `node scripts/e2e-shard-ceiling.mjs --report`, and let the test tell you the count. Raise the
+    # COUNT, never the timeout: the ceiling stays a hang guard, not a budget, so a wedged job dies
+    # inside an hour rather than sitting on GitHub's 6-hour default. A comment that misdescribes the
+    # matrix is how the next maintainer reintroduces the flake.
+    #
+    # That rule is about THIS ceiling, the job's. The per-test `test.setTimeout` guards inside the
+    # spec are a DIFFERENT instrument: they exist so a wedged page.evaluate fails as one test with a
+    # trace instead of eating the leg, and this 60-minute backstop is still behind them, so sizing
+    # them tightly buys nothing and costs a red gate. They are sized from measured CI cost in
+    # e2e/__support__/hangGuards.ts (485 samples; rules checked by scripts/e2e-hang-guards.test.ts).
+    # Conflating the two is how a green suite goes red on a slow runner: on 2026-08-21 a dense-sweep
+    # test capped at 1x its observed cost was killed at 486s against 480s while its sibling passed
+    # at 480.0s, on a runner that was simply slower. Do not size a hang guard as a budget.
+    #
+    # The total lives in ONE place (`shardTotal`) because it used to live in three — the job name,
+    # the matrix, and the command — and the comment above actively invites a maintainer to change
+    # it. Raising only the index list produced `--shard=5/4`, which Playwright rejects outright
+    # ("current must be a positive number, not greater than shard total", reproduced). The guard
+    # step below closes the one mismatch `shardTotal` cannot: an index list whose LENGTH disagrees
+    # with it. `strategy.job-total` is the number of legs GitHub actually expanded, so the two
+    # cannot silently drift.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        shardTotal: [19]
+    timeout-minutes: 60
+    steps:
+      - name: The shard index list must be exactly shardTotal long
+        run: |
+          echo "legs expanded: ${{ strategy.job-total }}; shardTotal: ${{ matrix.shardTotal }}"
+          if [ "${{ strategy.job-total }}" != "${{ matrix.shardTotal }}" ]; then
+            echo "::error::matrix.shard has ${{ strategy.job-total }} entries but shardTotal is ${{ matrix.shardTotal }}."
+            echo "::error::Playwright would be handed an out-of-range --shard. Change both together."
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e -- --shard=${{ matrix.shard }}/${{ matrix.shardTotal }}
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          # One name per shard: two shards uploading `playwright-report` collide and the second
+          # upload fails, which loses the report for the failure you actually wanted to read.
+          name: playwright-report-shard-${{ matrix.shard }}
+          path: playwright-report/
+          retention-days: 7
+
+  # The single required-status-check context for the layout guard, and the reason it exists is
+  # mechanical: a matrix reports one context PER LEG. With `name: e2e (chromium layout)
+  # ${{ matrix.shard }}/${{ matrix.shardTotal }}` GitHub publishes one `e2e (chromium layout) k/N`
+  # context PER LEG and NOTHING named `e2e (chromium layout)`. Marking the bare name required would
+  # pin a context that never reports, and a required context that never reports blocks every merge
+  # to main indefinitely — the same shape of outage as the freeze-on-main incident that #295 cleaned
+  # up. Pinning the per-leg names instead would work until someone changes the shard count, which
+  # the e2e comment explicitly invites ("raise the shard count rather than the timeout") and which
+  # has since happened. Nothing in this job may therefore depend on what the count is.
+  #
+  # So this job is the stable name. It runs no tests; it asserts the shards' aggregate result.
+  # `if: always()` is load-bearing: without it a failing `e2e` SKIPS this job, and a skipped check
+  # reports neutral — the gate would pass by not running, which is precisely the failure mode of
+  # concluding something is fine from a probe that could not have seen it fail.
+  e2e-gate:
+    name: e2e (chromium layout)
+    runs-on: ubuntu-latest
+    needs: e2e
+    if: always()
+    steps:
+      - name: Every shard must have succeeded
+        run: |
+          echo "e2e matrix aggregate result: ${{ needs.e2e.result }}"
+          if [ "${{ needs.e2e.result }}" != "success" ]; then
+            echo "::error::The chromium layout guard did not pass. One or more of the e2e shards"
+            echo "::error::failed, was cancelled, or was skipped (aggregate: ${{ needs.e2e.result }})."
+            echo "::error::Open the per-shard jobs above and read the red one's own status first."
+            echo "::error::A leg that FAILED uploaded playwright-report-shard-N: download it, that"
+            echo "::error::is the evidence. A leg that was CANCELLED has NO report at all — the"
+            echo "::error::upload step is if: failure() — so do not read a missing artifact as a"
+            echo "::error::missing failure; a cancel usually means a sibling leg failed first."
+            exit 1
+          fi
+          echo "Every e2e shard succeeded (aggregate: ${{ needs.e2e.result }})."

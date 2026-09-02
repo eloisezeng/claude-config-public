@@ -78,6 +78,23 @@ Note the ordering that found these: the *negative* control (force a 404 → must
 auth bug, and the *positive* one (real repo → must yield a real verdict) surfaced the unsatisfiable
 set. Running only the failure side would have left a detector that could never say GREEN.
 
+**A check-run's `status` and its `conclusion` can disagree, and the fix's own strictness became
+the fourth fail-CLOSED.** Measured 2026-09-02 on `your-companyAI/your-other-project` sha `0f566b00`:
+`repos/.../commits/<sha>/check-runs` served the job `deploy freeze check` as
+`status="in_progress"` **with** `conclusion="success"`, while the workflow run itself read
+`completed`/`success` and the other 23 check-runs all read `completed`/`success`. `ci-derive.py`
+required `status == "completed"` per row, so it reported `NOT-GREEN -- still running` on a commit
+whose CI had finished, and the watcher ran to its 2400 s ceiling ~40 minutes after green. The rule
+is: **a row carrying a conclusion is finished, whatever its `status` says** — `conclusion` is written
+only at finalization, so this is not a loosening; a row with an empty conclusion still counts as
+running, and a `completed` row with an empty conclusion still fails as not-successful. Both
+directions are pinned (cases 19–21 against the real capture, mutant `require-completed-status`).
+Note what the earlier controls could not see: every fixture in the suite had been captured at a
+moment when the two fields agreed, so the disagreement was not *in* the captured output until this
+commit produced it. Capturing real bytes buys you the states you happened to observe, not the state
+space — when a predicate reads two fields, control it on them disagreeing even if you have never
+seen that.
+
 **How to apply.** Prefer a structural terminal condition over string-matching a summary line
 (the exit status or a state enum over prose), read the per-commit API rather than a PR rollup,
 require presence as well as non-pendingness, and never collapse rows by a key the API does not

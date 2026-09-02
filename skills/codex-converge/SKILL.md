@@ -156,11 +156,15 @@ The rule that does bind: no usage-based overage without explicit per-action perm
 
 ```
 SKILL=~/dotfiles/claude/skills/codex-converge
-"$SKILL/run-codex.sh" --policy-version 2026-08-30-regression-v1 /tmp/cc-prompt.txt /tmp/cc-verdict.json /tmp/cc-run.log "$WORKTREE" \
+ARC="$CLAUDE_JOB_DIR/tmp"   # one directory per arc holds the ledger; TRACK is the lens, ROUND the panel number
+"$SKILL/run-codex.sh" --policy-version 2026-09-02-scheduler-v1 --arc "$ARC" --track "$TRACK" --round "$ROUND" /tmp/cc-prompt.txt /tmp/cc-verdict.json /tmp/cc-run.log "$WORKTREE" \
   -p sol --output-schema "$SKILL/review-output.schema.json"
 ```
 
-Its contract is `run-codex.sh --policy-version 2026-08-30-regression-v1 [--write] <prompt-file> <out-file> <log-file> <workdir> [codex-args...]`.
+Its contract is `run-codex.sh --policy-version 2026-09-02-scheduler-v1 [--write] (--arc DIR --track T --round N [--name NAME] | --one-off) <prompt-file> <out-file> <log-file> <workdir> [codex-args...]`.
+Attribution is mandatory: an unattributed launch exits 2 before touching codex, because it would be unscheduled and unprofiled.
+`CC_ARC` / `CC_TRACK` / `CC_ROUND` in the environment also count, and the arc defaults to `$CLAUDE_JOB_DIR/tmp`; `--one-off` is for a single call outside any arc (the `codex-opinion` skill uses it).
+An attributed launch re-executes itself under `loop.py run`, which ledgers it in `<arc>/jobs.jsonl`, takes the tree lock, and refuses (rc 6) while the previous round of that track is unclosed or has a TRIGGERED lever nobody has dispositioned — see "Keeping the loop short".
 The version handshake is a fail-closed session refresh: when this review policy changes, increment
 the version in both files. A session holding old instructions cannot launch another round; the
 launcher tells it to re-read this file and acknowledge the current version. It cannot alter a
@@ -197,7 +201,8 @@ Pass the vendored schema so the CLI enforces the shape, instead of the prompt me
 
 ```
 SKILL=~/dotfiles/claude/skills/codex-converge
-"$SKILL/run-codex.sh" --policy-version 2026-08-30-regression-v1 /tmp/cc-prompt.txt /tmp/cc-verdict.json /tmp/cc-run.log "$WORKTREE" \
+ARC="$CLAUDE_JOB_DIR/tmp"   # one directory per arc holds the ledger; TRACK is the lens, ROUND the panel number
+"$SKILL/run-codex.sh" --policy-version 2026-09-02-scheduler-v1 --arc "$ARC" --track "$TRACK" --round "$ROUND" /tmp/cc-prompt.txt /tmp/cc-verdict.json /tmp/cc-run.log "$WORKTREE" \
   -p sol --output-schema "$SKILL/review-output.schema.json"
 ```
 
@@ -324,7 +329,7 @@ Codex is allowed to implement plan tasks. **The one rule that cannot bend: whoev
 **Run it with the launcher's `--write` mode**, which is the only supported way to get a mutating run:
 
 ```
-"$SKILL/run-codex.sh" --policy-version 2026-08-30-regression-v1 --write /tmp/task.txt /tmp/task-out.json /tmp/task.log "$WORKTREE" \
+"$SKILL/run-codex.sh" --policy-version 2026-09-02-scheduler-v1 --write --arc "$ARC" --track "$TRACK" --round "$ROUND" /tmp/task.txt /tmp/task-out.json /tmp/task.log "$WORKTREE" \
   -p terra
 ```
 
@@ -382,7 +387,8 @@ review round as 2-4 concurrent lens-scoped prompts, not as repeated identical pa
   fix for the finding before it.
 - **Do not stop on small numbers.** On the measured build, correctness returned 0 findings twice
   and then a HIGH on the next round. Stop only on a genuinely clean round, then confirm.
-- **Keep a written round scorecard: total findings and HIGHs per round.** A round returning only
+- **Keep a written round scorecard: total findings and HIGHs per round, with the `profile-loop.sh`
+  timeline and levers pasted beside it (see "Keeping the loop short").** A round returning only
   LOWs is a stop (use the deferral dispositions), not "one more pass". A FLAT rate over 3+ rounds
   (measured on a 12-round build: 5,6,4,4,4,6 findings / 2,2,1,1,1,2 HIGHs — no trend) means
   grinding has reached equilibrium: your fixes add reviewable surface as fast as the panel consumes
@@ -536,6 +542,27 @@ Carry adjudicated disputes into the next round's `<verified_environment_facts>` 
 
 The gate above defines *when* you are done; these rules keep the number of rounds it takes small.
 They were extracted from a real loop that ran 30+ rounds, roughly half of them grinding a single validator family one finding at a time.
+
+**Profile the loop at EVERY round boundary — the launcher now refuses to skip it.**
+Every review or `--write` launch is attributed (`--arc DIR --track T --round N`) and runs through `loop.py`, which writes an exact per-job ledger (`<arc>/jobs.jsonl`: requested / started / ended, queue wait, CPU class, tree state, exit code) and holds two locks.
+The per-tree lock is shared by readers and exclusive for a `--write`, so a write waits for the reviews reading that tree and a review never starts on a tree mid-edit; a read-only job whose tree changes underneath it anyway exits 5 and quarantines its verdict as `<out>.tree-moved` (the fail-open the old SHA assertion gave you, now mechanical).
+The machine-wide CPU lock serialises wide vitest / tsc / full-suite runs (exclusive), lets scoped test files share it, and is not taken at all by model reviews or `--write` runs — so reviews overlap implementation for free while the suites that used to fight each other cannot.
+**Do not make a review wait for an unrelated write — freeze the SHA and read that.**
+`python3 "$SKILL/loop.py" snapshot --arc "$ARC" --track T --round N --repo <any worktree> --sha <SHA>` prints a detached worktree at `<arc>/wt/<sha12>`, created once and reused.
+A review pointed at that path holds the lock on a tree nobody writes, so it overlaps implementation on the real worktree instead of queueing behind it — this is the whole of lever L1, and it is why a round's three lenses launch in parallel rather than in sequence.
+It does not weaken the tree-moved check: the snapshot is still snapshotted and compared, so a lens whose frozen tree is disturbed still exits 5 and quarantines its verdict.
+The snapshot is taken and compared while the tree lock is HELD, so a writer that merely finished while a reader was queued is the tree the reader reads, not a "move" that quarantines a good verdict.
+`--prune` removes them when the arc is done.
+
+Run scoped tests through it too: `python3 "$SKILL/loop.py" run --arc "$ARC" --track T --round N --kind vitest --tree "$WORKTREE" -- npx vitest run <changed test files>`.
+It counts the `Test Files` / `Tests` summary lines and fails CLOSED (rc 5) on the zero-file or zero-test run that vitest itself exits 0 on; a wide run (no file arguments, or more than 8 files) is refused (rc 4) unless declared a checkpoint (`--checkpoint "pre-merge"`), and `--affected BASE` derives the file list from `git diff --name-only` and escalates to a checkpoint by itself when a config file moved.
+Route mutation testing through `mutate.py --arc "$ARC" --track T --round N` — it shares the ledger and the light CPU lock, turns a `-t` that matched nothing into MISARMED instead of a green, and never arms a mutant in the tracked tree.
+At the boundary run `profile-loop.sh "$ARC" --round T:N` and paste its `timeline` and `levers` blocks into the scorecard, then `python3 "$SKILL/loop.py" close-round --arc "$ARC" --track T --round N`.
+`close-round` records which levers read TRIGGERED for that track and round, and every launcher for round N+1 of that track exits 6 until each one is dispositioned with `python3 "$SKILL/loop.py" lever --arc "$ARC" --track T --round N --id L3 --state landed|declined --note "…"`.
+A lever that reads TRIGGERED is landed before the next panel launches, never listed as an option (memory `optimize-the-loop-unprompted`); a decline carries the reason into the ledger.
+Gaps in the arc's wall-clock are classed from evidence only — `declared` (via `loop.py note`), `seat-blocked` / `seat-active` / `seat-silent` from the job heartbeat, else `unknown` — the profiler never names a cause it cannot show.
+A flat artifact directory with no ledger still profiles under the old birth→mtime heuristics, and every such artifact is reported UNATTRIBUTED (lever L7).
+The profiler's own fail-opens remain: a span read as "the suite got slower" is usually two runs contending for one machine — L4 names the overlapping jobs, so rerun the slow one ALONE before touching compiler or test config — and the one thing the scheduler cannot lock is a vitest run that codex launches inside a `--write` job.
 
 **Read each round by REMEDY SHAPE, and leave the document stage when the findings turn code-shaped.**
 A finding is **code-shaped** when discharging it means writing a function, a case table or a test-matrix row — "this rule has no implementable signature", "this matrix covers one of three kinds", "this named mutant survives".

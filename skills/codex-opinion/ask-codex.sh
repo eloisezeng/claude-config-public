@@ -78,7 +78,7 @@ FRAME
 # Both the tier AND the effort, always: profile defaults are per-machine and luna's is `low`.
 # --policy-version is REQUIRED by run-codex.sh since 2026-08-30; without it the launcher
 # refuses the call as a stale-session launch (measured 2026-09-01, rc=2).
-"$RUNNER" --policy-version 2026-08-30-regression-v1 "$PROMPT" "$VERDICT" "$LOG" "$WORKDIR" \
+"$RUNNER" --policy-version 2026-09-02-scheduler-v1 --one-off "$PROMPT" "$VERDICT" "$LOG" "$WORKDIR" \
   -p "$TIER" -c model_reasoning_effort="high"
 rc=$?
 

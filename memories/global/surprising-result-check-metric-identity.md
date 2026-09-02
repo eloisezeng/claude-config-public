@@ -17,6 +17,9 @@ The tail number came from `summary.json`, where `score_panel` emits per-dataset 
 Apples-to-apples the tail average was 0.56% WORSE, exactly the "tail ≈ last" the spec predicted; the "encouragement" was withdrawn and the records corrected in place.
 The mismatch surfaced only when the next tier's gate driver read both numbers from one JSON and disagreed — a 1.79× single-dataset swing from a passive weight average should have been the tell.
 
+**Escalation (2026-08-26, the same class one level up):** the round-4 BAR itself was metric-mismatched — the mentor's matrix (per-sample-mean rel-L2 by strong inference) was compared against ratio-of-sums nRMSE across an entire certification campaign, manufacturing a fictitious 20-28% "film-lineage gap" that survived a pilot, a diagnosis, and two 90-cell certifications.
+Adopting ANY external artifact as a comparator therefore requires, BEFORE first use: (1) a named-statistic contract for the artifact, (2) reproducing at least one of its values end-to-end from raw predictions under that statistic, (3) an executable gate refusing comparisons whose our-side key differs (the `eval/bar_gate.py` pattern: metric contract + full-panel reproduction table + itemized/waived outliers).
+
 **How to apply:**
 - Treat "larger than the spec expected" as a defect signal first and a finding second; the spec's prediction is the prior.
 - Never pair a number from an aggregate/summary file with one from a per-run result file without printing the `metric_source`/definition of each; prefer the per-run file for both sides.

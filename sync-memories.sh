@@ -7,7 +7,11 @@
 # symlink, so the repo becomes the single source of truth and ordinary edits to
 # the memory write straight through to the tracked file.
 #
-# Per-project state memories (no `scope: global`) are left untouched and local.
+# Per-project state memories (no `scope: global`) stay local by default. A project
+# OPTS IN to being backed up by having a tree at memories/<root>/<projectdir>/:
+# its memories are then moved there and symlinked back, so both machines share
+# them and install.sh restores them on a fresh checkout. Projects with no such
+# tree are untouched, exactly as before.
 #
 # Safe to run anytime: idempotent, fast, no-ops when nothing is newly global.
 #
@@ -91,7 +95,31 @@ for root in claude claude1; do
   # Iterate real (non-symlink) memory files, excluding the per-project index.
   while IFS= read -r f; do
     [ -L "$f" ] && continue          # already backed up (symlink into repo)
-    is_global "$f" || continue       # not tagged global -> leave it local
+    if ! is_global "$f"; then
+      # Project-local memory. Backed up ONLY for projects that opt in by having a
+      # tree at memories/<root>/<projectdir>/ -- otherwise left untouched and local,
+      # exactly as before. The layout is the one install.sh's restore_memories
+      # re-creates, so a second machine picks these up as symlinks automatically.
+      pdir="${f#"$base"/}"; pdir="${pdir%%/*}"
+      tree="$MEM_ROOT/$root/$pdir"
+      [ -d "$tree" ] || continue
+      lfile="$(basename "$f")"
+      ldest="$tree/$lfile"
+      if [ -e "$ldest" ]; then
+        cmp -s "$f" "$ldest" || { log "CONFLICT (skipped, repo differs): $root/$pdir/$lfile"; continue; }
+        rm -f "$f"; ln -sfn "$ldest" "$f"
+        log "relinked local $root/$pdir/$lfile"
+        continue
+      fi
+      mv "$f" "$ldest"
+      ln -sfn "$ldest" "$f"
+      log "backed up local $root/$pdir/$lfile"
+      continue
+    fi
+    # A project MEMORY.md is an index, never a global body: promoting it would
+    # clobber memories/global/MEMORY.md. Excluded here rather than in the find so
+    # the local-backup branch above can still cover it.
+    [ "$(basename "$f")" = "MEMORY.md" ] && continue
 
     # .../projects/<projectdir>/memory/<file>  ->  flat global store
     file="$(basename "$f")"
@@ -113,5 +141,5 @@ for root in claude claude1; do
     mv "$f" "$dest"                        # move into store; NO symlink-back
     log "promoted global/$file"
     warn_unindexed "$file" "$index"
-  done < <(find "$base" -type f -path '*/memory/*.md' ! -name 'MEMORY.md' 2>/dev/null)
+  done < <(find "$base" -type f -path '*/memory/*.md' 2>/dev/null)
 done

@@ -270,6 +270,52 @@ printf 'leg 1\tcompleted\tsuccess\t1\n' > "$d3/runs.tsv"
 case_run "unresolvable templated name -> NOT-GREEN (incomplete set, not a pass)" 1 "could not resolve templated job name" "$d3"
 
 
+# 19-21. A CHECK-RUN CAN CARRY A CONCLUSION WHILE ITS `status` STILL SAYS in_progress.
+#     REAL captured output, 2026-09-02, your-companyAI/your-other-project sha 0f566b00: the job
+#     `deploy freeze check` was served as status="in_progress" conclusion="success" while the
+#     workflow run itself was completed/success and the other 23 check-runs all read
+#     completed/success. A predicate keyed on status=="completed" reports NOT-GREEN forever on
+#     that commit -- measured, a watcher timed out ~40 min after CI had actually gone green.
+#     Three cases, because the fix has to hold in both directions:
+#       19 satisfiability -- the real capture must go GREEN;
+#       20 negative control -- clear that one conclusion and it must go back to NOT-GREEN, so 19
+#          cannot be passing because the row is being ignored;
+#       21 fail-closed -- `completed` with an EMPTY conclusion is still not a pass.
+INPROG="$FIXTURES/real-inprogress-with-conclusion-0f566b00"
+[ -f "$INPROG/runs.tsv" ] || { echo "missing captured fixture $INPROG/runs.tsv" >&2; exit 2; }
+mk_inprog() { local d="$T/$1"; mkdir -p "$d"; cp "$INPROG/head.yml" "$INPROG/base.yml" "$INPROG/runs.tsv" "$d/"; printf '%s' "$d"; }
+
+# 19. the capture, unmodified.
+case_run "real capture: in_progress WITH a success conclusion -> GREEN" 0 "VERDICT: GREEN" "$INPROG"
+
+# 20. same fixture, that row's conclusion cleared -> genuinely unfinished.
+d=$(mk_inprog inprog_no_conclusion); python3 - "$d" <<'PY'
+import sys, os
+p = os.path.join(sys.argv[1], "runs.tsv")
+rows = [l.rstrip("\n").split("\t") for l in open(p) if l.strip()]
+hit = 0
+for r in rows:
+    if r[1] != "completed":
+        while len(r) < 3: r.append("")
+        r[2] = ""; hit += 1
+assert hit == 1, f"expected exactly one non-completed row in the capture, found {hit}"
+open(p, "w").write("".join("\t".join(r) + "\n" for r in rows))
+PY
+case_run "in_progress with NO conclusion -> NOT-GREEN (the control for 19)" 1 "still running" "$d"
+
+# 21. and the other direction: a finished-looking row with nothing decided is not a pass.
+d=$(mk_inprog completed_no_conclusion); python3 - "$d" <<'PY'
+import sys, os
+p = os.path.join(sys.argv[1], "runs.tsv")
+rows = [l.rstrip("\n").split("\t") for l in open(p) if l.strip()]
+for r in rows:
+    while len(r) < 3: r.append("")
+rows[0][1] = "completed"; rows[0][2] = ""
+open(p, "w").write("".join("\t".join(r) + "\n" for r in rows))
+PY
+case_run "completed with an EMPTY conclusion -> NOT-GREEN (fail closed)" 1 "not successful" "$d"
+
+
 echo "----"
 echo "$PASS passed, $FAIL failed  (derive under test: $DERIVE)"
 SUITE_RC=0; [ "$FAIL" -eq 0 ] || SUITE_RC=1
@@ -299,8 +345,11 @@ PY
     fi
   }
   mutate drop-presence-check 'if missing: why.append' 'if False: why.append'
-  mutate accept-any-status   'if st != "completed": why.append' 'if False: why.append'
-  mutate accept-any-conclusion 'elif cc not in ("success", "neutral", "skipped"): why.append' 'elif False: why.append'
+  mutate accept-any-status   'why.append(f"still running: {n} ({st})")' 'pass'
+  mutate accept-any-conclusion 'if cc not in ("success", "neutral", "skipped"): why.append' 'if False: why.append'
+  # Reverting the conclusion-aware settle rule: this is exactly the predicate that hung on
+  # 0f566b00, and case 19 is the only thing in the suite that can see it.
+  mutate require-completed-status 'if st == "completed" or cc:' 'if st == "completed" and True:'
   mutate allow-empty-expected 'if not expected: why.append' 'if False: why.append'
   mutate dedupe-by-name 'rows.append((p[0], p[1], p[2] if len(p) > 2 else "", p[3] if len(p) > 3 else ""))' 'rows[:] = [r for r in rows if r[0] != p[0]] + [(p[0], p[1], p[2] if len(p) > 2 else "", p[3] if len(p) > 3 else "")]'
   mutate head-only-derivation 'for f in sorted(glob.glob(os.path.join(D, "*.yml"))):' 'for f in [os.path.join(D, "head.yml")]:'
