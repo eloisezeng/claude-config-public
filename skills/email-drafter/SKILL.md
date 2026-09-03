@@ -38,9 +38,9 @@ What makes it sound like her (keep these):
 - **Soft, direct asks.** The request is clear but not a hard pitch. "Could we put a little money behind this?" not "I require funding to proceed."
 - **Parenthetical asides with concrete examples.** She clarifies with quick "(like repair vs. maintenance vs. installation)" parentheticals. These are part of her voice; keep them, just don't let them run on.
 - **Owns constraints plainly.** Money, limits, what's broken — she states them matter-of-factly rather than hiding them. Keep that candor.
-- **Concrete over vague.** She pushes for real numbers and named specifics, not hand-wavy ranges: "$5 to $20 a month (Railway or Fly.io on the cheaper end)", "about 5,000 free searches a month", "I've used $1.22 of credit testing it, with $3.57 left." When a figure or name is known, use it instead of "some money" or "a few." If you're unsure of a number, get it rather than fudge it.
+- **Concrete over vague.** She pushes for real numbers and named specifics, not hand-wavy ranges: "\$5 to \$20 a month (Railway or Fly.io on the cheaper end)", "about 5,000 free searches a month", "I've used \$1.22 of credit testing it, with \$3.57 left." When a figure or name is known, use it instead of "some money" or "a few." If you're unsure of a number, get it rather than fudge it.
 - **Plain language, not jargon.** Write for a smart non-engineer (her collaborator Alex). Translate technical terms — she had "per SKU" rewritten as "each type of call gets its own free monthly quota." If a term needs insider knowledge, explain it in plain words or cut it.
-- **"We/our" for the venture, "I" for her own actions.** The project is "we" and "our website"; reserve "I" for things she personally did ("I built a prototype," "I've used $1.22 of credit," "I was wondering if you'd want to move forward").
+- **"We/our" for the venture, "I" for her own actions.** The project is "we" and "our website"; reserve "I" for things she personally did ("I built a prototype," "I've used \$1.22 of credit," "I was wondering if you'd want to move forward").
 
 Structure she prefers (this is strong — she restructures almost every draft this way):
 
@@ -65,7 +65,7 @@ What to avoid:
 > I built a prototype today: a chat interface where a user can explain their problem and get help finding a serviceman. Here are some screenshots:
 >
 > To get the MVP working, we would need some money:
-> - **Hosting:** Right now it only runs locally. A small always-on host runs about $5 to $20 a month (Railway or Fly.io on the cheaper end).
+> - **Hosting:** Right now it only runs locally. A small always-on host runs about \$5 to \$20 a month (Railway or Fly.io on the cheaper end).
 > - **APIs:** The Google Maps/Places API gives us about 5,000 free searches a month, but we need to enter a credit card. For now, the results are scraped from Google into a file.
 
 Note what stayed: the honest framing, the plain owning of the money constraint, the context-then-ask flow. What changed: lists pulled into colon-led bullets, vague costs replaced with concrete numbers and named hosts, "I" → "we" for the shared venture, typos gone, no em dashes, tighter.
@@ -95,8 +95,8 @@ This is a full email the user wrote and signed off on. It's the single best refe
 >
 > To get the MVP working, we would need some money:
 >
-> - **Hosting:** Right now it only runs locally. A small always-on host runs about $5 to $20 a month (Railway or Fly.io on the cheaper end).
-> - **APIs:** The Google Maps/Places API gives us about 5,000 free searches a month, but we need to enter a credit card. For now, the results are scraped from Google into a file. The Claude API for the chat is a few cents per conversation. I've used $1.22 of credit testing it so far, with $3.57 left.
+> - **Hosting:** Right now it only runs locally. A small always-on host runs about \$5 to \$20 a month (Railway or Fly.io on the cheaper end).
+> - **APIs:** The Google Maps/Places API gives us about 5,000 free searches a month, but we need to enter a credit card. For now, the results are scraped from Google into a file. The Claude API for the chat is a few cents per conversation. I've used \$1.22 of credit testing it so far, with \$3.57 left.
 >
 > There's also a lot more we could build for the servicemen themselves, including automated quote generation, invoicing, and the other items I listed in a previous document.
 >

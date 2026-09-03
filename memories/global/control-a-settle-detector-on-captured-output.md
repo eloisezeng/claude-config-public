@@ -104,3 +104,5 @@ assert the predicate against those files. And give the loop a ceiling that *repo
 one that merely stops — a false timeout is recoverable, a false green is not, so when in doubt
 build the predicate to fail closed. Related: [[absence-needs-a-probe-that-could-see-presence]] ·
 [[a-guard-must-be-satisfiable-not-just-failable]] · [[verify-claims-against-artifacts]] · [[watch-the-run-you-triggered]].
+
+The ready-made detector is `~/.claude/bin/ci-green.sh <sha> [base-ref]`, tested by `~/dotfiles/claude/bin/ci-green.test.sh`. Its two predecessors both failed on real captured output: `*", 0 pending,"*` never fired because `gh pr checks` drops the pending clause entirely once nothing is pending, and `*"0 pending"*` matched inside `20 pending` and called a running build SETTLED.

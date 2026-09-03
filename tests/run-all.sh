@@ -96,7 +96,23 @@ for s in "${SUITES[@]}"; do
     else
       printf 'FAIL  %-46s %3ss (exit %s)\n' "$s" "$el" "$rc"
     fi
-    [ "$VERBOSE" -eq 0 ] && printf '%s\n' "$out" | tail -20 | sed 's/^/      /'
+    # A bare tail is not a diagnosis. tests/handoff.test.sh tears down ~20 seat
+    # processes, and each shell job-control notice ("Terminated: 15") reprints the
+    # seat's whole inline script -- about 12 lines apiece. Measured 2026-09-02: a
+    # real FAIL line sat far above a 20-line tail window, so the runner reported a
+    # failure while showing none of its cause, and the suite passed when re-run by
+    # hand. Print the assertion markers FIRST -- they are the only lines a reader
+    # can act on -- and keep the tail after them for context.
+    if [ "$VERBOSE" -eq 0 ]; then
+      marks="$(printf '%s\n' "$out" | grep -nE '^[[:space:]]*(FAIL|not ok|ERROR|Assertion)' | head -15)"
+      if [ -n "$marks" ]; then
+        printf '%s\n' "$marks" | sed 's/^/      /'
+        printf '      -- (line numbers are into the suite'"'"'s own output; tail follows)\n'
+      else
+        printf '      -- (no FAIL/ERROR marker in the output; the suite exited %s on its own)\n' "$rc"
+      fi
+      printf '%s\n' "$out" | tail -20 | sed 's/^/      /'
+    fi
   fi
 done
 

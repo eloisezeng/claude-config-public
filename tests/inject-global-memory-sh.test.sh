@@ -3,6 +3,14 @@
 set -u
 HOOK="$(cd "$(dirname "$0")/.." && pwd)/inject-global-memory.sh"
 fail=0
+
+# The cap under test is the runtime's OWN budget, read from the file under test --
+# never a second literal.  These four assertions each restated the old number; when
+# the budget was raised on 2026-09-02 they still measured the old one and reddened
+# on a value nobody had changed.  tests/inject-budget-parity.test.sh pins the two
+# runtimes to the same value, so each test reads its own subject and they agree.
+BUDGET="$(grep -E '^budget=[0-9]+$' "$HOOK" | head -1 | cut -d= -f2)"
+[ -n "$BUDGET" ] || { echo "FAIL: no ^budget=N line in $HOOK (anchor moved?)"; exit 1; }
 assert_contains() { case "$2" in *"$1"*) ;; *) echo "FAIL: expected to contain: $1"; fail=1;; esac; }
 assert_empty()    { [ -z "$1" ] && return; echo "FAIL: expected empty output, got: $1"; fail=1; }
 assert_eq()       { [ "$1" = "$2" ] && return; echo "FAIL: expected '$2' got '$1'"; fail=1; }
@@ -33,16 +41,50 @@ out="$(CLAUDE_GLOBAL_MEMORY_DIR="$tmp/global" bash "$HOOK")"
 assert_contains "[Bar](bar.md)" "$out"
 case "$out" in *"<!--"*) echo "FAIL: comment leaked into output"; fail=1;; esac
 
-# Case E: oversize -> truncated, hard cap <= 12000 (= the script's budget; equality
-# with the .mjs BUDGET is pinned by tests/inject-budget-parity.test.sh)
-awk 'BEGIN { for (i = 0; i < 400; i++) print "- [x](x.md) — padding line to exceed the byte budget for truncation" }' > "$tmp/global/MEMORY.md"
+# Case E: oversize -> hooks ABBREVIATED, no memory dropped.
+# The whole point of the change: a memory that is not listed can never be
+# unfolded, so the injection caps every hook to the longest length that fits
+# and keeps all 400 slugs. Assert the count, not just the notice — a notice
+# claiming "every one is listed" is a MENTION, and a mention is not a property.
+awk 'BEGIN { for (i = 0; i < 400; i++) print "- [x" i "](x" i ".md) — padding line, long enough that the hook must be abbreviated to fit" }' > "$tmp/global/MEMORY.md"
 out="$(CLAUDE_GLOBAL_MEMORY_DIR="$tmp/global" bash "$HOOK")"
-assert_contains "truncated — read" "$out"
-[ "${#out}" -le 12000 ] || { echo "FAIL: exceeds hard cap (${#out})"; fail=1; }
+listed="$(printf '%s\n' "$out" | grep -c '^- ')"
+[ "$listed" -eq 400 ] || { echo "FAIL: $listed of 400 memories listed (expected all 400)"; fail=1; }
+assert_contains "hooks abbreviated to" "$out"
+# Read the two NUMBERS out of the notice rather than pattern-matching on them:
+# `*"0 hooks abbreviated"*` matches inside "400 hooks abbreviated", so the guard
+# passed on exactly the output it existed to reject.
+n_abbrev="$(printf '%s\n' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) hooks abbreviated to.*/\1/p')"
+n_cap="$(printf '%s\n' "$out" | sed -n 's/.*hooks abbreviated to \([0-9][0-9]*\) chars.*/\1/p')"
+[ "${n_abbrev:-0}" -gt 0 ] || { echo "FAIL: notice claims abbreviation but cut nothing ($n_abbrev)"; fail=1; }
+[ "${n_cap:-0}" -gt 0 ]    || { echo "FAIL: hooks abbreviated away entirely (cap=$n_cap)"; fail=1; }
+[ "${#out}" -le "$BUDGET" ] || { echo "FAIL: exceeds budget $BUDGET (${#out})"; fail=1; }
 
+# Case E2: the fallback. When the bare SLUGS alone overflow the budget there
+# is nothing left to abbreviate, so entries must be dropped — and the notice must
+# still name the count. Without this case the drop path is untested code.
+awk 'BEGIN { for (i = 0; i < 400; i++) { s = sprintf("slug-%03d-padded-out-to-sixty-odd-characters-so-slugs-alone-overflow", i); print "- [" s "](" s ".md) — h" } }' > "$tmp/global/MEMORY.md"
+out="$(CLAUDE_GLOBAL_MEMORY_DIR="$tmp/global" bash "$HOOK")"
+assert_contains "TRUNCATED:" "$out"
+assert_contains "memories are NOT loaded" "$out"
+case "$out" in
+  *"TRUNCATED: 0 of "*) echo "FAIL: truncation notice reports 0 dropped"; fail=1;;
+  *"TRUNCATED: of "*)   echo "FAIL: truncation notice has no count"; fail=1;;
+esac
+[ "${#out}" -le "$BUDGET" ] || { echo "FAIL: exceeds budget $BUDGET (${#out})"; fail=1; }
 # Case F (decisive): works in a MINIMAL env where node/nvm is absent — bash is on /bin.
 printf -- '- [Foo](foo.md) — fact\n' > "$tmp/global/MEMORY.md"
 out="$(env -i PATH=/usr/bin:/bin CLAUDE_GLOBAL_MEMORY_DIR="$tmp/global" bash "$HOOK")"
 assert_contains "Global memory (cross-project)" "$out"
+
+# Case F2: the ABBREVIATION path under that same minimal env. Case F only ran the
+# short-index path, which never touches the array/binary-search code — and that is
+# the code production actually executes, on /bin/bash 3.2 (no mapfile, `set -u`).
+# A hook that works interactively and dies under `env -i` injects nothing, silently.
+awk 'BEGIN { for (i = 0; i < 400; i++) print "- [x" i "](x" i ".md) — padding line, long enough that the hook must be abbreviated to fit" }' > "$tmp/global/MEMORY.md"
+out="$(env -i PATH=/usr/bin:/bin CLAUDE_GLOBAL_MEMORY_DIR="$tmp/global" bash "$HOOK" 2>&1)"
+listed="$(printf '%s\n' "$out" | grep -c '^- ')"
+[ "$listed" -eq 400 ] || { echo "FAIL: minimal env listed $listed of 400"; fail=1; }
+assert_contains "hooks abbreviated to" "$out"
 
 [ "$fail" = 0 ] && echo "PASS: inject-global-memory-sh" || exit 1

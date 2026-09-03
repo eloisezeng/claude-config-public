@@ -116,11 +116,11 @@ jobs:
           # are other people's work and the guard stands down by name rather than accusing them.
           PHASE0_DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
 
-  # Treecue/provider-data is a standalone package with its own Vitest and TypeScript configs.
+  # your-module/provider-data is a standalone package with its own Vitest and TypeScript configs.
   # Keep these checks separate instead of widening root vitest.config.ts: that preserves the
   # root suite's established collection semantics while making package regressions visible in CI.
-  treecue-provider-data:
-    name: Treecue provider data
+  your-module-provider-data:
+    name: your-module provider data
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -130,8 +130,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm --prefix Treecue/provider-data test
-      - run: npm --prefix Treecue/provider-data run typecheck
+      - run: npm --prefix your-module/provider-data test
+      - run: npm --prefix your-module/provider-data run typecheck
 
   # The shelf pages' recurring defect class is GEOMETRIC — a tile that looks clickable and
   # isn't, a container that clips its content. vitest runs jsdom, which has no layout engine,

@@ -10,7 +10,7 @@ When a guard enumerates sites and asserts each one is correct, the predicate is 
 **A text-level predicate — "the enclosing function mentions `X`" — is not a test that `X` was applied to the value that matters.**
 It is satisfied by a site that mentions `X` once and leaks the value somewhere else, which is precisely the shape a half-done fix has.
 
-**Measured 2026-08-30, Treecue phase-0 impl, CI red cycle 1 (finding F3).**
+**Measured 2026-08-30, your-module phase-0 impl, CI red cycle 1 (finding F3).**
 Four test sites spawned a child `vitest` and asserted on its stdout; CI colourises, so all four needed `stripAnsi` and a no-colour env, and only one of the four had it.
 The fix went into one shared module and a guard was written to keep it there.
 The guard's first predicate was `enclosingFunctionText.includes('stripAnsi')`.

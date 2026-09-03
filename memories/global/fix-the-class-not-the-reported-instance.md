@@ -33,7 +33,7 @@ them. Then pin the CLASS with a test, not just the reported instance. Relates to
 
 **This applies to correcting CLAIMS, not just code.** A retraction has a definition site and
 citation sites, and fixing only the first leaves the refuted claim standing where readers actually
-meet it. Measured 2026-08-27 (treecue §13): a round withdrew a guard's universal claim at the guard
+meet it. Measured 2026-08-27 (your-module §13): a round withdrew a guard's universal claim at the guard
 body and recorded itself as complete, while two traceability-table rows two hundred lines away still
 asserted the withdrawn claim verbatim — found only by the next pass grepping the claim's own
 keywords. So after correcting any claim, grep the artifact for the claim's distinctive words

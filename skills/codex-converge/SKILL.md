@@ -141,7 +141,7 @@ Escalate the prompt before escalating the model.
 Per OpenAI's own Codex prompting guidance: tighten the task contract and the verification rules first, and only then raise reasoning.
 If a round comes back vague, the usual fix is a missing `<structured_output_contract>`, not a bigger tier.
 
-**Budget.** Published API pricing is Sol $5/$30, Terra $2.50/$15, Luna $1/$6 per 1M input/output tokens.
+**Budget.** Published API pricing is Sol \$5/\$30, Terra \$2.50/\$15, Luna \$1/\$6 per 1M input/output tokens.
 Those are **API-key prices and are not what the user pays** — this machine authenticates Codex with a ChatGPT subscription, so usage draws on plan allowances and credits instead.
 Use the dollar figures only as a *relative weight* between tiers, never as a spend estimate.
 The rule that does bind: no usage-based overage without explicit per-action permission.
@@ -387,6 +387,15 @@ review round as 2-4 concurrent lens-scoped prompts, not as repeated identical pa
   fix for the finding before it.
 - **Do not stop on small numbers.** On the measured build, correctness returned 0 findings twice
   and then a HIGH on the next round. Stop only on a genuinely clean round, then confirm.
+- **Two structural columns belong in the scorecard beside severity, and both are one command.**
+  (a) *throws-added vs types-added* in the round's fixes — a mostly-throws round deferred the design,
+  so spend the next fix on the shape (see "…then encode the guard in the SHAPE").
+  (b) *fixes-per-file across the arc* —
+  `git log --grep='^fix(<arc>)' --pretty=%H | while read c; do git show --stat --format= --name-only $c; done | grep -v '\.test\.' | sort | uniq -c | sort -rn | head -3`.
+  A non-test file taking **>40% of the arc's fixes is a structural finding**, not a hot spot: it has
+  fused the decision with the IO, so a scenario is the only way to reach any of its rules and each
+  round finds one more combination in it. Extract the pure decision in the same round as that file's
+  next fix, and argue it with the count — "15 of 28" is an argument, "this file feels big" is not.
 - **Keep a written round scorecard: total findings and HIGHs per round, with the `profile-loop.sh`
   timeline and levers pasted beside it (see "Keeping the loop short").** A round returning only
   LOWs is a stop (use the deferral dispositions), not "one more pass". A FLAT rate over 3+ rounds
@@ -425,7 +434,7 @@ when it is trivial (a grammar fix, a constant), or when the mechanical queue wou
 judgment stream. The DEFAULT stays "route mechanical to Codex" on mixed-set rounds — this is the
 exception, not the reverse.
 
-**Route by sub-task, and write the table first.** The routing UNIT is the sub-task, not the finding: write the routing table BEFORE the first fix lands, and carve each judgment finding's mechanical tail (a golden regeneration, a guard copied from an existing rule, a test scaffold) onto the Codex queue so it runs under the judgment work — the judgment stream is the critical path and it shortens only by moving work OFF it (measured 2026-09-01, treecue r1: 17 accepted, 7 mechanical ones ran on Codex in parallel, then the last three judgment items each carried such a tail and ran it serially on the judgment seat). A "mirror X inline in the UI" finding is an IMPORT of the existing predicate, never a second copy (share one predicate with the backend).
+**Route by sub-task, and write the table first.** The routing UNIT is the sub-task, not the finding: write the routing table BEFORE the first fix lands, and carve each judgment finding's mechanical tail (a golden regeneration, a guard copied from an existing rule, a test scaffold) onto the Codex queue so it runs under the judgment work — the judgment stream is the critical path and it shortens only by moving work OFF it (measured 2026-09-01, your-module r1: 17 accepted, 7 mechanical ones ran on Codex in parallel, then the last three judgment items each carried such a tail and ran it serially on the judgment seat). A "mirror X inline in the UI" finding is an IMPORT of the existing predicate, never a second copy (share one predicate with the backend).
 
 Expect `LAUNCHER_EXIT=4` as normal in shared-`.git` repos: `workspace-write` cannot reach the
 repo's `.git/worktrees` dir, so Codex edits but cannot commit. Quarantined ≠ failed — gate the tree
@@ -512,6 +521,33 @@ that friction is the entire mechanism.**
 Prefer a guard at a CHOKE POINT over flags each call site must remember: the flag shape is
 fail-open, and the next component written the obvious way silently reinherits the bug.
 
+### …then encode the guard in the SHAPE, which is one step further
+
+Prose → guard is where this section used to stop, and stopping there has a measured cost. Over four
+weeks of one arc, 28 fix commits titled "harden / enforce / validate … invariants" added **~110
+`throw` statements against ~27 type-or-schema constructs**, ending at **316 throws in 8,725 lines —
+one every 28 lines**, with 15 of the 28 landing in the same 2,893-line module. Every round was
+correct and converged; the invariants still ended up as scattered interior checks.
+
+A finding of the form "X can be invalid *here*" is a **type** bug. The check closes the finding;
+only the shape closes the class.
+
+- **Parse at the boundary, don't validate in the interior.** One function turns untrusted input into
+  a narrowed type — a discriminated union, a branded id, a non-empty array, a required
+  non-optional field — and every downstream signature takes that type. A `throw` at depth 3 says the
+  type at depth 0 was too wide.
+- **Prefer impossible to loud.** A required parameter fails in CI at every call site at once; a
+  runtime assert fails on one production path, later, in front of the user.
+- **Two effects that must happen together are one function, one transaction, and the second's data
+  is a required never-defaulted parameter of it.** Left to call-site discipline the pair holds until
+  the first resume/backfill/retry path, then fails silently and writes no artifact to point at.
+  (Measured: 735,506 names committed with no downstream wake, 734,892 archived unscreened.)
+- **Anything that REPORTS what a run did queries the rows by run id**, rather than counting what the
+  run returned — the return path and the write path diverge the moment anything writes mid-run.
+  (Measured: a run that spent \$0.119 and filed an approval card logged itself a no-op.)
+- A guard is genuinely right where the constraint is **dynamic** — a live budget, a clock, a vendor
+  response. It is wrong wherever the caller could simply have been unable to say the invalid thing.
+
 ## Convergence definition — one gate
 
 A stage is converged when **every** finding raised by either side has a recorded disposition.
@@ -550,6 +586,9 @@ The machine-wide CPU lock serialises wide vitest / tsc / full-suite runs (exclus
 **Do not make a review wait for an unrelated write — freeze the SHA and read that.**
 `python3 "$SKILL/loop.py" snapshot --arc "$ARC" --track T --round N --repo <any worktree> --sha <SHA>` prints a detached worktree at `<arc>/wt/<sha12>`, created once and reused.
 A review pointed at that path holds the lock on a tree nobody writes, so it overlaps implementation on the real worktree instead of queueing behind it — this is the whole of lever L1, and it is why a round's three lenses launch in parallel rather than in sequence.
+**L1 reads SOLO wait — one blocking call with an idle machine behind it — not merely "a wait with no non-wait beside it".**
+Two lenses overlapping is the state L1 asks for, so a fully parallel panel must read quiet or the lever is telling you to land the fix you just landed.
+Measured on this skill's own arc: round 2 ran three lenses concurrently for 19m28s and the earlier predicate still reported TRIGGERED at 100%; under the solo rule the same round reads 7m32s (39%) and goes quiet, and that 7m32s is the real tail — the last lens still running after the other two finished, with nothing left to overlap it with.
 It does not weaken the tree-moved check: the snapshot is still snapshotted and compared, so a lens whose frozen tree is disturbed still exits 5 and quarantines its verdict.
 The snapshot is taken and compared while the tree lock is HELD, so a writer that merely finished while a reader was queued is the tree the reader reads, not a "move" that quarantines a good verdict.
 `--prune` removes them when the arc is done.
@@ -557,6 +596,8 @@ The snapshot is taken and compared while the tree lock is HELD, so a writer that
 Run scoped tests through it too: `python3 "$SKILL/loop.py" run --arc "$ARC" --track T --round N --kind vitest --tree "$WORKTREE" -- npx vitest run <changed test files>`.
 It counts the `Test Files` / `Tests` summary lines and fails CLOSED (rc 5) on the zero-file or zero-test run that vitest itself exits 0 on; a wide run (no file arguments, or more than 8 files) is refused (rc 4) unless declared a checkpoint (`--checkpoint "pre-merge"`), and `--affected BASE` derives the file list from `git diff --name-only` and escalates to a checkpoint by itself when a config file moved.
 Route mutation testing through `mutate.py --arc "$ARC" --track T --round N` — it shares the ledger and the light CPU lock, turns a `-t` that matched nothing into MISARMED instead of a green, and never arms a mutant in the tracked tree.
+To mutate a helper that lives in the test file itself (a wait, a deadline, a fixture rule), pass the same file as `--src` and `--test` and give the module it imports with `--also-copy loop.py`; companions are placed unmutated beside the copy each round and hashed as tracked.
+The copy dir holds the source under its basename and the test under ITS basename, test written second, so a basename collision between two DIFFERENT files would overwrite the armed source and report every mutant SURVIVED at exit 0 — that shape is refused as usage (rc 4), and the same-file case writes one file once instead.
 At the boundary run `profile-loop.sh "$ARC" --round T:N` and paste its `timeline` and `levers` blocks into the scorecard, then `python3 "$SKILL/loop.py" close-round --arc "$ARC" --track T --round N`.
 `close-round` records which levers read TRIGGERED for that track and round, and every launcher for round N+1 of that track exits 6 until each one is dispositioned with `python3 "$SKILL/loop.py" lever --arc "$ARC" --track T --round N --id L3 --state landed|declined --note "…"`.
 A lever that reads TRIGGERED is landed before the next panel launches, never listed as an option (memory `optimize-the-loop-unprompted`); a decline carries the reason into the ledger.

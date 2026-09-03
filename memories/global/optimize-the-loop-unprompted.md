@@ -16,14 +16,14 @@ Two sibling failures to watch for in the same breath: re-running a 267-file suit
 
 **A directive no checklist calls is not a mechanism.**
 The user, 2026-09-02, one day after writing this rule: *"i thought you already wrote a skill to automatically detect potential ways to speed up the implementation process. did u forget to activate it?"*
-The rule sat in `CLAUDE.md` and here, and the TREECUE phase-1 seat still hand-rolled cp/sed mutants in the live worktree instead of `mutate.py` on a copy, ran a wide suite ten times where a scoped one answered, and wrote no profile until asked — because nothing in the codex-converge round checklist invoked the rule, so it depended on recall at a busy moment and lost.
+The rule sat in `CLAUDE.md` and here, and the YOUR-MODULE phase-1 seat still hand-rolled cp/sed mutants in the live worktree instead of `mutate.py` on a copy, ran a wide suite ten times where a scoped one answered, and wrote no profile until asked — because nothing in the codex-converge round checklist invoked the rule, so it depended on recall at a busy moment and lost.
 The mechanism is now `~/dotfiles/claude/skills/codex-converge/profile-loop.sh <round-dir>…`, called by the "Profile the loop at EVERY round boundary" step in that skill's "Keeping the loop short" section: it reads the artifacts a round already leaves (codex run logs and verdicts, vitest / tsc / mutant logs, CI watches) and prints the ranked wall-clock table, the wait time with nothing else in flight, every gap ≥ 30 min, and each lever evaluated as TRIGGERED or quiet with its fail-open.
 When a rule keeps needing reminding, the fix is a step with a script, not a louder rule.
 
 **Do this instead.**
 At every boundary of any loop you will run more than twice — review round, fix round, verification battery, sweep — run the profiler and paste its timeline and levers into the scorecard: where did the wall-clock actually go, and what is the top item?
 Measure it, do not guess it; a stage nobody timed is where the cost is.
-Measured on the TREECUE arc (15 h window, 2026-09-01/02): waits on Codex / `--write` / CI were 1h22m, and 1h13m of that ran with NOTHING else in flight; one 9h24m gap had no artifact at all; ten wide vitest runs of 1–4.5 min stood in for scoped questions; six mutant batteries ran 13 s–1m41s because they re-ran whole files.
+Measured on the YOUR-MODULE arc (15 h window, 2026-09-01/02): waits on Codex / `--write` / CI were 1h22m, and 1h13m of that ran with NOTHING else in flight; one 9h24m gap had no artifact at all; ten wide vitest runs of 1–4.5 min stood in for scoped questions; six mutant batteries ran 13 s–1m41s because they re-ran whole files.
 Guesses refuted by the same measurement, so do not repeat them: tsc was already incremental (4 s cold, `tsconfig` "incremental": true); `vitest related` on a core module selected 542 of 545 files, so it is not a selector; a "75 s per mutant" figure was a timeout CEILING, and the real run took 5.75 s.
 The signature to hunt is a repeated stage paying O(N x M) for an O(N) fact — a per-item check that re-runs the whole population, a full-suite run standing in for one file, a serial queue of independent items.
 Then **land the fix as code in the shared tool** (`mutate.py`, the runner, the harness), never as a prose note or a per-arc script, so every session and every future round inherits it instead of rediscovering it.
@@ -38,5 +38,10 @@ Per-item rigor (the mutation checks, the parallel lenses) is what makes cheapeni
 Anything you can do unilaterally is already authorised — [[standing-directives-are-standing-requests]].
 Report the speedup as landed and measured, and raise only the one lever that genuinely needs her word (spend, or a decision that changes scope).
 "Say the word and I'll…" about an optimisation you could have already applied IS the finding.
+
+**The ledger, and the gate that makes it fire.**
+Since 2026-09-02 `profile-loop.sh` reads the `loop.py` ledger that every attributed `run-codex.sh --arc/--track/--round` launch writes, so the timeline is derived rather than reconstructed by hand.
+`loop.py close-round` makes the gate mechanical: the next round's launcher exits 6 until each TRIGGERED lever is dispositioned, and the codex-converge checklist calls it.
+That call is the whole point — a directive nothing calls does not fire, measured 2026-09-02, one day after this rule was written.
 
 Related: [[convergence-loop-speed-rules]] (the four levers this rule tells you to go looking for), [[a-report-is-not-a-stopping-point]], [[reduce-token-burn]], [[extract-learnings-proactively]], [[a-guard-must-be-satisfiable-not-just-failable]].

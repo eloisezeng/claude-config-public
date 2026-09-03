@@ -1,0 +1,18 @@
+{
+  "_comment": "Enforced ratchet for the session-start context cost. `limits` may only ever DECREASE -- bin/context-budget.py --set-baseline refuses to raise one, and every enforced metric is PER ENTRY or an invariant (means are reported, never enforced: a mean is a total wearing a per-entry label, and reddens on honest growth), so writing a genuinely new memory is free while writing a bloated one is not. `targets` are what CLAUDE.md's and MEMORY.md's own one-line invariants ask for; they are reported as debt, never enforced, so the gap stays visible. Keys in `targets` but not `limits` are the BILL (total bytes, hook text abbreviated away): reported every run, never used to fail one.",
+  "limits": {
+    "directive_max_bytes": 977,
+    "index_max_bytes": 522,
+    "index_dropped": 0
+  },
+  "targets": {
+    "claude_md_bytes": 40000,
+    "memory_md_bytes": 28000,
+    "directive_max_bytes": 700,
+    "index_max_bytes": 400,
+    "index_dropped": 0,
+    "index_hook_chars_lost": 0,
+    "directive_mean_bytes": 300,
+    "index_mean_bytes": 200
+  }
+}

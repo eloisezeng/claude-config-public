@@ -2,7 +2,13 @@
   "env": {
     "CLAUDE_HANDOFF_MODEL": "claude-opus-5[1m]"
   },
-  "model": "claude-fable-5[1m]",
+  "permissions": {
+    "allow": [
+      "Bash"
+    ],
+    "defaultMode": "bypassPermissions"
+  },
+  "model": "opus[1m]",
   "hooks": {
     "SessionStart": [
       {
@@ -51,7 +57,17 @@
         ]
       }
     ],
-    "PreToolUse": [],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$HOME/dotfiles/claude/hooks/no-raw-color-literal.mjs\""
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -103,7 +119,18 @@
     "context-mode@context-mode": true,
     "claude-mem@thedotmack": false,
     "frontend-design@claude-plugins-official": true,
-    "codex@openai-codex": true
+    "codex@openai-codex": true,
+    "code-review@claude-plugins-official": true,
+    "context7@claude-plugins-official": true,
+    "code-simplifier@claude-plugins-official": true,
+    "playwright@claude-plugins-official": true,
+    "github@claude-plugins-official": true,
+    "claude-md-management@claude-plugins-official": true,
+    "feature-dev@claude-plugins-official": true,
+    "security-guidance@claude-plugins-official": true,
+    "typescript-lsp@claude-plugins-official": true,
+    "pr-review-toolkit@claude-plugins-official": true,
+    "sonarqube@claude-plugins-official": true
   },
   "extraKnownMarketplaces": {
     "context-mode": {
@@ -126,6 +153,11 @@
     }
   },
   "effortLevel": "xhigh",
+  "modelSettings": {
+    "claude-opus-5": {
+      "effortLevel": "high"
+    }
+  },
   "autoCompactWindow": 200000,
   "showClearContextOnPlanAccept": true,
   "skipDangerousModePermissionPrompt": true,

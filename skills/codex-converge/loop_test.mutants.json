@@ -1,0 +1,44 @@
+[
+  {
+    "label": "M46 a dead producer no longer ends the wait, so a test that can never pass burns the whole backstop",
+    "old": "        if procs and all(p.poll() is not None for p in procs) and not os.path.exists(path):\n",
+    "new": "        if False:\n",
+    "expect": "killed",
+    "test": "test_wait_path_fails_at_once_when_every_producer_has_exited"
+  },
+  {
+    "label": "M47 the wait gives up on ANY exited producer instead of all of them (a live slow producer is failed early)",
+    "old": "        if procs and all(p.poll() is not None for p in procs) and not os.path.exists(path):\n",
+    "new": "        if procs:\n",
+    "expect": "killed",
+    "test": "test_a_live_producer_is_waited_for_rather_than_timed_out"
+  },
+  {
+    "label": "M48 a derived deadline drops the calibration and becomes the bare literal it replaced",
+    "old": "    return max(floor, scale * SPAWN[0])\n",
+    "new": "    return floor\n",
+    "expect": "killed",
+    "test": "test_a_derived_deadline_moves_with_the_machine_and_never_below_its_floor"
+  },
+  {
+    "label": "M49 a derived deadline drops its floor, so an idle machine's fast spawn shrinks every ceiling",
+    "old": "    return max(floor, scale * SPAWN[0])\n",
+    "new": "    return scale * SPAWN[0]\n",
+    "expect": "killed",
+    "test": "test_a_derived_deadline_moves_with_the_machine_and_never_below_its_floor"
+  },
+  {
+    "label": "M50 the sample rule takes the MAX of three, so one 5s hiccup multiplies every deadline in the file",
+    "old": "    return max(0.02, sorted(samples)[1])\n",
+    "new": "    return max(0.02, sorted(samples)[2])\n",
+    "expect": "killed",
+    "test": "test_the_sample_rule_rejects_one_outlier_and_keeps_its_floor"
+  },
+  {
+    "label": "M51 the sample rule drops its floor, so a machine faster than 0.02s shrinks every backstop",
+    "old": "    return max(0.02, sorted(samples)[1])\n",
+    "new": "    return sorted(samples)[1]\n",
+    "expect": "killed",
+    "test": "test_the_sample_rule_rejects_one_outlier_and_keeps_its_floor"
+  }
+]

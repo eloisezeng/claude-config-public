@@ -20,5 +20,5 @@ e2e (chromium layout) 2/19	completed	success
 e2e (chromium layout) 16/19	completed	success
 test + typecheck	completed	success
 e2e (chromium layout) 6/19	completed	success
-Treecue provider data	completed	success
+your-module provider data	completed	success
 deploy freeze check	in_progress	success

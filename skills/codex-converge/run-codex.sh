@@ -32,6 +32,9 @@
 #   - exit 0 ONLY if codex exited 0 AND wrote a non-empty regular file, which is then renamed
 #     into place within the destination directory. A partial file is never promoted, and a
 #     failed promotion leaves no partial destination behind.
+#   - exit 8 if the run resolved to reasoning effort 'none' (a silent profile fall-through): the
+#     verdict came from a tier nobody chose, so it is moved aside to <out-file>.void rather than
+#     returned as a completed review.
 #   - a run whose log goes idle for ~STALL_SECS is killed by process GROUP, escalated to
 #     SIGKILL while any group member survives, and reaped under a deadline that the final
 #     wait cannot exceed.
@@ -190,8 +193,27 @@ if [ "$_want_profile" -eq 1 ]; then
   echo "run-codex: -p/--profile given with no profile name" >&2; exit 2
 fi
 if [ -n "$REQ_PROFILE" ]; then
-  if [ ! -f "$CODEX_HOME/$REQ_PROFILE.config.toml" ] \
-     && ! grep -qE "^\[profiles\.\"?${REQ_PROFILE}\"?\"?\]" "$CODEX_HOME/config.toml" 2>/dev/null; then
+  # The name is data, not a pattern. It used to be interpolated straight into a grep -E regex, so
+  # a name carrying a metacharacter matched a profile it does not name -- `-p '.*'` matches
+  # `[profiles.sol]` and the guard waves it through, after which codex silently falls back to the
+  # base config and the verdict comes from a tier nobody chose. That is the exact failure this
+  # guard exists to catch, so the comparison is literal and the name itself is constrained.
+  case "$REQ_PROFILE" in
+    *[!A-Za-z0-9._-]*|''|.|..|*..*)
+      echo "run-codex: profile name '$REQ_PROFILE' is not a plain profile name" >&2
+      echo "run-codex: (letters, digits, dot, underscore, dash; no path segments)" >&2
+      exit 2 ;;
+  esac
+  _found=0
+  if [ -f "$CODEX_HOME/$REQ_PROFILE.config.toml" ]; then _found=1; fi
+  if [ "$_found" -eq 0 ] && [ -f "$CODEX_HOME/config.toml" ]; then
+    while IFS= read -r _p; do
+      if [ -n "$_p" ] && [ "$_p" = "$REQ_PROFILE" ]; then _found=1; fi
+    done <<EOF
+$(grep -oE '^\[profiles\.[^]]+\]' "$CODEX_HOME/config.toml" 2>/dev/null | sed 's|^\[profiles\.||; s|\]$||; s|"||g')
+EOF
+  fi
+  if [ "$_found" -eq 0 ]; then
     {
       echo "run-codex: codex profile '$REQ_PROFILE' does not exist in $CODEX_HOME."
       echo "run-codex: codex would SILENTLY fall back to the base config rather than error,"
@@ -369,9 +391,16 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
       RAN_EFFORT="$(printf '%s\n' "$_banner" | sed -n 's/^[[:space:]]*reasoning effort:[[:space:]]*//p' | head -1)"
       echo "[watchdog] tier actually used: model=${RAN_MODEL:-unknown} effort=${RAN_EFFORT:-unknown}"
       if [ "$RAN_EFFORT" = "none" ]; then
-        echo "run-codex: WARNING - the run resolved to reasoning effort 'none'." >&2
-        echo "run-codex: this verdict came from an unintended tier; do not treat it as a" >&2
-        echo "run-codex: completed review at the depth you requested (model=${RAN_MODEL:-unknown})." >&2
+        # This used to warn on stderr and then exit 0, so a round the launcher had ITSELF
+        # identified as void was handed to the caller as a completed review -- and a warning
+        # inside a multi-hundred-line log is not a gate. Effort 'none' is never something this
+        # skill asks for: it is what a silent profile fall-through resolves to. Fail closed.
+        echo "run-codex: the run resolved to reasoning effort 'none' (model=${RAN_MODEL:-unknown})." >&2
+        echo "run-codex: this verdict came from an unintended tier -- it is NOT a completed review" >&2
+        echo "run-codex: at the depth you requested, so the run is quarantined rather than returned." >&2
+        echo "run-codex: the output is kept at $OUT.void for inspection." >&2
+        mv -f "$OUT" "$OUT.void" 2>/dev/null || true
+        exit 8
       fi
       if [ "$WRITE_MODE" -eq 1 ]; then
         echo "run-codex: START_SHA=$START_SHA" >&2

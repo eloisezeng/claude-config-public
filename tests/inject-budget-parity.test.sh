@@ -17,4 +17,27 @@ if [ "$fail" = 0 ] && [ "$sh_budget" != "$mjs_budget" ]; then
   echo "FAIL: budget drift — sh=$sh_budget mjs=$mjs_budget (raise BOTH or neither)"; fail=1
 fi
 
+# The budget number is only half the contract. In 2026-09 the two runtimes had the
+# SAME budget but produced different output: the bash hook sliced with `head -c`
+# (BYTES) against a cap it tested with ${#out} (CHARACTERS), so ~166 chars of
+# multi-byte em-dash made it truncate an entry early. A number-only parity test saw
+# nothing. Assert the OUTPUT, which is what actually reaches the model.
+if command -v node >/dev/null 2>&1; then
+  export CLAUDE_GLOBAL_MEMORY_DIR="$root/memories/global"
+  sh_out="$(bash "$root/inject-global-memory.sh")"
+  mjs_out="$(node "$root/inject-global-memory.mjs")"
+  sh_n="$(printf '%s\n' "$sh_out" | grep -c '^- ')"
+  mjs_n="$(printf '%s\n' "$mjs_out" | grep -c '^- ')"
+  if [ "$sh_out" != "$mjs_out" ]; then
+    echo "FAIL: injection OUTPUT drift — sh keeps $sh_n entries, mjs keeps $mjs_n"
+    echo "      (same budget, different result: check byte-vs-char slicing and the"
+    echo "       index-compaction rewrite in both runtimes)"
+    fail=1
+  else
+    echo "  ok: both runtimes emit identical output ($sh_n entries)"
+  fi
+else
+  echo "  SKIP: node not on PATH — output parity unchecked (budget parity still asserted)"
+fi
+
 [ "$fail" = 0 ] && echo "PASS: inject-budget-parity" || exit 1

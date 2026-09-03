@@ -14,7 +14,7 @@ Before trusting any completeness/closure assertion, satisfy it by hand against t
 The implementer meets an impossible right-hand side, widens it by hand to get green, and the widening restores exactly the drift the guard existed to stop.
 Nobody records that the guard was weakened, because from the outside it still reads as a closed enumeration.
 
-**Measured, 2026-08-28, Treecue phase-0 spec §6.2.**
+**Measured, 2026-08-28, your-module phase-0 spec §6.2.**
 The clause read: *a source scan asserts the exported function set of `agentActions.ts` equals these eight plus the unchanged exports named in §6.1, so a ninth converted helper cannot be added without a case here.*
 That set does not exist — the file has **26 exports**, and **11 are named nowhere in §6.1**.
 So the guard written to catch a ninth converted helper was **hiding the ninth converted helper** (`setAgentGate`, a direct map reader whose `?? []` path would have silently returned an empty gate map), for six review rounds, and no round reported it.

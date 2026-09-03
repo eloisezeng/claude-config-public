@@ -24,3 +24,5 @@ Anything synchronous and slow in-process is a candidate blocker: a synchronous D
 - **Isolate per-check failures.** One `try/catch` around a `Promise.all` of independent probes lets the first thrown one mask the rest, discarding real findings the other legs made and reporting a message that names no subject. Attribute each result to its own check.
 
 Related: [[wall-clock-ceilings-measure-the-machine]] (the test-side form of the same confusion), [[verify-claims-against-artifacts]], [[a-control-must-match-the-probes-shape]].
+
+Measured: 0 failures in 320 lookups, slowest 33 ms, for the very name a `tries:1` gate had just refused. The c-ares form is `new Resolver({timeout, tries})`; the blocking work was a sync DB driver on a big file and a co-located process winning the CPU. A handshake timeout is the only retryable class — an expired cert or an identity mismatch still fails on attempt 1, or the retry has weakened the gate.

@@ -207,7 +207,12 @@ def vitest_shape(argv: list[str]) -> dict:
             if flag in VALUE_FLAGS and not has_val:
                 skip = True
             continue
-        (files if FILE_RE.search(tok) and not GLOB_RE.search(tok) else dirs).append(tok)
+        # A token that names an existing regular file selects exactly ONE file however it is spelled —
+        # Next.js route folders are literally called `[slug]`, which GLOB_RE would otherwise read as a
+        # character class and push a four-file run into the wide class. A token absent from disk keeps
+        # the glob reading, so the misread still fails towards heavy.
+        is_one_file = FILE_RE.search(tok) and (os.path.isfile(tok) or not GLOB_RE.search(tok))
+        (files if is_one_file else dirs).append(tok)
     return dict(sub=sub, files=files, dirs=dirs, wide_flag=wide_flag, name_filter=name_filter, known=True)
 
 
@@ -277,7 +282,12 @@ def ledger_append(arc: str, ev: dict) -> None:
     line = json.dumps(ev, sort_keys=True) + '\n'
     fd = os.open(ledger_path(arc), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     try:
-        os.write(fd, line.encode('utf-8'))
+        # os.write may write FEWER bytes than asked. Under O_APPEND a short write leaves a truncated
+        # JSON line with no newline, and the next append lands on the same line — corrupting two
+        # events with one slip. Loop until the buffer is gone.
+        buf = line.encode('utf-8')
+        while buf:
+            buf = buf[os.write(fd, buf):]
     finally:
         os.close(fd)
 
@@ -302,7 +312,7 @@ def ledger_read(arc: str) -> list[dict]:
 def record_job(arc: str, track: str, rnd: int, kind: str, name: str, t_start: float, t_end: float,
                rc: int, **extra) -> str:
     """Ledger a job that ran outside `run` (mutate.py uses this): start + end events."""
-    job = f'{track}.r{rnd}.{name}.{int(t_start * 1000)}'
+    job = f'{track}.r{rnd}.{name}.{int(t_start * 1000)}.{os.getpid()}'
     ledger_append(arc, dict(ev='start', t=t_start, job=job, track=track, round=rnd, kind=kind, name=name,
                             cpu=extra.pop('cpu', 'light'), t_req=extra.pop('t_req', t_start),
                             queued_s=extra.pop('queued_s', 0.0), **extra))
@@ -316,7 +326,24 @@ def lock_dir() -> str:
 
 
 def tree_lock_name(tree: str) -> str:
+    """One lock per WORKTREE, keyed on its TOPLEVEL — never on the path the caller happened to pass.
+
+    Keying on the passed path let `--tree /repo` and `--tree /repo/sub` take two DIFFERENT locks on
+    the same worktree, so a reader and a `--write` job could each believe it held "the tree lock"
+    while the writer edited files under the reader's feet — the precise corruption this scheduler
+    exists to prevent. Measured before this fix: the two paths hashed to tree-5c1a7c92... and
+    tree-189ab888....
+    Distinct worktrees (a `git worktree add` snapshot included) have distinct toplevels, so this
+    must NOT collapse them, and does not. A directory that is not in a git tree has no toplevel and
+    keeps its realpath, which is still exactly one lock per tree.
+    """
     real = os.path.realpath(tree)
+    try:
+        top = git(real, 'rev-parse', '--show-toplevel').strip()
+        if top:
+            real = os.path.realpath(top)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pass  # not a git tree (or git is gone): the path itself is the tree
     return 'tree-' + hashlib.sha1(real.encode('utf-8')).hexdigest()[:16] + '.lock'
 
 
@@ -349,7 +376,12 @@ class Locks:
                     fcntl.flock(fd, op | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    if self.max_queue_s is not None and now() - t0 > self.max_queue_s:
+                    # t0 is monotonic, so the elapsed check must be monotonic too. It used to read
+                    # `now() - t0` (wall epoch minus uptime ≈ 1.79e9), which exceeded EVERY deadline on
+                    # the first contended poll: `--max-queue 3600` refused instantly. The test that
+                    # covered this asserted only "refused", which that bug also satisfies — so it is
+                    # now asserted to have WAITED as well.
+                    if self.max_queue_s is not None and time.monotonic() - t0 > self.max_queue_s:
                         os.close(fd)
                         self.release()
                         raise TimeoutError(f'{os.path.basename(path)} ({mode}) held by {self._holder_of(path)!r} '
@@ -434,9 +466,35 @@ def tree_state(path: str) -> tuple[str, str] | None:
 
 # -------------------------------------------------------------------- gate (pure)
 def gate_decision(prev_closed: bool, triggered: set, dispositioned: set) -> tuple[bool, set]:
-    """Pass iff the previous round is closed and every TRIGGERED lever is dispositioned."""
+    """Pass iff the round that must be closed IS closed and every TRIGGERED lever is dispositioned."""
     missing = set(triggered) - set(dispositioned)
     return (prev_closed and not missing), missing
+
+
+TRACK_EVENTS = ('queued', 'start', 'end', 'refused', 'round-close', 'lever')
+
+
+def round_to_close(events: list[dict], track: str, rnd: int) -> int | None:
+    """The round this track must have closed before it may launch into `rnd`, or None.
+
+    This used to be `rnd - 1` unconditionally, which is wrong in both directions and I hit
+    both inside one arc:
+
+    - A lane opened MID-ARC (a fix track first used at round 3) has no round 2 to close, so
+      the gate refused it forever. The only route left was `--one-off`, which takes no tree
+      lock at all — a gate that pushes callers into the unsafe path is a worse gate.
+    - Conversely, keying on `rnd - 1` alone means SKIPPING a round escapes the gate: leave
+      round 3 empty and launch round 4, and round 2's unclosed state is never looked at.
+
+    So the answer is the HIGHEST earlier round in which this track did anything. None means
+    the track has no history before `rnd` and there is genuinely nothing to close; any real
+    history is still held to the close rule, whichever round it is in.
+    """
+    rs = [ev['round'] for ev in events
+          if ev.get('track') == track and ev.get('ev') in TRACK_EVENTS
+          and isinstance(ev.get('round'), int) and not isinstance(ev.get('round'), bool)
+          and ev['round'] < rnd]
+    return max(rs) if rs else None
 
 
 def round_status(events: list[dict], track: str, rnd: int) -> dict:
@@ -459,19 +517,28 @@ def round_status(events: list[dict], track: str, rnd: int) -> dict:
 
 
 def gate(arc: str, track: str, rnd: int) -> tuple[bool, str]:
-    if rnd <= 1:
+    # `rnd <= 1` passed round 0 and every negative round unconditionally, so a typo'd `--round 0`
+    # bought a free launch instead of an error — and the round it "closed" was round -1, which
+    # nothing ever writes. Rounds are 1-based; anything below that is refused, not waved through.
+    if rnd < 1:
+        return False, f'round {rnd} is not a valid round number — rounds start at 1'
+    if rnd == 1:
         return True, 'round 1: nothing to close yet'
-    st = round_status(ledger_read(arc), track, rnd - 1)
+    events = ledger_read(arc)
+    prev = round_to_close(events, track, rnd)
+    if prev is None:
+        return True, f'track {track} has no earlier rounds in the ledger — nothing to close'
+    st = round_status(events, track, prev)
     ok, missing = gate_decision(st['closed'], st['triggered'], st['dispositioned'])
     if ok:
-        return True, f"round {rnd - 1} closed at {clock(st['close_t'])}; triggered {sorted(st['triggered']) or 'none'} all dispositioned"
+        return True, f"round {prev} closed at {clock(st['close_t'])}; triggered {sorted(st['triggered']) or 'none'} all dispositioned"
     if not st['closed']:
-        return False, (f'round {rnd - 1} of track {track} is not closed — run:\n'
-                       f'  python3 {HERE}/loop.py close-round --arc {shlex.quote(arc)} --track {shlex.quote(track)} --round {rnd - 1}')
-    lines = [f'round {rnd - 1} of track {track} has TRIGGERED levers without a disposition: {sorted(missing)} — land each, then record it:']
+        return False, (f'round {prev} of track {track} is not closed — run:\n'
+                       f'  python3 {HERE}/loop.py close-round --arc {shlex.quote(arc)} --track {shlex.quote(track)} --round {prev}')
+    lines = [f'round {prev} of track {track} has TRIGGERED levers without a disposition: {sorted(missing)} — land each, then record it:']
     for lid in sorted(missing):
         lines.append(f'  python3 {HERE}/loop.py lever --arc {shlex.quote(arc)} --track {shlex.quote(track)} '
-                     f'--round {rnd - 1} --id {lid} --state landed|declined --note "<what you did, or why not>"')
+                     f'--round {prev} --id {lid} --state landed|declined --note "<what you did, or why not>"')
     return False, '\n'.join(lines)
 
 
@@ -593,6 +660,15 @@ def rows_from_dir(d: str, seen_paths: set) -> list[dict]:
         note = ''
         queued = 0.0
         if reported is not None and reported > span:
+            # The FILE existed for less time than the run it records — it was created after the
+            # process started (a log opened late), or truncated and rewritten. The run's own
+            # Duration is a measurement; birth is only an estimate of the start, so move the START
+            # back rather than letting `span` disagree with the interval it is drawn from.
+            #
+            # Leaving them inconsistent was not merely untidy: `busy` unions [start, end] while the
+            # totals-by-kind table sums `span`, so a row could report more time than the timeline
+            # could account for, and clip_rows had no interval to clip that excess against.
+            b = st.st_mtime - reported
             span = reported
         if reported is not None and span > reported * 1.5 and span - reported > 5:
             queued = span - reported
@@ -602,7 +678,13 @@ def rows_from_dir(d: str, seen_paths: set) -> list[dict]:
                     'after its run (birth→mtime is not this run)')
         rows.append(dict(kind=kind, start=b, end=st.st_mtime, span=span, reported=reported, tests=tests,
                          path=os.path.join(os.path.basename(d), base), note=note, source='dir',
-                         track=None, round=None, queued=queued, cpu=None, job=None, checkpoint=None))
+                         track=None, round=None, queued=queued, cpu=None, job=None, checkpoint=None,
+                         # This row's queue is INFERRED (birth→mtime minus the run's own Duration)
+                         # rather than measured by the scheduler, and L5 fires on its presence at any
+                         # size. That used to be read off the note's `queued ...` prefix — a text
+                         # match, so any other note starting with that word turned the lever on, and
+                         # rewording the note would have turned it off silently.
+                         queued_inferred=queued > 0))
     return rows
 
 
@@ -616,13 +698,38 @@ def rows_from_ledger(events: list[dict], t_now: float | None = None) -> tuple[li
         elif ev.get('ev') == 'end' and ev.get('job'):
             ends[ev['job']] = ev
     rows, paths = [], set()
+    # A job killed (or refused) while WAITING on a lock has a `queued` event and no `start`. Walking
+    # only `starts` dropped it from every profiler view, so the wall-clock it spent queued became
+    # unattributed gap — which is precisely the thing lever L6 exists to surface. Carry it as a row
+    # whose whole span is wait.
+    for ev in events:
+        if ev.get('ev') != 'queued' or not ev.get('job') or ev['job'] in starts:
+            continue
+        q_t = float(ev.get('t', 0))
+        fin = ends.get(ev['job'])
+        q_end = float(fin['t']) if fin else t_now
+        # ZERO-LENGTH on purpose: this job never ran, so it must not join the union of busy intervals
+        # (that would report queueing as timed activity and shrink the unattributed figure). Its
+        # wall-clock lives in `queued`, which the timeline reports on its own line.
+        rows.append(dict(kind=ev.get('kind', 'other'), start=q_t, end=q_t, span=0.0, reported=None, tests='',
+                         path=f"{ev.get('track')}/r{ev.get('round')}/{ev.get('name')}", source='ledger',
+                         note=('refused while queued' if fin else 'killed or abandoned while queued (no start event)'),
+                         track=ev.get('track'), round=ev.get('round'), queued=max(0.0, q_end - q_t),
+                         cpu=ev.get('cpu'), job=ev['job'], t_req=q_t, checkpoint=None,
+                         rc=(fin or {}).get('rc'), unscoped=0, mutants=0, never_started=True))
     for job, s in starts.items():
         e = ends.get(job)
         start = float(s.get('t', 0))
         end = float(e['t']) if e else t_now
         note = '' if e else 'unfinished (no end event)'
-        if end < start:
-            # a wall-clock correction mid-job: the interval is INVALID evidence, never a duration
+        if e and e.get('span_s') is not None:
+            # The runner measured this span with time.monotonic(). t_end - t_start is a WALL
+            # difference and is wrong by exactly any clock correction that landed mid-job, so where
+            # the real measurement exists it wins and the wall-clock fallback below never runs.
+            end = start + float(e['span_s'])
+        elif end < start:
+            # no monotonic span (a legacy or hand-written record) and the wall clock moved backwards
+            # mid-job: the interval is INVALID evidence, never a duration
             note = f'CLOCK WENT BACKWARDS ({start - end:.0f}s): interval invalid, counted as 0'
             end = start
         if e and e.get('reason'):
@@ -637,7 +744,7 @@ def rows_from_ledger(events: list[dict], t_now: float | None = None) -> tuple[li
                          reported=s.get('reported'), tests=(e or {}).get('tests_text', ''),
                          path=label, note=note, source='ledger', track=s.get('track'), round=s.get('round'),
                          queued=float(s.get('queued_s') or 0.0), cpu=s.get('cpu'), job=job,
-                         t_req=float(s.get('t_req') or start),
+                         t_req=float(s.get('t_req') or start), pid=s.get('pid'), finished=bool(e),
                          checkpoint=s.get('checkpoint'), rc=(e or {}).get('rc'), unscoped=s.get('unscoped', 0),
                          mutants=s.get('mutants', 0)))
     return rows, paths
@@ -658,13 +765,21 @@ def union(intervals):
     return total
 
 
-def subtract(a_list, b_list):
-    """Length of union(a) not covered by union(b)."""
+def solo_wait(waits, others):
+    """Time during which EXACTLY ONE wait is in flight and nothing else is running at all.
+
+    This is the quantity L1 exists to measure: a blocking call with an idle machine behind it. The
+    earlier version asked only whether a wait overlapped a NON-wait (`a > 0 and b == 0`), which
+    counts a fully parallel panel as 100% alone — measured on this arc's own round 2, where three
+    review lenses ran concurrently for 19m28s and L1 read TRIGGERED anyway, telling the round to
+    land a lever it had already landed. A lever that cannot read green after its own fix is not a
+    gate, so `a == 1` is the whole correction: two lenses overlapping is the fixed state, not waste.
+    """
     pts = []
-    for s, e in a_list:
+    for s, e in waits:
         pts.append((s, 1, 'a'))
         pts.append((e, -1, 'a'))
-    for s, e in b_list:
+    for s, e in others:
         pts.append((s, 1, 'b'))
         pts.append((e, -1, 'b'))
     pts.sort()
@@ -672,7 +787,7 @@ def subtract(a_list, b_list):
     prev = None
     lone = 0.0
     for t, d, w in pts:
-        if prev is not None and a > 0 and b == 0:
+        if prev is not None and a == 1 and b == 0:
             lone += t - prev
         if w == 'a':
             a += d
@@ -778,7 +893,7 @@ def analyze(rows: list[dict], window: tuple[float, float] | None = None, notes=(
     waits = [(r['start'], r['end']) for r in rows if r['kind'] in WAIT_KINDS]
     others = [(r['start'], r['end']) for r in rows if r['kind'] not in WAIT_KINDS]
     wait_union = union(waits) if waits else 0.0
-    wait_alone = subtract(waits, others) if waits else 0.0
+    wait_alone = solo_wait(waits, others) if waits else 0.0
     big_gaps = gaps_of(ivs)
     queued_total = sum(r.get('queued') or 0.0 for r in rows)
     P('')
@@ -788,7 +903,7 @@ def analyze(rows: list[dict], window: tuple[float, float] | None = None, notes=(
     P(f'  unattributed    {hms(wall - busy):>9}   editing / reading / thinking — not in any artifact')
     if waits:
         P(f'  waits           {hms(wait_union):>9}   {len(waits)} review / codex --write / CI-watch run(s)')
-        P(f'  waits ALONE     {hms(wait_alone):>9}   a wait in flight with no other timed artifact running')
+        P(f'  waits SOLO      {hms(wait_alone):>9}   one wait in flight and nothing else at all — no second lens, no fixes')
     if queued_total:
         P(f'  queued          {hms(queued_total):>9}   measured time jobs spent waiting on a lock (the serialiser working)')
     gap_rows = []
@@ -805,7 +920,7 @@ def analyze(rows: list[dict], window: tuple[float, float] | None = None, notes=(
 
     lever('L1', 'Waits (panel / codex --write / CI) serialised with the fixes',
           bool(waits) and wait_alone > 0.4 * wait_union and wait_union > 300,
-          f'{hm(wait_alone)} of {hm(wait_union)} wait time had nothing else timed in flight' if waits else 'no review / codex / CI runs',
+          f'{hm(wait_alone)} of {hm(wait_union)} wait time was ONE blocking call with an idle machine behind it' if waits else 'no review / codex / CI runs',
           'commit the fix, `loop.py snapshot --sha <that sha>`, and launch the micro-review / next lens on the snapshot '
           'the moment the sha exists; run mutants + spec edits on a copy meanwhile',
           'a lens reading a tree that then moves fails its tree check (rc 5, output quarantined) — that is the guard, keep it')
@@ -845,9 +960,9 @@ def analyze(rows: list[dict], window: tuple[float, float] | None = None, notes=(
           ('re-run the contended one ALONE first (it measured the machine, not the code); ' if contended else '')
           + 'only a slow LONE run justifies touching tsconfig "incremental" / tsBuildInfoFile',
           'a tsc that shared the machine with a vitest child measures the machine — never change compiler config on that reading')
-    queued_rows = [r for r in rows if (r.get('queued') or 0) >= 5 or (r.get('note') or '').startswith('queued')]
+    queued_rows = [r for r in rows if (r.get('queued') or 0) >= 5 or r.get('queued_inferred')]
     lever('L5', 'Runs queued behind each other on one machine',
-          queued_total >= 300 or any((r.get('note') or '').startswith('queued') for r in rows),
+          queued_total >= 300 or any(r.get('queued_inferred') for r in rows),
           (f"{len(queued_rows)} run(s) waited; queue total {hm(queued_total)} (ledgered rows measured, unattributed ones inferred from Duration): "
            + ', '.join(f"{os.path.basename(r['path'])} {hm(r.get('queued') or 0)}" for r in queued_rows[:6])) if queued_rows else 'no run waited on another',
           'the serialiser is doing its job — shrink the queue by scoping (fewer wide runs, --affected per commit) or by '
@@ -922,12 +1037,30 @@ def clip_rows(rows, window):
         c = dict(r)
         c['start'] = max(r['start'], a)
         c['end'] = min(r['end'], b)
-        if c['end'] < c['start']:
-            continue
-        if (c['start'], c['end']) != (r['start'], r['end']):
-            c['span'] = c['end'] - c['start']
-            c['note'] = (f"clipped to the round ({hms(r['end'] - r['start'])} in full); " + (r.get('note') or '')).rstrip('; ')
-        out.append(c)
+        # A job's WAIT is an interval too — [t_req, t_req + queued] — and it was carried into the
+        # round whole while the run interval beside it was clipped. A job that queued 40 min before
+        # this round opened and ran 10 s inside it charged the round all 40 minutes, which is enough
+        # on its own to trigger L5 ("runs queued behind each other") for a round that queued nothing.
+        # Clipping both intervals against the same window is what makes the two numbers comparable.
+        q = float(r.get('queued') or 0.0)
+        q_a = float(r['t_req'] if r.get('t_req') is not None else r['start'])
+        c['queued'] = max(0.0, min(q_a + q, b) - max(q_a, a)) if q > 0 else 0.0
+        if c['queued'] <= 0:
+            c['queued_inferred'] = False   # a queue clipped entirely outside the round is not this round's
+        if c['end'] >= c['start']:
+            if (c['start'], c['end']) != (r['start'], r['end']):
+                c['span'] = c['end'] - c['start']
+                c['note'] = (f"clipped to the round ({hms(r['end'] - r['start'])} in full); " + (r.get('note') or '')).rstrip('; ')
+            out.append(c)
+        elif c['queued'] > 0:
+            # It waited inside this round and ran outside it. Dropping it lost that wait entirely —
+            # the mirror of the over-attribution above, and the same defect. It contributes its WAIT
+            # and no run interval, so it is pinned to the window edge with zero span and cannot add
+            # timed activity the round did not have.
+            c['start'] = c['end'] = min(max(r['start'], a), b)
+            c['span'] = 0.0
+            c['note'] = ('waited inside the round, ran outside it; ' + (r.get('note') or '')).rstrip('; ')
+            out.append(c)
     return out
 
 
@@ -979,6 +1112,24 @@ def changed_files(cwd: str, rng: str, include_uncommitted: bool) -> list[str]:
             if len(ln) > 3:
                 files.append(ln[3:].strip().split(' -> ')[-1])
     return sorted(set(files))
+
+
+def signal_child(child, signum: int) -> None:
+    """Forward a signal to the child's whole process group, falling back to the child alone.
+
+    The child runs in its own session (see cmd_run), so its pid is its process-group id and killpg
+    reaches every helper it spawned. A group that has already exited raises ProcessLookupError, and
+    a platform without killpg raises AttributeError; both mean "nothing left to signal".
+    """
+    if child is None or child.poll() is not None:
+        return
+    try:
+        os.killpg(child.pid, signum)
+    except (ProcessLookupError, PermissionError, AttributeError, OSError):
+        try:
+            child.send_signal(signum)
+        except (ProcessLookupError, OSError):
+            pass
 
 
 def cmd_run(args) -> int:
@@ -1035,7 +1186,10 @@ def cmd_run(args) -> int:
         return die(f'--tree {tree} is not a git worktree')
     tree_mode, cpu_mode = lock_modes(args.kind, cpu, bool(tree))
     t_req = now()
-    job = f'{args.track}.r{args.round}.{name}.{int(t_req * 1000)}'
+    # pid included: two jobs with the same track/round/name launched in the same millisecond used to
+    # share an id, so one's `end` event closed the other's row and the profile attributed one
+    # job's span to both. The ledger keys on this string, so it must identify the RUN, not the instant.
+    job = f'{args.track}.r{args.round}.{name}.{int(t_req * 1000)}.{os.getpid()}'
     capture = args.kind in ('vitest', 'tsc', 'mutant', 'other') if args.capture is None else args.capture
     log = args.log
     if capture and not log:
@@ -1076,16 +1230,50 @@ def cmd_run(args) -> int:
         # The inner handshake: run-codex.sh honours CC_LOOP_JOB only when the ledger shows this
         # job started by ITS parent pid, so the marker cannot be forged by passing a flag.
         child_env = dict(os.environ, CC_LOOP_JOB=job, CC_LOOP_ARC=arc)
-        child = subprocess.Popen(cmd, cwd=cwd, stdout=fh or None, stderr=(subprocess.STDOUT if fh else None), env=child_env)
+
+        # Handlers go on BEFORE the fork. Installed after it, a signal landing in the window between
+        # Popen and signal.signal() takes the DEFAULT disposition: the scheduler dies, its flock is
+        # released by the kernel, and the child keeps writing a tree nothing holds any more. Small
+        # window, but it is the one that produces an unlocked writer, so it is worth closing.
+        # Once installed, forwarding + waiting is what keeps the locks held for exactly as long as
+        # the child lives: we do not release on the signal, we release when the child is gone.
+        pending: list = []
 
         def forward(signum, _frame):
-            if child and child.poll() is None:
-                child.send_signal(signum)
+            pending.append(signum)
+            signal_child(child, signum)
 
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(sig, forward)
+        # The child INHERITS the lock fds, and start_new_session gives it its own process group.
+        #
+        # Inheriting the fds is what makes the lock outlive a SIGKILL of this scheduler. flock(2)
+        # belongs to the open file DESCRIPTION, not to a process, so the lock stands while any
+        # process holds a descriptor on it. Without this, `kill -9` on the scheduler released the
+        # tree lock instantly while its --write child carried on editing that tree: the next queued
+        # job took the lock it had just been granted and both wrote the same worktree. SIGKILL is
+        # uncatchable, so no handler can close this — only the kernel can, and this is how you ask.
+        # The parent's release() still runs after child.wait(), by which point the child's copies
+        # are gone too, so nothing leaks: the lock is held for exactly as long as a writer exists.
+        #
+        # The process group is the other half. `send_signal` reaches only the direct child, so a
+        # forwarded TERM left the grandchildren (codex's own helpers, a vitest worker pool) running
+        # unsupervised under a lock that was about to be released. Signalling the group reaches them.
+        for fd in locks.fds:
+            os.set_inheritable(fd, True)
+        child = subprocess.Popen(cmd, cwd=cwd, stdout=fh or None, stderr=(subprocess.STDOUT if fh else None),
+                                 env=child_env, start_new_session=True, pass_fds=tuple(locks.fds))
+        # a signal that arrived while the child was being forked was recorded, not delivered — pass it on
+        for signum in pending:
+            signal_child(child, signum)
         rc = child.wait()
         reason = f'child rc={rc}'
+    except OSError as e:
+        # A launch that never starts (no such binary, not executable, fork failure) used to escape as
+        # a traceback AFTER the `queued`/`start` events were written, leaving the job with no terminal
+        # event: it read as "still running" forever, and close-round would refuse the round on a job
+        # that never existed. Every path out of here now ledgers a terminal event.
+        rc, reason = RC_FAILCLOSED, f'launch failed: {type(e).__name__}: {e}'
     finally:
         if fh:
             fh.close()
@@ -1125,10 +1313,74 @@ def cmd_gate(args) -> int:
     return 0 if ok else RC_GATE
 
 
+def pid_alive(pid) -> bool:
+    """Whether the scheduler process that launched a job is still around.
+
+    Signal 0 only asks; it never delivers. EPERM means a live process we do not own, which is still
+    alive. Pid reuse can make this answer yes for an unrelated process — it fails CLOSED (we refuse
+    to close a round that is probably still running), which is the safe direction.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def unfinished_jobs(arc: str, track: str, rnd: int) -> tuple[list[dict], list[dict]]:
+    """(still running, abandoned) jobs ledgered for this track+round.
+
+    A job is unfinished when it has a `queued` or `start` event and no terminal event. Closing a
+    round over one of those writes a profile that omits it AND opens the gate for round N+1, so the
+    next panel launches while this one is still holding trees and CPU — the exact serialisation this
+    scheduler exists to prevent, arrived at from the other direction.
+    """
+    terminal = {ev['job'] for ev in ledger_read(arc)
+                if ev.get('ev') in ('end', 'refused') and ev.get('job')}
+    seen: dict = {}
+    for ev in ledger_read(arc):
+        if ev.get('ev') not in ('queued', 'start') or not ev.get('job'):
+            continue
+        if str(ev.get('track')) != str(track) or int(ev.get('round', -1)) != int(rnd):
+            continue
+        if ev['job'] in terminal:
+            continue
+        seen.setdefault(ev['job'], dict(job=ev['job'], name=ev.get('name'), kind=ev.get('kind'),
+                                        pid=ev.get('pid'), t=ev.get('t')))
+        if ev.get('pid'):
+            seen[ev['job']]['pid'] = ev['pid']
+    live = [j for j in seen.values() if pid_alive(j.get('pid'))]
+    dead = [j for j in seen.values() if not pid_alive(j.get('pid'))]
+    return live, dead
+
+
 def cmd_close_round(args) -> int:
     arc = need_arc(args)
     if not arc:
         return RC_USAGE
+    live, dead = unfinished_jobs(arc, args.track, args.round)
+    if live:
+        return die('cannot close round {} of track {}: {} job(s) still RUNNING — {}. The profile would '
+                   'omit them and the gate would admit the next round while this one still holds its '
+                   'trees and CPU. Wait for them, or kill them (a killed job ledgers no end event and '
+                   'then closes with --abandon-unfinished).'
+                   .format(args.round, args.track, len(live),
+                           ', '.join(f"{j['name']} (pid {j['pid']})" for j in live)), RC_FAILCLOSED)
+    if dead and not args.abandon_unfinished:
+        return die('cannot close round {} of track {}: {} job(s) have no terminal ledger event and '
+                   'their launcher is gone — {}. They were killed or crashed, so their wall-clock is '
+                   'unmeasured. Re-run them, or pass --abandon-unfinished to close anyway (the close '
+                   'then records that they were abandoned).'
+                   .format(args.round, args.track, len(dead),
+                           ', '.join(str(j['name']) for j in dead)), RC_FAILCLOSED)
     txt, res = profile_text(arc, args.dirs, args.track, args.round, args.timeline)
     if res.get('empty') and not args.empty_ok:
         print(txt)
@@ -1144,7 +1396,8 @@ def cmd_close_round(args) -> int:
         json.dump(levers, fh, indent=1)
     triggered = [lv['id'] for lv in levers if lv['triggered']]
     ledger_append(arc, dict(ev='round-close', track=args.track, round=args.round, triggered=triggered,
-                            profile=ppath, levers=lpath, empty=bool(res.get('empty'))))
+                            profile=ppath, levers=lpath, empty=bool(res.get('empty')),
+                            abandoned=[j['job'] for j in dead] or None))
     print(txt)
     print(f'\nround {args.round} of track {args.track} CLOSED; TRIGGERED: {triggered or "none"}')
     if triggered:
@@ -1233,6 +1486,21 @@ def cmd_snapshot(args) -> int:
     if os.path.isdir(path):
         head = tree_state(path)
         if head and head[0] == sha:
+            # Being AT the sha is not the same as MATCHING it. The reuse path compared only
+            # head[0] and ignored the working tree, so a snapshot somebody had edited was handed
+            # back as the pinned revision and every lens read the edit while reporting the sha.
+            # Measured before this fix: a reviewer read 'MUTATED BY SOMEONE' out of a worktree
+            # this command had just certified. That is the fail-open the whole read/write overlap
+            # rests on, so a tracked modification refuses.
+            # Untracked files are tolerated on purpose: the node_modules symlink and a lens's own
+            # scratch are untracked, and neither changes the code under review.
+            dirty = git(path, 'status', '--porcelain', '--untracked-files=no').strip()
+            if dirty:
+                return die(f'{path} is at {sha[:12]} but has UNCOMMITTED TRACKED CHANGES, so it is '
+                           f'not the code that sha names:\n{dirty}\n'
+                           f'Reviews of it would cite a sha they did not read. Restore it '
+                           f'(git -C {shlex.quote(path)} checkout -- .) or remove it and re-snapshot.',
+                           RC_FAILCLOSED)
             print(path)
             return 0
         return die(f'{path} exists but is not at {sha[:12]}', RC_FAILCLOSED)
@@ -1286,6 +1554,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser('close-round', help='profile the round, write its levers, record the close')
     common(p)
     p.add_argument('--empty-ok', action='store_true')
+    p.add_argument('--abandon-unfinished', action='store_true',
+                   help='close even though some jobs have no terminal event and their launcher is gone; '
+                        'the close records them as abandoned (never allowed while one is still running)')
     p.add_argument('--timeline', help='heartbeat file for gap classification (default: <arc>/../timeline.jsonl)')
     p.add_argument('dirs', nargs='*', help='extra artifact dirs to scan heuristically')
     p.set_defaults(fn=cmd_close_round)

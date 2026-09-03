@@ -7,7 +7,7 @@ metadata:
 ---
 
 A fork inherits the parent's whole context, so it is the FIRST agent in the process to hit the compaction ceiling — and the compaction summary is written from the inherited history, which is overwhelmingly the parent's story.
-Measured 2026-09-01 (treecue phase-1 arc, seat e9cb8e47): fork `any-way-to` was dispatched for ONE directive (encode fix-round speed-ups in the shared config), finished it, was woken by its own fallback background task, compacted, and came back believing it was the main arc session.
+Measured 2026-09-01 (your-module phase-1 arc, seat e9cb8e47): fork `any-way-to` was dispatched for ONE directive (encode fix-round speed-ups in the shared config), finished it, was woken by its own fallback background task, compacted, and came back believing it was the main arc session.
 It then sent a `SendMessage` to "any-way-to" (itself), appended a progress section to the parent's handoff file, built a second set of review-prompt generators, independently re-verified the parent's commit, and was one tool call from dispatching a second Codex micro-review and round-2 panel in parallel with the parent's — double subscription spend plus a two-writers-one-tree race — when it noticed its tool calls were landing in `subagents/agent-a<name>.jsonl` rather than the session's main `.jsonl`.
 
 **Why:** a summary is a CLAIM about who you are; the transcript file the harness is writing your tool calls into is an ARTIFACT.
