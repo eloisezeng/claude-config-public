@@ -283,28 +283,73 @@ class TestGate(unittest.TestCase):
             closed = rng.random() < 0.7
             trig = {i for i in ids if rng.random() < 0.4}
             disp = {i for i in ids if rng.random() < 0.5}
-            new_track = rng.random() < 0.3
-            ok, missing = loop.gate_decision(closed, trig, disp, new_track)
+            ok, missing = loop.gate_decision(closed, trig, disp)
             self.assertEqual(missing, trig - disp)
-            self.assertEqual(ok, (closed or new_track) and trig <= disp)
-            # the default must stay the strict one: an omitted argument may never admit
-            self.assertEqual(loop.gate_decision(closed, trig, disp)[0], closed and trig <= disp)
+            self.assertEqual(ok, closed and trig <= disp)
 
-    def test_a_new_track_is_admitted_but_a_used_one_is_not(self):
-        """A track with no ledger history has nothing to close; one that has run is held."""
-        evs = [dict(ev='queued', t=1, track='used', round=2, job='j1'),
-               dict(ev='start', t=2, track='used', round=2, job='j1', pid=1)]
-        self.assertTrue(loop.track_seen(evs, 'used'))
-        self.assertFalse(loop.track_seen(evs, 'fresh'))
-        # a never-seen track passes even at a high round; a used, unclosed one does not
-        self.assertTrue(loop.gate_decision(False, set(), set(), True)[0])
-        self.assertFalse(loop.gate_decision(False, set(), set(), False)[0])
-        # and newness never waives a TRIGGERED lever that has no disposition
-        self.assertFalse(loop.gate_decision(False, {'L1'}, set(), True)[0])
-        self.assertEqual(loop.gate_decision(False, {'L1'}, set(), True)[1], {'L1'})
-        # a lever event alone makes a track seen -- no event kind is exempt
-        self.assertTrue(loop.track_seen([dict(ev='lever', track='t', round=1, id='L1')], 't'))
-        self.assertTrue(loop.track_seen([dict(ev='round-close', track='t', round=1)], 't'))
+    def test_round_to_close_is_the_last_active_round_not_rnd_minus_one(self):
+        """Which round must be closed is its own decision, and `rnd - 1` is wrong twice over."""
+        evs = [dict(ev='queued', t=1, track='A', round=1, job='a1'),
+               dict(ev='end', t=2, track='A', round=1, job='a1', rc=0, span_s=1.0),
+               dict(ev='round-close', t=3, track='A', round=1, triggered=[]),
+               dict(ev='queued', t=4, track='A', round=2, job='a2'),
+               dict(ev='start', t=5, track='A', round=2, job='a2', pid=1)]
+        # a track with no history before this round has nothing to close -- this is the
+        # mid-arc lane case, and refusing it only pushed callers onto the lockless --one-off path
+        self.assertIsNone(loop.round_to_close(evs, 'fresh', 3))
+        self.assertIsNone(loop.round_to_close(evs, 'A', 1))
+        # the last EARLIER round with activity, whichever it is
+        self.assertEqual(loop.round_to_close(evs, 'A', 3), 2)
+        self.assertEqual(loop.round_to_close(evs, 'A', 2), 1)
+        # skipping a round must not escape the gate: launching round 9 still answers round 2
+        self.assertEqual(loop.round_to_close(evs, 'A', 9), 2)
+        # a failed launch that only ledgered a refusal still counts as history. The refusal must
+        # count ON ITS OWN: a `queued` beside it would answer the same round anyway, so a test
+        # carrying both cannot see `refused` being dropped from the set.
+        self.assertEqual(loop.round_to_close(
+            [dict(ev='refused', t=2, track='B', round=3, job='b1', reason='queue')], 'B', 4), 3)
+        self.assertEqual(loop.round_to_close(
+            [dict(ev='queued', t=1, track='B', round=1, job='b0'),
+             dict(ev='refused', t=2, track='B', round=3, job='b1', reason='queue')], 'B', 4), 3,
+            'the refused round is later than the queued one and must win')
+        # a lever or a close alone is history too; no event kind of this track is exempt
+        self.assertEqual(loop.round_to_close([dict(ev='lever', track='C', round=2, id='L1')], 'C', 5), 2)
+        self.assertEqual(loop.round_to_close([dict(ev='round-close', track='C', round=2)], 'C', 5), 2)
+        # another track's rounds are never this track's problem
+        self.assertIsNone(loop.round_to_close(evs, 'other', 5))
+        # a non-integer round in the ledger is ignored rather than crashing the gate
+        self.assertIsNone(loop.round_to_close([dict(ev='start', track='D', round='2', job='x')], 'D', 5))
+        self.assertIsNone(loop.round_to_close([dict(ev='start', track='D', job='x')], 'D', 5))
+
+    def test_gate_admits_a_fresh_track_and_holds_a_used_one(self):
+        """End to end through gate(), on a real ledger file."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as arc:
+            loop.ledger_append(arc, dict(ev='queued', track='used', round=2, job='j1'))
+            loop.ledger_append(arc, dict(ev='start', track='used', round=2, job='j1', pid=os.getpid()))
+            ok, why = loop.gate(arc, 'used', 3)
+            self.assertFalse(ok, why)
+            self.assertIn('round 2 of track used is not closed', why)
+            ok, why = loop.gate(arc, 'fix-lane', 3)
+            self.assertTrue(ok, why)
+            self.assertIn('no earlier rounds', why)
+            # closing round 2 lets the used track through
+            loop.ledger_append(arc, dict(ev='round-close', track='used', round=2, triggered=[]))
+            ok, why = loop.gate(arc, 'used', 3)
+            self.assertTrue(ok, why)
+        # A GAP: activity in round 1, closed, and nothing in round 2. Launching round 3 must read
+        # round ONE. A gate still keyed on `rnd - 1` looks at the empty round 2, finds no close and
+        # refuses -- so this case is the only one that can see that mutation.
+        with tempfile.TemporaryDirectory() as arc:
+            loop.ledger_append(arc, dict(ev='queued', track='G', round=1, job='g1'))
+            loop.ledger_append(arc, dict(ev='end', track='G', round=1, job='g1', rc=0, span_s=1.0))
+            ok, why = loop.gate(arc, 'G', 3)
+            self.assertFalse(ok, 'round 1 is unclosed, so the gate must hold')
+            self.assertIn('round 1 of track G is not closed', why)
+            loop.ledger_append(arc, dict(ev='round-close', track='G', round=1, triggered=[]))
+            ok, why = loop.gate(arc, 'G', 3)
+            self.assertTrue(ok, why)
+            self.assertIn('round 1 closed', why)
 
     def test_round_status_ignores_levers_recorded_before_the_close(self):
         evs = [

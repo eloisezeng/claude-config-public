@@ -52,6 +52,7 @@ round-close | lever.  `<arc>` defaults to $CC_ARC, then $CLAUDE_JOB_DIR/tmp.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import fcntl
 import glob
@@ -171,6 +172,14 @@ VALUE_FLAGS = {
     '--coverage.reporter', '--sequence.seed', '--retry', '--bail', '--maxConcurrency',
 }
 WIDE_FLAGS = {'--coverage', '--changed', '--watch', '-w'}
+# Vitest operands that WRITE INTO the tree they run in (snapshot files). They are not wide --
+# `vitest run one.test.ts -u` still executes one file -- so the CPU class is right to call them
+# light; what was wrong (round 3, CORR5) is the LOCK. Two `-u` runs on one tree were each given
+# a SHARED tree lock, so both could rewrite the same .snap concurrently, and the post-run
+# movement check can only redden the results afterwards -- it cannot un-corrupt the worktree.
+# `--update=false` is read as writing too: the direction of a misread has to be more
+# serialisation, never less.
+TREE_WRITING_FLAGS = {'-u', '--update'}
 FILE_RE = re.compile(r'\.[cm]?[jt]sx?$')
 GLOB_RE = re.compile(r'[*?\[{]')   # a glob selects an unbounded set of files: never light
 VITEST_SUBCMDS = {'run', 'related', 'watch', 'dev', 'bench', 'list', 'typecheck', 'init'}
@@ -181,14 +190,15 @@ def vitest_shape(argv: list[str]) -> dict:
     argv = list(argv)
     vi = next((i for i, a in enumerate(argv) if a == 'vitest' or a.endswith('/vitest')), None)
     if vi is None:
-        return dict(sub=None, files=[], dirs=[], wide_flag=False, name_filter=False, known=False)
+        return dict(sub=None, files=[], dirs=[], wide_flag=False, name_filter=False,
+                    writes_tree=False, known=False)
     rest = argv[vi + 1:]
     sub = 'run'
     if rest and rest[0] in VITEST_SUBCMDS:
         sub = rest[0]
         rest = rest[1:]
     files, dirs = [], []
-    wide_flag = name_filter = False
+    wide_flag = name_filter = writes_tree = False
     skip = False
     for tok in rest:
         if skip:
@@ -203,6 +213,8 @@ def vitest_shape(argv: list[str]) -> dict:
             name_filter = True
         if flag in WIDE_FLAGS:
             wide_flag = True
+        if flag in TREE_WRITING_FLAGS:
+            writes_tree = True
         if tok.startswith('-'):
             if flag in VALUE_FLAGS and not has_val:
                 skip = True
@@ -213,7 +225,8 @@ def vitest_shape(argv: list[str]) -> dict:
         # the glob reading, so the misread still fails towards heavy.
         is_one_file = FILE_RE.search(tok) and (os.path.isfile(tok) or not GLOB_RE.search(tok))
         (files if is_one_file else dirs).append(tok)
-    return dict(sub=sub, files=files, dirs=dirs, wide_flag=wide_flag, name_filter=name_filter, known=True)
+    return dict(sub=sub, files=files, dirs=dirs, wide_flag=wide_flag, name_filter=name_filter,
+                writes_tree=writes_tree, known=True)
 
 
 def has_name_filter(argv: list[str]) -> bool:
@@ -246,6 +259,21 @@ def cpu_class(kind: str, argv: list[str], explicit: str | None = None) -> str:
     return 'light'
 
 
+def tree_writing(kind: str, argv: list[str]) -> bool:
+    """Does this job MUTATE the tree it was handed, so that it needs an EXCLUSIVE tree lock?
+
+    A `write` job does by definition. A vitest run does when it carries a snapshot-updating
+    operand. An UNKNOWN vitest command line does too: `cpu_class` already fails such a line
+    towards `heavy`, and the lock has to fail the same direction.
+    """
+    if kind == 'write':
+        return True
+    if kind == 'vitest':
+        sh = vitest_shape(argv)
+        return bool(sh['writes_tree']) or not sh['known']
+    return False
+
+
 def needs_checkpoint(kind: str, cpu: str, checkpoint: str | None) -> bool:
     return kind == 'vitest' and cpu == 'heavy' and not (checkpoint or '').strip()
 
@@ -275,21 +303,60 @@ def ledger_path(arc: str) -> str:
     return os.path.join(arc, LEDGER)
 
 
+def ledger_lock_path(arc: str) -> str:
+    return ledger_path(arc) + '.lock'
+
+
+def tail_is_incomplete(fd: int) -> bool:
+    """Does the ledger end mid-record — a final line with no newline?
+
+    Only ever true after a writer died between two `os.write` calls of one record. Appending onto
+    such a line would splice our event onto its tail and corrupt BOTH; starting a fresh line leaves
+    the broken record broken (`ledger_read` reports it, and the lifecycle checks fail closed on it)
+    and keeps ours intact.
+    """
+    try:
+        size = os.fstat(fd).st_size
+        return size > 0 and os.pread(fd, 1, size - 1) != b'\n'
+    except OSError:
+        return False
+
+
 def ledger_append(arc: str, ev: dict) -> None:
     os.makedirs(arc, exist_ok=True)
     ev = dict(ev)
     ev.setdefault('t', now())
+    # Round 3 (LIFE6): stamp the clock OFFSET this record was written under. `mono` is uptime and
+    # `coff` = wall - uptime, which is a CONSTANT for as long as one boot's clock runs untouched.
+    # A change in it is an NTP step, a manual clock set, or a reboot -- and across any of those,
+    # comparing two jobs' wall stamps establishes nothing about which ran first. Stamped HERE, at
+    # the one chokepoint every writer goes through (loop.py and mutate.py both), so no caller can
+    # forget it. `clock_discontinuity` is the reader's half.
+    ev.setdefault('mono', round(time.monotonic(), 3))
+    ev.setdefault('coff', round(ev['t'] - ev['mono'], 3))
     line = json.dumps(ev, sort_keys=True) + '\n'
-    fd = os.open(ledger_path(arc), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    buf = line.encode('utf-8')
+    # Round 3 (LIFE5). O_APPEND makes each os.write land at the end atomically, but it says nothing
+    # about the LOOP below: a short write in process A, followed by a complete record from process
+    # B, followed by A's suffix, produces one malformed line out of two good events — and
+    # `ledger_read` turns malformed JSON into a non-terminal `corrupt` event, so the casualty is a
+    # start/end/close silently DISAPPEARING from a lifecycle decision rather than failing it closed.
+    # An exclusive lock over the whole record makes the append atomic between processes; the
+    # readers' half of the fix is `ledger_corrupt`, which the admission and close paths refuse on.
+    lfd = os.open(ledger_lock_path(arc), os.O_RDWR | os.O_CREAT, 0o644)
+    fd = os.open(ledger_path(arc), os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o644)
     try:
-        # os.write may write FEWER bytes than asked. Under O_APPEND a short write leaves a truncated
-        # JSON line with no newline, and the next append lands on the same line — corrupting two
-        # events with one slip. Loop until the buffer is gone.
-        buf = line.encode('utf-8')
+        fcntl.flock(lfd, fcntl.LOCK_EX)
+        if tail_is_incomplete(fd):
+            buf = b'\n' + buf
         while buf:
             buf = buf[os.write(fd, buf):]
     finally:
         os.close(fd)
+        try:
+            fcntl.flock(lfd, fcntl.LOCK_UN)
+        finally:
+            os.close(lfd)
 
 
 def ledger_read(arc: str) -> list[dict]:
@@ -309,14 +376,49 @@ def ledger_read(arc: str) -> list[dict]:
     return out
 
 
+def write_atomic(path: str, text: str) -> None:
+    """Replace `path` with `text` in one step: write a sibling temp file, fsync, rename.
+
+    `open(path, 'w')` truncates first, so a reader arriving mid-write sees an empty or half-written
+    artifact and a crash leaves it that way permanently. The rename is atomic within a directory,
+    so the file is either the old content or the new one.
+    """
+    tmp = f'{path}.tmp.{os.getpid()}'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def ledger_corrupt(events: list[dict]) -> int:
+    """How many ledger records could not be parsed.
+
+    Any non-zero answer means at least one event's CONTENT is unknown, and every lifecycle
+    decision here is a question about the presence or absence of an event (is this round closed?
+    did this job end?). An unreadable record cannot be assumed harmless, so admission and closure
+    refuse on it instead of deciding over a hole.
+    """
+    return sum(1 for ev in events if ev.get('ev') == 'corrupt')
+
+
 def record_job(arc: str, track: str, rnd: int, kind: str, name: str, t_start: float, t_end: float,
-               rc: int, **extra) -> str:
-    """Ledger a job that ran outside `run` (mutate.py uses this): start + end events."""
+               rc: int, span_s: float | None = None, **extra) -> str:
+    """Ledger a job that ran outside `run` (mutate.py uses this): start + end events.
+
+    `span_s` is the MONOTONIC duration when the caller measured one, and it goes on the end event
+    where `rows_from_ledger` reads it — so the row's length survives a wall-clock correction that
+    lands mid-job. It stays optional because a hand-written or legacy record genuinely has none,
+    and the reader already treats that case as wall-clock evidence rather than a measurement.
+    """
     job = f'{track}.r{rnd}.{name}.{int(t_start * 1000)}.{os.getpid()}'
     ledger_append(arc, dict(ev='start', t=t_start, job=job, track=track, round=rnd, kind=kind, name=name,
                             cpu=extra.pop('cpu', 'light'), t_req=extra.pop('t_req', t_start),
                             queued_s=extra.pop('queued_s', 0.0), **extra))
-    ledger_append(arc, dict(ev='end', t=t_end, job=job, rc=rc, reason=extra.get('reason', '')))
+    end_ev = dict(ev='end', t=t_end, job=job, rc=rc, reason=extra.get('reason', ''))
+    if span_s is not None:
+        end_ev['span_s'] = max(0.0, float(span_s))
+    ledger_append(arc, end_ev)
     return job
 
 
@@ -422,10 +524,85 @@ class Locks:
         self.release()
 
 
-def lock_modes(kind: str, cpu: str, has_tree: bool) -> tuple[str | None, str | None]:
+def round_lock_name(arc: str, track: str, rnd) -> str:
+    """One lock per (arc, track, round) — the admission/closure lock.
+
+    Keyed on the arc's REAL path so two spellings of one arc cannot take two locks, and hashed
+    because a track name is free text (a `/` in it would name a directory that does not exist).
+    """
+    key = '\0'.join((os.path.realpath(arc), str(track), str(rnd)))
+    return 'round-' + hashlib.sha256(key.encode('utf-8')).hexdigest()[:16] + '.lock'
+
+
+def lock_dir_ready() -> str | None:
+    """None if the lock directory exists and can be created, else the reason it cannot.
+
+    Called BEFORE taking a round lock so an unusable lock directory refuses with RC_LOCK — the
+    same answer the tree/CPU locks give — instead of escaping as a traceback from inside the
+    context manager. A scheduler that cannot lock must refuse, never run unlocked.
+    """
+    try:
+        os.makedirs(lock_dir(), exist_ok=True)
+        return None
+    except OSError as e:
+        return str(e)
+
+
+@contextlib.contextmanager
+def round_lock(arc: str, track: str, rnd):
+    """Serialize a round's ADMISSION against its CLOSURE.
+
+    Round 3 (LIFE2/LIFE4). Launch admission read the ledger and closure wrote to it with nothing
+    between them: `close-round` could check for unfinished jobs, compute a profile and append the
+    close while another `run` was appending queued/start events for that same round. The close then
+    described a round it did not contain, and the gate for round N+1 opened over a job that was
+    still holding trees and CPU.
+
+    This lock is held only across the DECISION plus the durable record of it — the queued event on
+    the launch side, the close event on the closing side. It is deliberately NOT held across the
+    child's run: doing that would serialize the whole panel and undo the concurrency this
+    scheduler exists to create.
+    """
+    os.makedirs(lock_dir(), exist_ok=True)
+    fd = os.open(os.path.join(lock_dir(), round_lock_name(arc, track, rnd)), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def admission_decision(closed: bool, corrupt: int) -> tuple[bool, str]:
+    """May a job be admitted into this round? A pure rule, so it can be swept in both directions.
+
+    Independent of the lever gate, which asks about the PREVIOUS round. This asks about the round
+    being launched into: a closed round is sealed, because its profile and its close record are
+    already written and a job admitted afterwards is work no artifact accounts for.
+    """
+    if corrupt:
+        return False, (f'the ledger holds {corrupt} unparseable record(s), so the presence of a close '
+                       'or of a terminal event cannot be established — refusing rather than deciding '
+                       'over a hole. Repair or archive the ledger first.')
+    if closed:
+        return False, ('this round is already CLOSED: its profile and lever record are written, so a job '
+                       'admitted now would be work no artifact accounts for, and the next round\'s gate '
+                       'would open over it. Launch into the NEXT round instead.')
+    return True, ''
+
+
+def lock_modes(kind: str, cpu: str, has_tree: bool, writes_tree: bool) -> tuple[str | None, str | None]:
+    """The (tree, cpu) lock modes for a job.
+
+    `writes_tree` is REQUIRED and never defaulted on purpose: it is the fact that decides whether
+    a reader can safely run beside this job, and a default would let a new call site inherit
+    "read-only" silently. Pass `tree_writing(kind, argv)`.
+    """
     tree_mode = None
     if has_tree:
-        tree_mode = 'ex' if kind == 'write' else 'sh'
+        tree_mode = 'ex' if (kind == 'write' or writes_tree) else 'sh'
     cpu_mode = {'heavy': 'ex', 'light': 'sh', 'none': None}[cpu]
     return tree_mode, cpu_mode
 
@@ -462,6 +639,37 @@ def tree_state(path: str) -> tuple[str, str] | None:
         except OSError:
             h.update(f'{rel}\0gone\n'.encode('utf-8'))
     return head, h.hexdigest()
+
+
+# The ONLY untracked entries a snapshot may legitimately carry are the ones cmd_snapshot installs
+# itself after `git worktree add`. Both the installer and the reuse check read this tuple, so the
+# allowlist can never name something nothing creates, nor miss something the installer adds.
+SNAPSHOT_INSTALLED = ('node_modules',)
+
+
+def snapshot_pollution(path: str, repo: str) -> list[str]:
+    """Untracked entries in `path` that are NOT an install link this command made itself.
+
+    Round 3 (CORR2): reuse checked `git status --untracked-files=no`, so an untracked entry was
+    tolerated wholesale on the grounds that the node_modules link is untracked. An untracked
+    importable module or an AGENTS.md changes what every lens READS while HEAD is unchanged, and
+    the reuse path then certified the directory as the pinned revision. Measured before this fix:
+    reuse returned 0 and the next review read the untracked file.
+
+    The carve-out is gated on a LIVE predicate, never on the name: an allowlisted entry counts as
+    an install link only while it is still a symlink resolving to the source repo's own copy. A
+    real directory (or a file) by that name is pollution like anything else.
+    """
+    others = git(path, 'ls-files', '--others', '--exclude-standard', '-z')
+    bad = []
+    for rel in sorted(filter(None, others.split('\0'))):
+        top = rel.split('/', 1)[0]
+        if top in SNAPSHOT_INSTALLED:
+            here, there = os.path.join(path, top), os.path.join(repo, top)
+            if os.path.islink(here) and os.path.realpath(here) == os.path.realpath(there):
+                continue
+        bad.append(rel)
+    return bad
 
 
 # -------------------------------------------------------------------- gate (pure)
@@ -688,6 +896,17 @@ def rows_from_dir(d: str, seen_paths: set) -> list[dict]:
     return rows
 
 
+# A job's ledger record is finished by an `end` OR by a `refused` (--max-queue expired before it
+# ever got the lock). Round 3 (CORR6): only `end` counted here, so a refusal was invisible -- the
+# refused job's queue was left open-ended and re-measured against the PROFILER's clock on every
+# call, while its run interval stayed the zero-length point it is. `round_window` then took
+# max(end) over a single refused job and produced the degenerate window (t_queued, t_queued), and
+# clipping deleted the whole wait. Measured before this fix: a real 400 s queue clipped to 0 s with
+# L5 reading false, so close-round recorded no triggered lever and the next round's gate passed.
+# `cmd_close_round`'s unfinished-job scan already treated both as terminal; this is the other half.
+TERMINAL_EVENTS = ('end', 'refused')
+
+
 def rows_from_ledger(events: list[dict], t_now: float | None = None) -> tuple[list[dict], set]:
     t_now = t_now or now()
     starts: dict = {}
@@ -695,7 +914,7 @@ def rows_from_ledger(events: list[dict], t_now: float | None = None) -> tuple[li
     for ev in events:
         if ev.get('ev') == 'start' and ev.get('job'):
             starts[ev['job']] = ev
-        elif ev.get('ev') == 'end' and ev.get('job'):
+        elif ev.get('ev') in TERMINAL_EVENTS and ev.get('job'):
             ends[ev['job']] = ev
     rows, paths = [], set()
     # A job killed (or refused) while WAITING on a lock has a `queued` event and no `start`. Walking
@@ -713,10 +932,13 @@ def rows_from_ledger(events: list[dict], t_now: float | None = None) -> tuple[li
         # wall-clock lives in `queued`, which the timeline reports on its own line.
         rows.append(dict(kind=ev.get('kind', 'other'), start=q_t, end=q_t, span=0.0, reported=None, tests='',
                          path=f"{ev.get('track')}/r{ev.get('round')}/{ev.get('name')}", source='ledger',
-                         note=('refused while queued' if fin else 'killed or abandoned while queued (no start event)'),
+                         note=('refused while queued' if (fin or {}).get('ev') == 'refused'
+                               else 'ended while queued (no start event)' if fin
+                               else 'killed or abandoned while queued (no start event)'),
                          track=ev.get('track'), round=ev.get('round'), queued=max(0.0, q_end - q_t),
                          cpu=ev.get('cpu'), job=ev['job'], t_req=q_t, checkpoint=None,
-                         rc=(fin or {}).get('rc'), unscoped=0, mutants=0, never_started=True))
+                         rc=(fin or {}).get('rc'), unscoped=0, mutants=0, never_started=True,
+                         coff=ev.get('coff'), coff_end=(fin or {}).get('coff')))
     for job, s in starts.items():
         e = ends.get(job)
         start = float(s.get('t', 0))
@@ -746,7 +968,7 @@ def rows_from_ledger(events: list[dict], t_now: float | None = None) -> tuple[li
                          queued=float(s.get('queued_s') or 0.0), cpu=s.get('cpu'), job=job,
                          t_req=float(s.get('t_req') or start), pid=s.get('pid'), finished=bool(e),
                          checkpoint=s.get('checkpoint'), rc=(e or {}).get('rc'), unscoped=s.get('unscoped', 0),
-                         mutants=s.get('mutants', 0)))
+                         mutants=s.get('mutants', 0), coff=s.get('coff'), coff_end=(e or {}).get('coff')))
     return rows, paths
 
 
@@ -858,6 +1080,33 @@ def classify_gap(a: float, b: float, notes: list[dict], timeline: list | None) -
     return 'seat-silent', 'heartbeat file present, nothing recorded inside the gap'
 
 
+def clock_discontinuity(rows: list[dict], tol_s: float = 2.0) -> list[dict]:
+    """Where in a wall-sorted timeline did the clock JUMP, so the order across it is unknown?
+
+    Every ledger record carries `coff` = wall - monotonic at write time (see `ledger_append`).
+    That offset is constant while one boot's clock runs untouched, so a difference between two
+    records larger than `tol_s` means a step or a reboot happened between them -- and a wall-clock
+    comparison across a step is not evidence about ordering, no matter how far apart the stamps are.
+
+    Returns one entry per adjacent boundary that crossed a jump, in the order the profiler prints
+    the rows: {'before', 'after', 'delta', 'at'}. Empty means every row this set was measured
+    against shared one continuous clock, which is the case the profiler may sort by wall time.
+
+    Pure and total: rows with no `coff` (a legacy or hand-written record) carry no evidence either
+    way and are skipped rather than guessed at, and `tol_s` is clamped at 0 so a negative tolerance
+    cannot turn every ordinary row into a finding.
+    """
+    tol = max(0.0, float(tol_s))
+    seq = [r for r in sorted(rows, key=lambda r: float(r.get('start') or 0)) if r.get('coff') is not None]
+    out: list[dict] = []
+    for a, b in zip(seq, seq[1:]):
+        delta = float(b['coff']) - float(a['coff'])
+        if abs(delta) > tol:
+            out.append(dict(before=a.get('path') or a.get('job') or '?', after=b.get('path') or b.get('job') or '?',
+                            delta=delta, at=float(b.get('start') or 0)))
+    return out
+
+
 def analyze(rows: list[dict], window: tuple[float, float] | None = None, notes=(), timeline=None,
             title: str = '') -> dict:
     """The profile of one row set.  Returns {'text': str, 'levers': [dict], ...}."""
@@ -906,11 +1155,26 @@ def analyze(rows: list[dict], window: tuple[float, float] | None = None, notes=(
         P(f'  waits SOLO      {hms(wait_alone):>9}   one wait in flight and nothing else at all — no second lens, no fixes')
     if queued_total:
         P(f'  queued          {hms(queued_total):>9}   measured time jobs spent waiting on a lock (the serialiser working)')
+    jumps = clock_discontinuity(rows)
+    if jumps:
+        P(f'  CLOCK JUMPED    {len(jumps)}         the wall clock moved between jobs, so the ORDER across each')
+        P('                                boundary below is UNKNOWN and every gap spanning one is unpriced')
+        for j in jumps[:6]:
+            P(f"                  {j['delta']:+9.0f}s  {clock(j['at'])}   between {j['before']} and {j['after']}")
     gap_rows = []
     if big_gaps:
         P(f'  gaps ≥ 30 min   {len(big_gaps)}')
         for g, a, b in big_gaps[:8]:
             cls, ev = classify_gap(a, b, list(notes), timeline)
+            # Round 3 (LIFE6): a gap whose two ends were stamped under DIFFERENT clock offsets has
+            # no measured length -- its span is (wall difference + however far the clock moved), and
+            # the two are not separable from the record. It is reported as unpriced rather than
+            # billed to the seat, so a 1h clock correction cannot masquerade as an hour of silence.
+            spans = [j for j in jumps if a <= j['at'] <= b]
+            if spans:
+                cls = 'clock-jump'
+                ev = (f"the clock moved {spans[0]['delta']:+.0f}s inside this gap, so its length is not a "
+                      f"measurement — nothing is billed to it") + ('; ' + ev if ev else '')
             gap_rows.append(dict(span=g, start=a, end=b, cls=cls, evidence=ev))
             P(f'                  {hms(g):>9}   {clock(a)} → {clock(b)}   {cls:11} {ev}')
     levers: list[dict] = []
@@ -1019,7 +1283,15 @@ def round_window(rows: list[dict], track: str, rnd: int) -> tuple[float, float] 
         return None
     # the RECORDED request time opens the window — never start minus an aggregate queue total
     # (mutate.py sums the waits of every mutant into one row, which would open it far too early)
-    return min(r['t_req'] for r in mine), max(r['end'] for r in mine)
+    def last_moment(r: dict) -> float:
+        # A job that was REFUSED never ran, so its run interval is a zero-length point at the moment
+        # it asked (deliberately, so a wait cannot be counted as timed activity). Its wall-clock is
+        # all in `queued`, and closing the window at max(end) therefore cut the entire wait out of
+        # the round -- the window collapsed onto the request instant. The round ends at the last
+        # moment ANY of its intervals reached, wait included.
+        q_a = float(r['t_req'] if r.get('t_req') is not None else r['start'])
+        return max(float(r['end']), q_a + float(r.get('queued') or 0.0))
+    return min(r['t_req'] for r in mine), max(last_moment(r) for r in mine)
 
 
 def clip_rows(rows, window):
@@ -1176,31 +1448,45 @@ def cmd_run(args) -> int:
     if needs_checkpoint(args.kind, cpu, checkpoint):
         return die(f'a WIDE vitest run ({shlex.join(cmd)}) needs --checkpoint "<why the whole suite, here>" — '
                    'scope it (--affected BASE..HEAD, or name ≤ 8 files) or state the checkpoint', RC_WIDE)
-    if args.kind in ('review', 'write'):
-        ok, msg = gate(arc, args.track, args.round)
+    # Round 3 (LIFE2/LIFE4): admission is a TRANSACTION under the round lock — the seal check, the
+    # lever gate and the durable `queued` record happen with no window in which a concurrent
+    # close-round can slip between them. The child's run is deliberately outside it (see round_lock).
+    err = lock_dir_ready()
+    if err:
+        return die(f'cannot take locks under {lock_dir()}: {err} (refusing to run unlocked)', RC_LOCK)
+    with round_lock(arc, args.track, args.round):
+        events = ledger_read(arc)
+        ok, msg = admission_decision(round_status(events, args.track, args.round)['closed'],
+                                     ledger_corrupt(events))
         if not ok:
-            print(f'loop.py: GATE REFUSED launching {args.kind} for track {args.track} round {args.round}:\n{msg}', file=sys.stderr)
+            print(f'loop.py: ADMISSION REFUSED launching {args.kind} into track {args.track} round '
+                  f'{args.round}:\n{msg}', file=sys.stderr)
             return RC_GATE
-    tree = os.path.abspath(args.tree) if args.tree else None
-    if tree and tree_state(tree) is None:
-        return die(f'--tree {tree} is not a git worktree')
-    tree_mode, cpu_mode = lock_modes(args.kind, cpu, bool(tree))
-    t_req = now()
-    # pid included: two jobs with the same track/round/name launched in the same millisecond used to
-    # share an id, so one's `end` event closed the other's row and the profile attributed one
-    # job's span to both. The ledger keys on this string, so it must identify the RUN, not the instant.
-    job = f'{args.track}.r{args.round}.{name}.{int(t_req * 1000)}.{os.getpid()}'
-    capture = args.kind in ('vitest', 'tsc', 'mutant', 'other') if args.capture is None else args.capture
-    log = args.log
-    if capture and not log:
-        rdir = os.path.join(arc, 'rounds', str(args.track), f'r{args.round}')
-        os.makedirs(rdir, exist_ok=True)
-        log = os.path.join(rdir, f'{name}.{int(t_req)}.log')
-    locks = Locks(tree, tree_mode, cpu_mode, holder=job, max_queue_s=args.max_queue)
-    # The queued event lands BEFORE the wait, so a job killed or refused while waiting on a lock
-    # is still visible in the ledger (and the inner launcher can verify who started it).
-    ledger_append(arc, dict(ev='queued', t=t_req, job=job, track=args.track, round=args.round, kind=args.kind,
-                            name=name, cpu=cpu, tree=tree, pid=os.getpid()))
+        if args.kind in ('review', 'write'):
+            ok, msg = gate(arc, args.track, args.round)
+            if not ok:
+                print(f'loop.py: GATE REFUSED launching {args.kind} for track {args.track} round {args.round}:\n{msg}', file=sys.stderr)
+                return RC_GATE
+        tree = os.path.abspath(args.tree) if args.tree else None
+        if tree and tree_state(tree) is None:
+            return die(f'--tree {tree} is not a git worktree')
+        tree_mode, cpu_mode = lock_modes(args.kind, cpu, bool(tree), tree_writing(args.kind, cmd))
+        t_req = now()
+        # pid included: two jobs with the same track/round/name launched in the same millisecond used to
+        # share an id, so one's `end` event closed the other's row and the profile attributed one
+        # job's span to both. The ledger keys on this string, so it must identify the RUN, not the instant.
+        job = f'{args.track}.r{args.round}.{name}.{int(t_req * 1000)}.{os.getpid()}'
+        capture = args.kind in ('vitest', 'tsc', 'mutant', 'other') if args.capture is None else args.capture
+        log = args.log
+        if capture and not log:
+            rdir = os.path.join(arc, 'rounds', str(args.track), f'r{args.round}')
+            os.makedirs(rdir, exist_ok=True)
+            log = os.path.join(rdir, f'{name}.{int(t_req)}.log')
+        locks = Locks(tree, tree_mode, cpu_mode, holder=job, max_queue_s=args.max_queue)
+        # The queued event lands BEFORE the wait, so a job killed or refused while waiting on a lock
+        # is still visible in the ledger (and the inner launcher can verify who started it).
+        ledger_append(arc, dict(ev='queued', t=t_req, job=job, track=args.track, round=args.round, kind=args.kind,
+                                name=name, cpu=cpu, tree=tree, pid=os.getpid()))
     try:
         queued = locks.acquire()
     except TimeoutError as e:
@@ -1263,6 +1549,12 @@ def cmd_run(args) -> int:
             os.set_inheritable(fd, True)
         child = subprocess.Popen(cmd, cwd=cwd, stdout=fh or None, stderr=(subprocess.STDOUT if fh else None),
                                  env=child_env, start_new_session=True, pass_fds=tuple(locks.fds))
+        # The child's identity, durable BEFORE we wait on it. start_new_session makes the child its
+        # own group leader, so child.pid is the group id — and that group, not this scheduler, is
+        # what actually holds the tree while the work runs (see the pass_fds note above). Without
+        # this event a SIGKILL of the scheduler left close-round no way to see the live writer.
+        ledger_append(arc, dict(ev='child', t=now(), job=job, track=args.track, round=args.round,
+                                name=name, kind=args.kind, pid=os.getpid(), pgid=child.pid))
         # a signal that arrived while the child was being forked was recorded, not delivered — pass it on
         for signum in pending:
             signal_child(child, signum)
@@ -1335,6 +1627,45 @@ def pid_alive(pid) -> bool:
     return True
 
 
+def pgid_alive(pgid) -> bool:
+    """Whether any process remains in the child's process group.
+
+    `cmd_run` gives every child `start_new_session=True`, so the child's pid IS its group id, and
+    the group holds the child plus everything it spawned (codex's helpers, a vitest worker pool).
+    Signal 0 to the group only asks. Fails CLOSED for the same reason `pid_alive` does: id reuse
+    answers "alive", and refusing to close a round is the safe direction.
+    """
+    try:
+        pgid = int(pgid)
+    except (TypeError, ValueError):
+        return False
+    if pgid <= 1:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def job_alive(j: dict) -> bool:
+    """A job is alive while EITHER its scheduler or its child process group is."""
+    return pid_alive(j.get('pid')) or pgid_alive(j.get('pgid'))
+
+
+def describe_liveness(j: dict) -> str:
+    parts = []
+    if pid_alive(j.get('pid')):
+        parts.append(f"scheduler pid {j.get('pid')}")
+    if pgid_alive(j.get('pgid')):
+        parts.append(f"child group {j.get('pgid')}")
+    return ' + '.join(parts) or 'no live process'
+
+
 def unfinished_jobs(arc: str, track: str, rnd: int) -> tuple[list[dict], list[dict]]:
     """(still running, abandoned) jobs ledgered for this track+round.
 
@@ -1347,18 +1678,26 @@ def unfinished_jobs(arc: str, track: str, rnd: int) -> tuple[list[dict], list[di
                 if ev.get('ev') in ('end', 'refused') and ev.get('job')}
     seen: dict = {}
     for ev in ledger_read(arc):
-        if ev.get('ev') not in ('queued', 'start') or not ev.get('job'):
+        if ev.get('ev') not in ('queued', 'start', 'child') or not ev.get('job'):
             continue
         if str(ev.get('track')) != str(track) or int(ev.get('round', -1)) != int(rnd):
             continue
         if ev['job'] in terminal:
             continue
         seen.setdefault(ev['job'], dict(job=ev['job'], name=ev.get('name'), kind=ev.get('kind'),
-                                        pid=ev.get('pid'), t=ev.get('t')))
+                                        pid=ev.get('pid'), pgid=None, started=False, t=ev.get('t')))
         if ev.get('pid'):
             seen[ev['job']]['pid'] = ev['pid']
-    live = [j for j in seen.values() if pid_alive(j.get('pid'))]
-    dead = [j for j in seen.values() if not pid_alive(j.get('pid'))]
+        if ev.get('ev') == 'start':
+            seen[ev['job']]['started'] = True
+        if ev.get('pgid'):
+            # Round 3 (LIFE3): the child's process GROUP, ledgered right after Popen. The scheduler
+            # pid alone was the whole liveness test, so `kill -9` on the scheduler -- which
+            # deliberately leaves the child alive holding the inherited lock fds -- read as dead and
+            # `--abandon-unfinished` closed the round over a running writer.
+            seen[ev['job']]['pgid'] = ev['pgid']
+    live = [j for j in seen.values() if job_alive(j)]
+    dead = [j for j in seen.values() if not job_alive(j)]
     return live, dead
 
 
@@ -1366,38 +1705,65 @@ def cmd_close_round(args) -> int:
     arc = need_arc(args)
     if not arc:
         return RC_USAGE
-    live, dead = unfinished_jobs(arc, args.track, args.round)
-    if live:
-        return die('cannot close round {} of track {}: {} job(s) still RUNNING — {}. The profile would '
-                   'omit them and the gate would admit the next round while this one still holds its '
-                   'trees and CPU. Wait for them, or kill them (a killed job ledgers no end event and '
-                   'then closes with --abandon-unfinished).'
-                   .format(args.round, args.track, len(live),
-                           ', '.join(f"{j['name']} (pid {j['pid']})" for j in live)), RC_FAILCLOSED)
-    if dead and not args.abandon_unfinished:
-        return die('cannot close round {} of track {}: {} job(s) have no terminal ledger event and '
-                   'their launcher is gone — {}. They were killed or crashed, so their wall-clock is '
-                   'unmeasured. Re-run them, or pass --abandon-unfinished to close anyway (the close '
-                   'then records that they were abandoned).'
-                   .format(args.round, args.track, len(dead),
-                           ', '.join(str(j['name']) for j in dead)), RC_FAILCLOSED)
-    txt, res = profile_text(arc, args.dirs, args.track, args.round, args.timeline)
-    if res.get('empty') and not args.empty_ok:
-        print(txt)
-        return die(f'no ledgered job in track {args.track} round {args.round}; pass --empty-ok to close it anyway '
-                   '(the close then records that nothing was measured)', RC_FAILCLOSED)
-    rdir = os.path.join(arc, 'rounds', str(args.track), f'r{args.round}')
-    os.makedirs(rdir, exist_ok=True)
-    ppath, lpath = os.path.join(rdir, 'profile.txt'), os.path.join(rdir, 'levers.json')
-    with open(ppath, 'w', encoding='utf-8') as fh:
-        fh.write(txt + '\n')
-    levers = res.get('levers', [])
-    with open(lpath, 'w', encoding='utf-8') as fh:
-        json.dump(levers, fh, indent=1)
-    triggered = [lv['id'] for lv in levers if lv['triggered']]
-    ledger_append(arc, dict(ev='round-close', track=args.track, round=args.round, triggered=triggered,
-                            profile=ppath, levers=lpath, empty=bool(res.get('empty')),
-                            abandoned=[j['job'] for j in dead] or None))
+    # Round 3 (LIFE4): the WHOLE close is one transaction under the round lock — the unfinished-job
+    # check, the profile computation, both artifact writes and the single close event. Before this,
+    # two concurrent closes could compute different snapshots, truncate each other's profile.txt
+    # mid-write and append two close events, and `round_status` reads the LAST close as
+    # authoritative — so a lever disposition recorded against the first close was silently voided.
+    err = lock_dir_ready()
+    if err:
+        return die(f'cannot take locks under {lock_dir()}: {err} (refusing to close unlocked)', RC_LOCK)
+    with round_lock(arc, args.track, args.round):
+        events = ledger_read(arc)
+        corrupt = ledger_corrupt(events)
+        if corrupt:
+            return die(f'refusing to close round {args.round} of track {args.track}: the ledger holds '
+                       f'{corrupt} unparseable record(s), so an unfinished job cannot be ruled out. '
+                       'Repair or archive the ledger first.', RC_FAILCLOSED)
+        if round_status(events, args.track, args.round)['closed']:
+            return die(f'round {args.round} of track {args.track} is already CLOSED. A second close '
+                       'would overwrite its profile and become the authoritative record, voiding every '
+                       'lever disposition made against the first one. Record dispositions with '
+                       '`loop.py lever` (no re-close needed); if the round genuinely has new work, it '
+                       'belongs in the next round.', RC_FAILCLOSED)
+        live, dead = unfinished_jobs(arc, args.track, args.round)
+        if live:
+            return die('cannot close round {} of track {}: {} job(s) still RUNNING — {}. The profile would '
+                       'omit them and the gate would admit the next round while this one still holds its '
+                       'trees and CPU. Wait for them, or kill them (a killed job ledgers no end event and '
+                       'then closes with --abandon-unfinished).'
+                       .format(args.round, args.track, len(live),
+                               ', '.join(f"{j['name']} ({describe_liveness(j)})" for j in live)), RC_FAILCLOSED)
+        if dead and not args.abandon_unfinished:
+            unresolved = [j for j in dead if j.get('started') and not j.get('pgid')]
+            extra = ('' if not unresolved else
+                     ' Of those, {} died before its child identity was durably recorded ({}), so a live '
+                     'orphan cannot be ruled out by inspection.'
+                     .format(len(unresolved), ', '.join(str(j['name']) for j in unresolved)))
+            return die('cannot close round {} of track {}: {} job(s) have no terminal ledger event and '
+                       'neither their launcher nor their child process group is alive — {}. They were '
+                       'killed or crashed, so their wall-clock is unmeasured. Re-run them, or pass '
+                       '--abandon-unfinished to close anyway (the close then records that they were '
+                       'abandoned).{}'
+                       .format(args.round, args.track, len(dead),
+                               ', '.join(str(j['name']) for j in dead), extra), RC_FAILCLOSED)
+        txt, res = profile_text(arc, args.dirs, args.track, args.round, args.timeline)
+        if res.get('empty') and not args.empty_ok:
+            print(txt)
+            return die(f'no ledgered job in track {args.track} round {args.round}; pass --empty-ok to close it anyway '
+                       '(the close then records that nothing was measured)', RC_FAILCLOSED)
+        rdir = os.path.join(arc, 'rounds', str(args.track), f'r{args.round}')
+        os.makedirs(rdir, exist_ok=True)
+        ppath, lpath = os.path.join(rdir, 'profile.txt'), os.path.join(rdir, 'levers.json')
+        levers = res.get('levers', [])
+        # tmp + os.replace: a reader never sees a half-written profile, and a crash between the two
+        # artifacts leaves the previous pair intact rather than one new and one truncated.
+        write_atomic(ppath, txt + '\n')
+        write_atomic(lpath, json.dumps(levers, indent=1))
+        triggered = [lv['id'] for lv in levers if lv['triggered']]
+        ledger_append(arc, dict(ev='round-close', track=args.track, round=args.round, triggered=triggered,
+                                profile=ppath, levers=lpath, empty=bool(res.get('empty')),
+                                abandoned=[j['job'] for j in dead] or None))
     print(txt)
     print(f'\nround {args.round} of track {args.track} CLOSED; TRIGGERED: {triggered or "none"}')
     if triggered:
@@ -1492,8 +1858,14 @@ def cmd_snapshot(args) -> int:
             # Measured before this fix: a reviewer read 'MUTATED BY SOMEONE' out of a worktree
             # this command had just certified. That is the fail-open the whole read/write overlap
             # rests on, so a tracked modification refuses.
-            # Untracked files are tolerated on purpose: the node_modules symlink and a lens's own
-            # scratch are untracked, and neither changes the code under review.
+            polluted = snapshot_pollution(path, repo)
+            if polluted:
+                return die(f'{path} is at {sha[:12]} but carries UNTRACKED entries that sha does not '
+                           f'name, so a lens would read them while citing the sha:\n'
+                           + '\n'.join('  ' + p for p in polluted[:20])
+                           + (f'\n  ... and {len(polluted) - 20} more' if len(polluted) > 20 else '')
+                           + f'\nRemove them (git -C {shlex.quote(path)} clean -fd) or remove the '
+                             f'snapshot and re-snapshot.', RC_FAILCLOSED)
             dirty = git(path, 'status', '--porcelain', '--untracked-files=no').strip()
             if dirty:
                 return die(f'{path} is at {sha[:12]} but has UNCOMMITTED TRACKED CHANGES, so it is '
@@ -1508,9 +1880,10 @@ def cmd_snapshot(args) -> int:
     r = subprocess.run(['git', '-C', repo, 'worktree', 'add', '--detach', path, sha], capture_output=True, text=True)
     if r.returncode != 0:
         return die(f'git worktree add failed: {r.stderr.strip()}')
-    nm = os.path.join(repo, 'node_modules')
-    if os.path.isdir(nm) and not os.path.exists(os.path.join(path, 'node_modules')):
-        os.symlink(nm, os.path.join(path, 'node_modules'))
+    for rel in SNAPSHOT_INSTALLED:
+        src = os.path.join(repo, rel)
+        if os.path.isdir(src) and not os.path.exists(os.path.join(path, rel)):
+            os.symlink(src, os.path.join(path, rel))
     ledger_append(arc, dict(ev='note', track=args.track, round=args.round, text=f'snapshot {sha[:12]} → {path}'))
     print(path)
     return 0

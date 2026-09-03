@@ -328,24 +328,31 @@
     "test": "test_every_lever_predicate_fires_on_its_own_evidence_and_stays_quiet_without_it"
   },
   {
-    "label": "M55 the new-track exception widens to every track, so an unclosed round is waved through",
-    "old": "    return ((prev_closed or track_new) and not missing), missing\n",
-    "new": "    return ((prev_closed or True) and not missing), missing\n",
+    "label": "M55 round_to_close falls back to rnd-1, so a mid-arc lane is refused forever and pushed onto --one-off",
+    "old": "    return max(rs) if rs else None\n",
+    "new": "    return max(rs) if rs else rnd - 1\n",
     "expect": "killed",
-    "test": "test_decision_sweep"
+    "test": "test_round_to_close_is_the_last_active_round_not_rnd_minus_one"
   },
   {
-    "label": "M56 track_seen answers False for a track that HAS run, admitting a real unclosed round",
-    "old": "    return any(ev.get('track') == track for ev in events)\n",
-    "new": "    return all(ev.get('track') == track for ev in events)\n",
+    "label": "M56 round_to_close answers the EARLIEST active round, so a later unclosed round is skipped",
+    "old": "          and ev['round'] < rnd]\n    return max(rs) if rs else None\n",
+    "new": "          and ev['round'] < rnd]\n    return min(rs) if rs else None\n",
     "expect": "killed",
-    "test": "test_a_new_track_is_admitted_but_a_used_one_is_not"
+    "test": "test_round_to_close_is_the_last_active_round_not_rnd_minus_one"
   },
   {
-    "label": "M57 the strict default flips, so every existing caller of gate_decision stops gating",
-    "old": "                  track_new: bool = False) -> tuple[bool, set]:\n",
-    "new": "                  track_new: bool = True) -> tuple[bool, set]:\n",
+    "label": "M57 a refusal stops counting as history, so a failed launch erases the round it must close",
+    "old": "TRACK_EVENTS = ('queued', 'start', 'end', 'refused', 'round-close', 'lever')\n",
+    "new": "TRACK_EVENTS = ('queued', 'start', 'end', 'round-close', 'lever')\n",
     "expect": "killed",
-    "test": "test_decision_sweep"
+    "test": "test_round_to_close_is_the_last_active_round_not_rnd_minus_one"
+  },
+  {
+    "label": "M58 the gate stops looking at the round it computed and reads rnd-1 again",
+    "old": "    st = round_status(events, track, prev)\n",
+    "new": "    st = round_status(events, track, rnd - 1)\n",
+    "expect": "killed",
+    "test": "test_gate_admits_a_fresh_track_and_holds_a_used_one"
   }
 ]

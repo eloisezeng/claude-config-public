@@ -71,7 +71,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from loop import Locks, arc_dir, record_job, tests_ran, now as _now  # noqa: E402
+from loop import Locks, arc_dir, ledger_append, tests_ran, now as _now  # noqa: E402
 
 
 def sha256(path: str) -> str:
@@ -146,6 +146,9 @@ class _Interrupted(BaseException):
 
 
 _CHILD: list = [None]   # the test process currently running, for signal forwarding
+# (arc, job) plus track/round/name for the batch's ledger row, set once the row exists so
+# run_test_cmd can attribute each child's process group to it. LIFE1/LIFE3.
+_LEDGER: list = [None, None, None, None]
 
 
 def _terminate_child(sig: int) -> None:
@@ -169,7 +172,7 @@ def _install_signal_handlers() -> None:
         signal.signal(sig, handler)
 
 
-def run_test_cmd(cmd: str, root: str, copy_dir: str) -> subprocess.CompletedProcess:
+def run_test_cmd(cmd: str, root: str, copy_dir: str, lock_fds: tuple = ()) -> subprocess.CompletedProcess:
     """Run one test command with bytecode writing off and any in-tree cache purged.
 
     Belt and braces around `write_source`, which is the guarantee: this keeps the copy dir clean
@@ -187,9 +190,23 @@ def run_test_cmd(cmd: str, root: str, copy_dir: str) -> subprocess.CompletedProc
                 dirnames.remove(d)
     env = dict(os.environ)
     env['PYTHONDONTWRITEBYTECODE'] = '1'
+    # Round 3 (LIFE1): the test child INHERITS this run's lock descriptors, the same way loop.py's
+    # cmd_run does it. flock(2) belongs to the open file DESCRIPTION, not to a process, so with the
+    # fds inherited the shared tree/CPU locks stand for as long as any process holds one. Without
+    # this, SIGKILL on the mutation parent had the kernel drop every lock instantly while this
+    # independently-sessioned child kept running the suite: the next queued job took a lock that was
+    # still, in fact, in use.
+    for fd in lock_fds:
+        os.set_inheritable(fd, True)
     proc = subprocess.Popen(cmd, shell=True, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, env=env, start_new_session=True)
+                            text=True, env=env, start_new_session=True, pass_fds=tuple(lock_fds))
     _CHILD[0] = proc
+    if _LEDGER[0]:
+        arc_, job_ = _LEDGER[0]
+        # the child's process GROUP, durable before we wait on it, so close-round's liveness check
+        # can see a test process that outlived its parent (loop.py:job_alive)
+        ledger_append(arc_, dict(ev='child', t=_now(), job=job_, track=_LEDGER[1], round=_LEDGER[2],
+                                 name=_LEDGER[3], kind='mutant', pid=os.getpid(), pgid=proc.pid))
     try:
         out, err = proc.communicate()
     except BaseException:
@@ -268,6 +285,22 @@ def main() -> int:
 
     with open(args.mutants) as fh:
         mutants = json.load(fh)
+    # An EMPTY manifest is a refusal, not a green run. Round 3 (CORR3): the final verdict is
+    # `0 if n_ok == len(results)`, and `0 == 0` held for a manifest of `[]` -- so a generator that
+    # produced nothing, or a path typo answering with an empty array, earned `0/0 mutants matched
+    # expectation; tracked files unchanged: True` and exit 0 with no mutant ever armed. Every
+    # caller gates on that status. Checked BEFORE the baseline so a no-evidence run does not even
+    # spend the suite. A non-list manifest is refused here too: `for m in mutants` over a dict
+    # iterates its KEYS, and a string manifest iterates its characters.
+    if not isinstance(mutants, list):
+        print(f'usage: --mutants {args.mutants} must hold a JSON ARRAY of mutant entries, '
+              f'got {type(mutants).__name__}', file=sys.stderr)
+        return 4
+    if not mutants:
+        print(f'usage: --mutants {args.mutants} is EMPTY, so this run would prove nothing while '
+              f'exiting 0; write at least one mutant entry or do not claim mutation coverage',
+              file=sys.stderr)
+        return 4
     for m in mutants:
         missing = {'label', 'old', 'new', 'expect'} - set(m)
         if missing or m['expect'] not in ('killed', 'survived', 'unobservable'):
@@ -373,8 +406,29 @@ def main() -> int:
     # it consumed landed in the unexplained-gap bucket instead of against the job that spent it.
     _install_signal_handlers()
     t_batch = _now()
+    m_batch = time.monotonic()
+    # Round 3 (LIFE1): the ledger row is OPENED here, before the baseline and before any mutant is
+    # armed, and closed in the `finally` below. It used to be written only at the end, so SIGKILL on
+    # this process left the ledger with neither a start nor an end: close-round saw no unfinished
+    # job, closed the round, and the gate admitted the next panel while the orphaned suite was still
+    # running under the locks its (now inherited) descriptors still held.
+    arc = arc_dir(args.arc)
+    job_name = f'mutants-{os.path.splitext(src_base)[0]}'
+    ledgered = bool(arc and args.track and args.round is not None)
+    job = f'{args.track}.r{args.round}.{job_name}.{int(t_batch * 1000)}.{os.getpid()}' if ledgered else ''
+    if ledgered:
+        _LEDGER[:] = [(arc, job), args.track, args.round, job_name]
+        skel = dict(job=job, track=args.track, round=args.round, kind='mutant', name=job_name,
+                    cpu='light', pid=os.getpid())
+        ledger_append(arc, dict(ev='queued', t=t_batch, tree=None, **skel))
+        ledger_append(arc, dict(ev='start', t=t_batch, t_req=t_batch, queued_s=0.0, **skel))
     results: list[tuple[str, str, str, bool]] = []   # label, expect, outcome, matched
-    timings: list[tuple[float, float, float]] = []   # t_req, t_run, t_end per executed mutant
+    # Round 3 (LIFE7): queue and run intervals are measured with time.monotonic(), which no clock
+    # adjustment can move. They used to be wall-clock differences of `loop.now()` (= time.time()),
+    # so an NTP step or a manual clock change during a queued or running mutant wrote a NEGATIVE or
+    # inflated `queued_s`/`reported` straight into the ledger, and those two numbers are inputs to
+    # the profiler's lever decisions. Wall time is kept only as the ANCHOR that positions the row.
+    timings: list[dict] = []   # per executed mutant: wall anchors t_req/t_run + monotonic m_req/m_run/m_end
     unscoped: list[str] = []
     rc = 1
     interrupted = None
@@ -397,8 +451,8 @@ def main() -> int:
             write_source(os.path.join(copy_dir, src_base), apply_rewrites(src_text, args.src_rewrite))
             write_source(base_copy, test_copy_text)
         base_cmd = args.test_cmd.format(test=os.path.relpath(base_copy, root), filter='')
-        with Locks(*lock_args, holder='mutate:baseline'):
-            base_proc = run_test_cmd(base_cmd, root, copy_dir)
+        with Locks(*lock_args, holder='mutate:baseline') as lk:
+            base_proc = run_test_cmd(base_cmd, root, copy_dir, tuple(lk.fds))
         base_out = base_proc.stdout + base_proc.stderr
         base_ran = tests_ran(base_out)
         if base_proc.returncode != 0 or base_ran == 0:
@@ -433,6 +487,16 @@ def main() -> int:
                         misarmed = f'`old` {old[:50]!r} occurs {count} times (need exactly 1)'
                         break
                     mutated = mutated.replace(old, new)
+                # Unique anchors are not enough: the arming code applied every edit and never
+                # asked whether the RESULT differed. Round 3 (CORR4): an entry whose `old` equals
+                # its `new` -- or a multi-edit sequence whose edits cancel out -- ran the ORIGINAL
+                # source and was reported `SURVIVED OK`, exit 0, `1/1 mutants matched expectation`,
+                # with no mutant armed. A survived expectation is the one that a no-op satisfies
+                # for free, so the emptiness has to be caught here rather than inferred from the
+                # outcome.
+                if misarmed is None and mutated == src_text:
+                    misarmed = ('every edit applied but the result is BYTE-IDENTICAL to the source, '
+                                'so no mutant was armed (old == new, or the edits cancel)')
                 if misarmed:
                     print(f"MISARMED  {m['label']}: {misarmed}")
                     results.append((m['label'], m['expect'], 'misarmed', False))
@@ -455,11 +519,12 @@ def main() -> int:
                 cmd = args.test_cmd.format(test=os.path.relpath(test_copy, root), filter=filt)
                 # Each mutant run is a LIGHT CPU job: it shares the machine with other light jobs
                 # and waits for a heavy one (a full suite, a tsc) instead of fighting it.
-                t_req = _now()
-                with Locks(*lock_args, holder=f"mutate:{m['label'][:40]}"):
-                    t_run = _now()
-                    proc = run_test_cmd(cmd, root, copy_dir)
-                timings.append((t_req, t_run, _now()))
+                t_req, m_req = _now(), time.monotonic()
+                with Locks(*lock_args, holder=f"mutate:{m['label'][:40]}") as lk:
+                    t_run, m_run = _now(), time.monotonic()
+                    proc = run_test_cmd(cmd, root, copy_dir, tuple(lk.fds))
+                timings.append(dict(t_req=t_req, t_run=t_run, m_req=m_req, m_run=m_run,
+                                    m_end=time.monotonic()))
                 out = proc.stdout + proc.stderr
                 # A vitest name filter that matches nothing marks every test skipped and exits 0,
                 # which would read as SURVIVED and turn each `killed` expectation green by default.
@@ -517,21 +582,30 @@ def main() -> int:
         _terminate_child(signal.SIGKILL)
         if not args.keep_copy:
             shutil.rmtree(copy_dir, ignore_errors=True)
-        arc = arc_dir(args.arc)
-        if arc and args.track and args.round is not None:
+        if ledgered:
             # One ledger row for the whole mutant batch, so `loop.py profile` can price the
             # round's mutation work per mutant (lever L3) and see the queue it waited in.
             # Written from `finally` so an interrupted or baseline-refused run is still ATTRIBUTED:
             # a job that spent wall-clock and left no row is exactly the unexplained gap the
             # profiler is meant to eliminate.
-            t0 = timings[0][1] if timings else t_batch
-            t_req0 = timings[0][0] if timings else t_batch
+            # Every DURATION here is monotonic; t0/t_req0 are wall-clock POSITIONS, not measurements.
+            # This RE-writes the job's start event with the numbers the batch actually measured
+            # (rows_from_ledger keys starts by job id and takes the last one) and then closes the row
+            # the skeleton above opened -- same job id, so an interrupted run leaves exactly one
+            # unfinished job rather than one phantom plus one orphan.
+            m0 = timings[0]['m_run'] if timings else m_batch
+            t0 = timings[0]['t_run'] if timings else t_batch
+            t_req0 = timings[0]['t_req'] if timings else t_batch
+            span = max(0.0, time.monotonic() - m0)
             note = (f'INTERRUPTED by signal {interrupted}; ' if interrupted else '')
-            record_job(arc, args.track, args.round, 'mutant', f'mutants-{os.path.splitext(src_base)[0]}',
-                       t0, _now(), rc, cpu='light', t_req=t_req0,
-                       queued_s=sum(t1 - t_q for t_q, t1, _ in timings), mutants=len(timings),
-                       unscoped=len(unscoped), reported=sum(t2 - t1 for _, t1, t2 in timings),
-                       reason=f'{note}{sum(1 for r in results if r[3])}/{len(results)} matched; rc={rc}')
+            ledger_append(arc, dict(ev='start', t=t0, job=job, track=args.track, round=args.round,
+                                    kind='mutant', name=job_name, cpu='light', pid=os.getpid(),
+                                    t_req=t_req0,
+                                    queued_s=sum(max(0.0, e['m_run'] - e['m_req']) for e in timings),
+                                    mutants=len(timings), unscoped=len(unscoped),
+                                    reported=sum(max(0.0, e['m_end'] - e['m_run']) for e in timings)))
+            ledger_append(arc, dict(ev='end', t=t0 + span, job=job, rc=rc, span_s=span,
+                                    reason=f'{note}{sum(1 for r in results if r[3])}/{len(results)} matched; rc={rc}'))
 
 
 

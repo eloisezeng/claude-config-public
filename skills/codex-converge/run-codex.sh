@@ -109,35 +109,66 @@ if [ -n "${CC_LOOP_JOB:-}" ] || [ -n "${CC_LOOP_ARC:-}" ]; then
     exit 2
   fi
 fi
-if [ "$SCHEDULED" -eq 0 ] && [ "$ONE_OFF" -eq 0 ]; then
-  [ -n "$ARC" ] || ARC="${CC_ARC:-}"
-  if [ -z "$ARC" ] && [ -n "${CLAUDE_JOB_DIR:-}" ]; then ARC="$CLAUDE_JOB_DIR/tmp"; fi
-  [ -n "$TRACK" ] || TRACK="${CC_TRACK:-}"
-  [ -n "$ROUND" ] || ROUND="${CC_ROUND:-}"
-  if [ -z "$ARC" ] || [ -z "$TRACK" ] || [ -z "$ROUND" ]; then
-    echo "run-codex: this launch is not attributed to an arc/track/round, so it would be unscheduled and unprofiled." >&2
-    echo "run-codex: pass --arc DIR --track T --round N (or export CC_ARC/CC_TRACK/CC_ROUND; arc defaults to \$CLAUDE_JOB_DIR/tmp)," >&2
-    echo "run-codex: or --one-off for a single call outside any convergence arc." >&2
-    exit 2
+# `--one-off` means "not attributed to a convergence arc". It never meant "unsynchronized".
+# Measured round 3 (CORR1): the old guard was `[ "$SCHEDULED" -eq 0 ] && [ "$ONE_OFF" -eq 0 ]`, so
+# --one-off skipped loop.py altogether -- and with it the tree lock and the before/after movement
+# check. A one-off review of a worktree a scheduled --write was editing returned 0 and promoted an
+# approving verdict over a hybrid snapshot, and `--write --one-off` let two Codex writers enter one
+# clean linked worktree at once. The tree lock is keyed on the worktree TOPLEVEL (see
+# loop.py:tree_lock_name), never on the arc, so scheduling a one-off into a throwaway arc takes the
+# SAME lock every scheduled job takes.
+if [ "$ONE_OFF" -eq 1 ] && [ "$WRITE_MODE" -eq 1 ]; then
+  echo "run-codex: --write --one-off is refused: a one-off writer would take no exclusive tree lock, so two of them can enter one worktree at once." >&2
+  echo "run-codex: attribute the write to an arc instead (--arc DIR --track T --round N) so it is scheduled, locked and ledgered." >&2
+  exit 2
+fi
+if [ "$SCHEDULED" -eq 0 ]; then
+  if [ "$ONE_OFF" -eq 1 ]; then
+    # Outside a git tree there is no toplevel to lock and no movement to prove, so a one-off stays
+    # unscheduled. Inside one it is scheduled into a per-user throwaway arc: nobody wants round
+    # accounting for a one-off, but everybody wants its shared tree lock and its movement check.
+    # The reserved track `one-off` at round 1, always: rounds start at 1 (loop.py refuses 0 --
+    # measured, the first version of this fix used 0 and every one-off was gate-refused), and the
+    # launch gate looks for the highest EARLIER round with activity on the track. There is never a
+    # round before 1, and nothing ever closes a round on this track, so a one-off can neither be
+    # blocked by nor block a real arc -- while still queueing on the same worktree lock as one.
+    if git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      ARC="${CC_ONEOFF_ARC:-${TMPDIR:-/tmp}/cc-one-off-$(id -u)}"
+      TRACK="one-off"; ROUND=1
+      mkdir -p "$ARC" || { echo "run-codex: cannot create the one-off arc directory $ARC" >&2; exit 2; }
+    fi
+  else
+    [ -n "$ARC" ] || ARC="${CC_ARC:-}"
+    if [ -z "$ARC" ] && [ -n "${CLAUDE_JOB_DIR:-}" ]; then ARC="$CLAUDE_JOB_DIR/tmp"; fi
+    [ -n "$TRACK" ] || TRACK="${CC_TRACK:-}"
+    [ -n "$ROUND" ] || ROUND="${CC_ROUND:-}"
+    if [ -z "$ARC" ] || [ -z "$TRACK" ] || [ -z "$ROUND" ]; then
+      echo "run-codex: this launch is not attributed to an arc/track/round, so it would be unscheduled and unprofiled." >&2
+      echo "run-codex: pass --arc DIR --track T --round N (or export CC_ARC/CC_TRACK/CC_ROUND; arc defaults to \$CLAUDE_JOB_DIR/tmp)," >&2
+      echo "run-codex: or --one-off for a single call outside any convergence arc." >&2
+      exit 2
+    fi
   fi
-  case "$ROUND" in ''|*[!0-9]*) echo "run-codex: --round must be a whole number, got '$ROUND'" >&2; exit 2 ;; esac
-  [ -x "$HERE/loop.py" ] || [ -f "$HERE/loop.py" ] || { echo "run-codex: $HERE/loop.py is missing — cannot schedule" >&2; exit 2; }
-  # loop.py runs the inner launcher with cwd=<workdir>, so every path must be absolute before the
-  # re-exec or a relative prompt/out/log resolves somewhere else inside the child.
-  _abs() { case "$1" in /*) printf '%s\n' "$1" ;; *) printf '%s/%s\n' "$PWD" "$1" ;; esac; }
-  PROMPT="$(_abs "$PROMPT")"; OUT="$(_abs "$OUT")"; LOG="$(_abs "$LOG")"; WORKDIR="$(_abs "$WORKDIR")"
-  KIND=review; WFLAG=""
-  if [ "$WRITE_MODE" -eq 1 ]; then KIND=write; WFLAG="--write"; fi
-  if [ -z "$NAME" ]; then NAME="$(basename "$OUT")"; NAME="${NAME%.verdict.json}"; NAME="${NAME%.json}"; fi
-  # A workdir that is not a git tree gets no tree lock (nothing can prove it unchanged), but is
-  # still scheduled and ledgered; loop.py refuses --tree on a non-repo, so only pass it when true.
-  TREEFLAG=""
-  git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 && TREEFLAG=1
-  # $WFLAG is unquoted on purpose: empty must vanish, and it is never anything but "--write".
-  # shellcheck disable=SC2086
-  exec python3 "$HERE/loop.py" run --arc "$ARC" --track "$TRACK" --round "$ROUND" --kind "$KIND" \
-    --name "$NAME" ${TREEFLAG:+--tree "$WORKDIR"} --out "$OUT" --log "$LOG" --no-capture \
-    -- "$SELF" --policy-version "$POLICY_VERSION" $WFLAG "$PROMPT" "$OUT" "$LOG" "$WORKDIR" "$@"
+  if [ -n "$ARC" ]; then
+    case "$ROUND" in ''|*[!0-9]*) echo "run-codex: --round must be a whole number, got '$ROUND'" >&2; exit 2 ;; esac
+    [ -x "$HERE/loop.py" ] || [ -f "$HERE/loop.py" ] || { echo "run-codex: $HERE/loop.py is missing — cannot schedule" >&2; exit 2; }
+    # loop.py runs the inner launcher with cwd=<workdir>, so every path must be absolute before the
+    # re-exec or a relative prompt/out/log resolves somewhere else inside the child.
+    _abs() { case "$1" in /*) printf '%s\n' "$1" ;; *) printf '%s/%s\n' "$PWD" "$1" ;; esac; }
+    PROMPT="$(_abs "$PROMPT")"; OUT="$(_abs "$OUT")"; LOG="$(_abs "$LOG")"; WORKDIR="$(_abs "$WORKDIR")"
+    KIND=review; WFLAG=""
+    if [ "$WRITE_MODE" -eq 1 ]; then KIND=write; WFLAG="--write"; fi
+    if [ -z "$NAME" ]; then NAME="$(basename "$OUT")"; NAME="${NAME%.verdict.json}"; NAME="${NAME%.json}"; fi
+    # A workdir that is not a git tree gets no tree lock (nothing can prove it unchanged), but is
+    # still scheduled and ledgered; loop.py refuses --tree on a non-repo, so only pass it when true.
+    TREEFLAG=""
+    git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 && TREEFLAG=1
+    # $WFLAG is unquoted on purpose: empty must vanish, and it is never anything but "--write".
+    # shellcheck disable=SC2086
+    exec python3 "$HERE/loop.py" run --arc "$ARC" --track "$TRACK" --round "$ROUND" --kind "$KIND" \
+      --name "$NAME" ${TREEFLAG:+--tree "$WORKDIR"} --out "$OUT" --log "$LOG" --no-capture \
+      -- "$SELF" --policy-version "$POLICY_VERSION" $WFLAG "$PROMPT" "$OUT" "$LOG" "$WORKDIR" "$@"
+  fi
 fi
 
 # Review runs are read-only and retryable. Mutating runs are neither: a killed attempt may
