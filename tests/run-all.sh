@@ -18,6 +18,16 @@
 # untracked suite cannot hide as a silent pass.
 set -u
 
+# A test process is NOT one of loop.py's ledgered jobs. When this runner is itself launched
+# under `loop.py run` -- which is how a convergence arc runs its suites -- CC_LOOP_JOB and
+# CC_LOOP_ARC are exported into every descendant, and run-codex.sh verifies that handshake
+# against the ledger's recorded parent pid. Inside a test that pid is the runner's, never the
+# test's, so every run-codex.sh invocation refuses with "unverified inner handshake" and the
+# suite reddens with five failures about nothing it tests. Measured 2026-09-03. The refusal is
+# correct; inheriting somebody else's job identity is the defect. Scrub it once, here, so the
+# scoreboard measures the repo rather than the harness that ran it.
+unset CC_LOOP_JOB CC_LOOP_ARC CC_ARC CC_TRACK CC_ROUND
+
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO" || exit 2
 
@@ -75,10 +85,30 @@ UNTRACKED="$(git ls-files --others --exclude-standard '*.test.sh' | sort)"
   echo
 }
 
-PASS=0; FAIL=0; SKIP=0
-FAILED=()
+# The selected set is derived BEFORE anything runs, and an empty one is refused.
+#
+# The filter used to be applied inside the loop, so a filter matching nothing simply skipped every
+# suite and fell through to the scoreboard with PASS=0 FAIL=0 -- and the only failure test is
+# `[ "$FAIL" -gt 0 ]`, so `tests/run-all.sh __no_such_suite__` printed "0 passed, 0 failed, 24 not
+# selected" and exited 0. That is the zero-match false green this repo exists to prevent, one level
+# up: a typo'd filter in a wrapper or a CI line reports a green run over nothing at all. There is no
+# reading of "run the suites matching X" under which matching none is success.
+SELECTED=()
 for s in "${SUITES[@]}"; do
-  if [ -n "$FILTER" ] && [[ "$s" != *"$FILTER"* ]]; then SKIP=$((SKIP+1)); continue; fi
+  if [ -n "$FILTER" ] && [[ "$s" != *"$FILTER"* ]]; then continue; fi
+  SELECTED+=("$s")
+done
+SKIP=$(( ${#SUITES[@]} - ${#SELECTED[@]} ))
+if [ "${#SELECTED[@]}" -eq 0 ]; then
+  echo "run-all: filter '$FILTER' selected 0 of ${#SUITES[@]} tracked suites -- refusing to report a green run over an empty selection" >&2
+  echo "run-all: tracked suites are:" >&2
+  printf '%s\n' "${SUITES[@]}" | sed 's/^/  /' >&2
+  exit 2
+fi
+
+PASS=0; FAIL=0
+FAILED=()
+for s in "${SELECTED[@]}"; do
   start=$SECONDS
   if [ "$VERBOSE" -eq 1 ]; then
     echo "==== $s"
@@ -118,6 +148,12 @@ done
 
 echo "----"
 echo "$PASS passed, $FAIL failed$([ "$SKIP" -gt 0 ] && echo ", $SKIP not selected") of ${#SUITES[@]} tracked suites"
+# A selected suite that neither passed nor failed means the loop did not run it -- report
+# that rather than letting the FAIL test below decide the exit status over a short count.
+if [ $((PASS + FAIL)) -ne "${#SELECTED[@]}" ]; then
+  echo "run-all: only $((PASS + FAIL)) of ${#SELECTED[@]} selected suites reported a result" >&2
+  exit 2
+fi
 if [ "$FAIL" -gt 0 ]; then
   printf 'failed: %s\n' "${FAILED[*]}"
   exit 1

@@ -28,9 +28,9 @@
     "test": "test_table"
   },
   {
-    "label": "M5 a write takes only a shared tree lock",
-    "old": "        tree_mode = 'ex' if kind == 'write' else 'sh'\n",
-    "new": "        tree_mode = 'sh'\n",
+    "label": "M5 a write job is only a writer if its COMMAND looks like one, so `--kind=write -- sleep` takes a shared tree lock",
+    "old": "    if kind == 'write':\n        return True\n    if kind == 'vitest':\n",
+    "new": "    if kind == 'vitest':\n",
     "expect": "killed",
     "test": "test_write_waits_for_reader_of_same_tree"
   },
@@ -99,13 +99,13 @@
   },
   {
     "label": "control: docstring wording is unobservable",
-    "old": "Pass iff the previous round is closed and every TRIGGERED lever is dispositioned.",
-    "new": "Passes iff the previous round is closed and every TRIGGERED lever is dispositioned.",
+    "old": "Pass iff the round that must be closed IS closed and every TRIGGERED lever is dispositioned.",
+    "new": "Passes iff the round that must be closed IS closed and every TRIGGERED lever is dispositioned.",
     "expect": "unobservable"
   },
   {
     "label": "M16 queue wait clamped (a faked measurement)",
-    "old": "        self.queued_s = time.monotonic() - t0\n",
+    "old": "        self.queued_s = max(0.0, time.monotonic() - t0)\n",
     "new": "        self.queued_s = min(time.monotonic() - t0, 0.3)\n",
     "expect": "killed",
     "test": "test_heavy_heavy_serialise"
@@ -133,8 +133,8 @@
   },
   {
     "label": "M20 round window opens at start-minus-aggregate-queue, not the recorded request",
-    "old": "    return min(r['t_req'] for r in mine), max(r['end'] for r in mine)\n",
-    "new": "    return min(r['start'] - (r.get('queued') or 0.0) for r in mine), max(r['end'] for r in mine)\n",
+    "old": "    return min(r['t_req'] for r in mine), max(last_moment(r) for r in mine)\n",
+    "new": "    return min(r['start'] - (r.get('queued') or 0.0) for r in mine), max(last_moment(r) for r in mine)\n",
     "expect": "killed",
     "test": "test_round_window_opens_at_the_recorded_request"
   },
@@ -161,15 +161,15 @@
   },
   {
     "label": "M24 a glob selector counts as one file",
-    "old": "        (files if FILE_RE.search(tok) and not GLOB_RE.search(tok) else dirs).append(tok)\n",
-    "new": "        (files if FILE_RE.search(tok) else dirs).append(tok)\n",
+    "old": "        is_one_file = FILE_RE.search(tok) and (os.path.isfile(tok) or not GLOB_RE.search(tok))\n",
+    "new": "        is_one_file = FILE_RE.search(tok)\n",
     "expect": "killed",
     "test": "test_flag_forms_and_related_bounds"
   },
   {
     "label": "M25 the tree is snapshotted BEFORE the lock is taken, so a writer that finished while we queued reads as a move",
-    "old": "    locks = Locks(tree, tree_mode, cpu_mode, holder=job, max_queue_s=args.max_queue)\n    # The queued event lands BEFORE the wait, so a job killed or refused while waiting on a lock\n    # is still visible in the ledger (and the inner launcher can verify who started it).\n    ledger_append(arc, dict(ev='queued', t=t_req, job=job, track=args.track, round=args.round, kind=args.kind,\n                            name=name, cpu=cpu, tree=tree, pid=os.getpid()))\n    try:\n        queued = locks.acquire()\n    except TimeoutError as e:\n        ledger_append(arc, dict(ev='refused', t=now(), job=job, track=args.track, round=args.round, kind=args.kind,\n                                name=name, reason=f'lock not available: {e}'))\n        return die(f'lock not available: {e}', RC_LOCK)\n    except OSError as e:\n        return die(f'cannot take locks under {lock_dir()}: {e} (refusing to run unlocked)', RC_LOCK)\n    # Snapshot the tree only once we HOLD it: a writer that ran while we were queued has finished\n    # and its result is the tree our child reads, not a \"move\" (it is the same reason the closing\n    # snapshot is taken before release, below).\n    tree_before = tree_state(tree) if tree else None\n",
-    "new": "    tree_before = tree_state(tree) if tree else None\n    locks = Locks(tree, tree_mode, cpu_mode, holder=job, max_queue_s=args.max_queue)\n    # The queued event lands BEFORE the wait, so a job killed or refused while waiting on a lock\n    # is still visible in the ledger (and the inner launcher can verify who started it).\n    ledger_append(arc, dict(ev='queued', t=t_req, job=job, track=args.track, round=args.round, kind=args.kind,\n                            name=name, cpu=cpu, tree=tree, pid=os.getpid()))\n    try:\n        queued = locks.acquire()\n    except TimeoutError as e:\n        ledger_append(arc, dict(ev='refused', t=now(), job=job, track=args.track, round=args.round, kind=args.kind,\n                                name=name, reason=f'lock not available: {e}'))\n        return die(f'lock not available: {e}', RC_LOCK)\n    except OSError as e:\n        return die(f'cannot take locks under {lock_dir()}: {e} (refusing to run unlocked)', RC_LOCK)\n    # Snapshot the tree only once we HOLD it: a writer that ran while we were queued has finished\n    # and its result is the tree our child reads, not a \"move\" (it is the same reason the closing\n    # snapshot is taken before release, below).\n",
+    "old": "    try:\n        queued = locks.acquire()\n    except TimeoutError as e:\n        ledger_append(arc, dict(ev='refused', t=now(), job=job, track=args.track, round=args.round, kind=args.kind,\n                                name=name, queued_s=max(0.0, time.monotonic() - m_req),\n                                reason=f'lock not available: {e}'))\n        return die(f'lock not available: {e}', RC_LOCK)\n    except OSError as e:\n        return die(f'cannot take locks under {lock_dir()}: {e} (refusing to run unlocked)', RC_LOCK)\n    # Snapshot the tree only once we HOLD it: a writer that ran while we were queued has finished\n    # and its result is the tree our child reads, not a \"move\" (it is the same reason the closing\n    # snapshot is taken before release, below).\n    tree_before = tree_state(tree) if tree else None\n",
+    "new": "    tree_before = tree_state(tree) if tree else None\n    try:\n        queued = locks.acquire()\n    except TimeoutError as e:\n        ledger_append(arc, dict(ev='refused', t=now(), job=job, track=args.track, round=args.round, kind=args.kind,\n                                name=name, queued_s=max(0.0, time.monotonic() - m_req),\n                                reason=f'lock not available: {e}'))\n        return die(f'lock not available: {e}', RC_LOCK)\n    except OSError as e:\n        return die(f'cannot take locks under {lock_dir()}: {e} (refusing to run unlocked)', RC_LOCK)\n",
     "expect": "killed",
     "test": "test_reader_queued_behind_a_writer_reads_the_settled_tree"
   },
@@ -354,5 +354,306 @@
     "new": "    st = round_status(events, track, rnd - 1)\n",
     "expect": "killed",
     "test": "test_gate_admits_a_fresh_track_and_holds_a_used_one"
+  },
+  {
+    "label": "R3-TEST10-gap-row-class-token The rendered gap row repeats its evidence instead of displaying its evidence class",
+    "old": "{cls:11}",
+    "new": "{ev:11}",
+    "expect": "killed",
+    "test": "TestProfileAttribution.test_gap_classification_in_profile"
+  },
+  {
+    "label": "R3-TEST12-l3-per-mutant-threshold Scoped mutant runs at ten seconds per mutant no longer trigger L3",
+    "old": "per_mutant(r) >= 10",
+    "new": "per_mutant(r) >= 1000",
+    "expect": "killed",
+    "test": "TestLedgerArithmetic.test_l3_slow_per_mutant_boundary_for_scoped_rows"
+  },
+  {
+    "label": "R3-TEST13-l6-unattributed-threshold More than sixty percent unattributed time cannot trigger L6 without a large gap",
+    "old": "unattr_s > 0.6 * wall",
+    "new": "unattr_s > 1.0 * wall",
+    "expect": "killed",
+    "test": "TestLedgerArithmetic.test_l6_unattributed_percentage_boundary_without_a_big_gap"
+  },
+  {
+    "label": "R3-TEST14-l1-solo-wait-threshold Solo wait just above forty percent no longer triggers L1",
+    "old": "wait_alone > 0.4 * wait_union",
+    "new": "wait_alone > 0.8 * wait_union",
+    "expect": "killed",
+    "test": "TestLedgerArithmetic.test_l1_solo_wait_percentage_boundary"
+  },
+  {
+    "label": "R3-TEST16-ledger-short-write-loop A short first write leaves a truncated JSON event that corrupts the following append",
+    "old": "while buf:",
+    "new": "if buf:",
+    "expect": "killed",
+    "test": "TestLedgerArithmetic.test_ledger_append_retries_a_short_write"
+  },
+  {
+    "label": "M59 lock_modes ignores writes_tree, so every job with a tree takes only a SHARED lock",
+    "old": "        tree_mode = 'ex' if writes_tree else 'sh'\n",
+    "new": "        tree_mode = 'sh'\n",
+    "expect": "killed",
+    "test": "TestSnapshotUpdatingRunsTakeTheTree.test_the_writes_tree_axis_is_swept_from_the_call_site"
+  },
+  {
+    "label": "M60 an UNKNOWN vitest command line stops failing towards the exclusive lock",
+    "old": "        if bool(sh['writes_tree']) or not sh['known']:\n",
+    "new": "        if bool(sh['writes_tree']):\n",
+    "expect": "killed",
+    "test": "TestSnapshotUpdatingRunsTakeTheTree.test_the_writes_tree_axis_is_swept_from_the_call_site"
+  },
+  {
+    "label": "M61 the short form -u leaves the snapshot-writing flag set, so `vitest run -u` reads as a reader",
+    "old": "TREE_WRITING_FLAGS = {'-u', '--update'}\n",
+    "new": "TREE_WRITING_FLAGS = {'--update'}\n",
+    "expect": "killed",
+    "test": "TestSnapshotUpdatingRunsTakeTheTree.test_the_writes_tree_axis_is_swept_from_the_call_site"
+  },
+  {
+    "label": "M62 the live call site pins writes_tree to False, so the swept rule never reaches a real lock",
+    "old": "        tree_mode, cpu_mode = lock_modes(cpu, bool(tree), tree_writing(args.kind, cmd))\n",
+    "new": "        tree_mode, cpu_mode = lock_modes(cpu, bool(tree), False)\n",
+    "expect": "killed",
+    "test": "TestSnapshotUpdatingRunsTakeTheTree.test_a_snapshot_updating_run_waits_while_a_plain_one_overlaps"
+  },
+  {
+    "label": "M63 a CLOSED round admits work again, so a job lands where no artifact accounts for it",
+    "old": "    if closed:\n        return False, ('this round is already CLOSED",
+    "new": "    if False:\n        return False, ('this round is already CLOSED",
+    "expect": "killed",
+    "test": "TestAdmissionIntoAClosedOrCorruptRound.test_admission_decision_sweep"
+  },
+  {
+    "label": "M64 the admission transaction is bypassed at the call site and every round admits",
+    "old": "        ok, msg = admission_decision(round_status(events, args.track, args.round)['closed'],\n                                     ledger_corrupt(events))\n",
+    "new": "        ok, msg = True, ''\n",
+    "expect": "killed",
+    "test": "TestAdmissionIntoAClosedOrCorruptRound.test_a_closed_round_admits_nothing_and_the_next_one_admits"
+  },
+  {
+    "label": "M65 admission decides over a hole: an unparseable record stops blocking a launch",
+    "old": "    if corrupt:\n        return False, (f'the ledger holds",
+    "new": "    if False:\n        return False, (f'the ledger holds",
+    "expect": "killed",
+    "test": "TestAdmissionIntoAClosedOrCorruptRound.test_admission_decision_sweep"
+  },
+  {
+    "label": "M66 close-round decides over a hole, so an unfinished job cannot be ruled out and is not looked for",
+    "old": "        if corrupt:\n            return die(f'refusing to close round",
+    "new": "        if False:\n            return die(f'refusing to close round",
+    "expect": "killed",
+    "test": "TestAdmissionIntoAClosedOrCorruptRound.test_a_corrupt_ledger_refuses_both_admission_and_closure"
+  },
+  {
+    "label": "M67 a round closes twice, and the second close voids every lever disposition made against the first",
+    "old": "        if round_status(events, args.track, args.round)['closed']:\n",
+    "new": "        if False:\n",
+    "expect": "killed",
+    "test": "TestCloseRoundIsATransaction.test_a_second_close_is_refused_and_leaves_the_first_ones_artifacts"
+  },
+  {
+    "label": "M68 job liveness forgets the child process group, so a killed scheduler reads as a finished job",
+    "old": "    return pid_alive(j.get('pid')) or pgid_alive(j.get('pgid'))\n",
+    "new": "    return pid_alive(j.get('pid'))\n",
+    "expect": "killed",
+    "test": "TestCloseRoundIsATransaction.test_close_round_sees_a_child_group_that_outlived_its_scheduler"
+  },
+  {
+    "label": "M69 the `child` event stops counting, so the pgid is never recovered and the orphan is invisible",
+    "old": "        if ev.get('ev') not in ('queued', 'start', 'child') or not ev.get('job'):\n",
+    "new": "        if ev.get('ev') not in ('queued', 'start') or not ev.get('job'):\n",
+    "expect": "killed",
+    "test": "TestCloseRoundIsATransaction.test_close_round_sees_a_child_group_that_outlived_its_scheduler"
+  },
+  {
+    "label": "M70 --abandon-unfinished talks over a job that is still RUNNING, not merely one that is gone",
+    "old": "        if live:\n",
+    "new": "        if live and not args.abandon_unfinished:\n",
+    "expect": "killed",
+    "test": "TestCloseRoundIsATransaction.test_close_round_sees_a_child_group_that_outlived_its_scheduler"
+  },
+  {
+    "label": "M71 only a FORWARD clock step is a jump, so a clock set backwards is priced as real silence",
+    "old": "        if abs(delta) > tol:\n",
+    "new": "        if delta > tol:\n",
+    "expect": "killed",
+    "test": "TestClockDiscontinuity.test_a_jump_is_found_in_both_directions_and_a_steady_clock_is_silent"
+  },
+  {
+    "label": "M72 a negative tolerance is honoured, so every ordinary boundary becomes a clock jump",
+    "old": "    tol = max(0.0, float(tol_s))\n",
+    "new": "    tol = float(tol_s)\n",
+    "expect": "killed",
+    "test": "TestClockDiscontinuity.test_the_tolerance_is_a_boundary_and_cannot_be_driven_negative"
+  },
+  {
+    "label": "M73 the sweep walks LEDGER order instead of wall order, so adjacency is not the timeline",
+    "old": "    pts.sort(key=lambda p: p[0])\n",
+    "new": "    pass  # control: ledger order, not wall order\n",
+    "expect": "killed",
+    "test": "TestClockDiscontinuity.test_the_sweep_follows_wall_ORDER_not_ledger_order"
+  },
+  {
+    "label": "M74 the offset is derived from the caller's stamp, so every backdated row reads as a clock jump",
+    "old": "    ev.setdefault('coff', round(now() - _mono, 3))\n",
+    "new": "    ev.setdefault('coff', round(ev['t'] - _mono, 3))\n",
+    "expect": "killed",
+    "test": "TestProfileAttribution.test_gap_classification_in_profile"
+  },
+  {
+    "label": "M75 the install carve-out stops being a LIVE predicate, so a real directory by that name passes",
+    "old": "            if os.path.islink(here) and os.path.realpath(here) == os.path.realpath(there):\n",
+    "new": "            if True:\n",
+    "expect": "killed",
+    "test": "TestTreeLockAndMoved.test_snapshot_reuse_refuses_a_dirty_worktree"
+  },
+  {
+    "label": "M76 untracked entries are tolerated wholesale again, so reuse certifies a polluted tree",
+    "old": "    for rel in sorted(filter(None, others.split('\\0'))):\n",
+    "new": "    for rel in []:\n",
+    "expect": "killed",
+    "test": "TestTreeLockAndMoved.test_snapshot_reuse_refuses_a_dirty_worktree"
+  },
+  {
+    "label": "M77 a refusal stops being terminal, so a queued job's wait is closed against the PROFILER's clock and clipped away",
+    "old": "TERMINAL_EVENTS = ('end', 'refused')\n",
+    "new": "TERMINAL_EVENTS = ('end',)\n",
+    "expect": "killed",
+    "test": "test_the_wait_is_measured_to_the_refusal_not_to_the_profilers_clock"
+  },
+  {
+    "label": "M80 STOP_BOUND_RE accepts a bare digit again, so \"across 3 tracks\" excuses \"repeat until no findings remain\"",
+    "old": "    r'(?:max|at\\s+most|no\\s+more\\s+than|ceiling|cap(?:ped)?|budget|limit|within|after)\\D{0,24}\\d'\n",
+    "new": "    r'\\d'\n",
+    "expect": "killed",
+    "test": "test_an_open_ended_stop_is_not_excused_by_a_stray_digit"
+  },
+  {
+    "label": "M81 the production-risk bound leaves STOP_BOUND_RE, so her own recommended stop is refused",
+    "old": "    r'|no\\s+new\\s+(?:high|critical|production|prod)|production-risk|bounded|first\\s+green', re.I)\n",
+    "new": "    r'|bounded|first\\s+green', re.I)\n",
+    "expect": "killed",
+    "test": "test_an_open_ended_stop_is_not_excused_by_a_stray_digit"
+  },
+  {
+    "label": "M82 a job that never started still grandfathers the arc, so a refused lock buys a free round 1",
+    "old": "    stillborn = {ev.get('job') for ev in events if ev.get('ev') == 'refused'} - started\n",
+    "new": "    stillborn = set()\n",
+    "expect": "killed",
+    "test": "test_a_job_refused_at_the_lock_does_not_grandfather_the_arc"
+  },
+  {
+    "label": "M83 a mutation battery stops being a gated kind, so the most expensive loop skips the preflight",
+    "old": "GATED_KINDS = ('review', 'write', 'mutant')\n",
+    "new": "GATED_KINDS = ('review', 'write')\n",
+    "expect": "killed",
+    "test": "test_a_mutation_battery_is_gated_and_a_scoped_test_run_is_not"
+  },
+  {
+    "label": "M84 one sentence pasted into all six fields is tolerated as long as it is the only duplicate",
+    "old": "    if not dupes:\n",
+    "new": "    if len(dupes) <= 1:\n",
+    "expect": "killed",
+    "test": "test_six_copies_of_one_sentence_are_not_six_answers"
+  },
+  {
+    "label": "M85 a zero-byte critique file satisfies the codex consultation, so the ask is a keystroke",
+    "old": "        if os.path.getsize(args.codex) < 40:\n",
+    "new": "        if False:\n",
+    "expect": "killed",
+    "test": "test_the_critique_is_recorded_or_its_absence_is"
+  },
+  {
+    "label": "M86 the unverifiable-child refusal moves back under --abandon-unfinished, so the blanket flag closes over a child nobody can see",
+    "old": "        if blind:\n",
+    "new": "        if blind and not args.abandon_unfinished:\n",
+    "expect": "killed",
+    "test": "test_a_start_without_a_child_is_never_abandonable_by_the_blanket_flag"
+  },
+  {
+    "label": "M87 --abandon-unverifiable stops being matched per job, so naming ANY job covers every unverifiable one",
+    "old": "        blind = [j for j in unverifiable if str(j['name']) not in named]\n",
+    "new": "        blind = [] if named else list(unverifiable)\n",
+    "expect": "killed",
+    "test": "test_a_start_without_a_child_is_never_abandonable_by_the_blanket_flag"
+  },
+  {
+    "label": "M88 --no-capture stops being refused for vitest, so a zero-test name filter is recorded GREEN",
+    "old": "    if args.kind == 'vitest' and args.capture is False:\n",
+    "new": "    if False:\n",
+    "expect": "killed",
+    "test": "test_no_capture_is_refused_for_vitest"
+  },
+  {
+    "label": "TQ0 the profiler re-derives a refused job's wait from two wall stamps instead of reading the monotonic measurement the refusal recorded",
+    "old": "                         queued=(float(fin['queued_s']) if fin and fin.get('queued_s') is not None\n                                 else max(0.0, q_end - q_t)),",
+    "new": "                         queued=max(0.0, q_end - q_t),",
+    "expect": "killed",
+    "test": "TestRefusedWaitSurvivesTheClock.test_the_profiler_bills_the_measured_wait_not_the_wall_difference"
+  },
+  {
+    "label": "TQ4 the root-config pattern stops anchoring at the END, so tsconfig.json.bak and vitest.config.ts.snap escalate every ordinary edit to a full suite",
+    "old": "    r'|package(-lock)?\\.json|tsconfig[^/]*\\.json|\\.github/workflows/[^/]+)$')",
+    "new": "    r'|package(-lock)?\\.json|tsconfig[^/]*\\.json|\\.github/workflows/[^/]+)')",
+    "expect": "killed",
+    "test": "test_affected_plan_escalates_every_root_config_family_and_nothing_else"
+  },
+  {
+    "label": "TQ5 a cheap typecheck becomes a GATED kind, so the run that would tell you whether the round can close is itself refused until the round closes",
+    "old": "GATED_KINDS = ('review', 'write', 'mutant')",
+    "new": "GATED_KINDS = ('review', 'write', 'mutant', 'tsc')",
+    "expect": "killed",
+    "test": "test_every_gated_kind_and_only_a_gated_kind_is_refused_before_the_round_gate_passes"
+  },
+  {
+    "label": "TQ6 a codex --write run stops counting as a blocking wait, so the one lever that measures serialised waiting cannot see the longest wait there is",
+    "old": "WAIT_KINDS = ('review', 'write', 'codex', 'ci')",
+    "new": "WAIT_KINDS = ('review', 'codex', 'ci')",
+    "expect": "killed",
+    "test": "test_every_wait_kind_and_only_a_wait_kind_counts_towards_the_serialised_wait_lever"
+  },
+  {
+    "label": "TQ7 a gap spanning a clock correction is billed to the seat as unexplained silence instead of reported unpriced",
+    "old": "            spans = [j for j in jumps if a <= j['at'] <= b]\n            if spans:",
+    "new": "            spans = [j for j in jumps if a <= j['at'] <= b]\n            if False:",
+    "expect": "killed",
+    "test": "test_a_gap_spanning_a_clock_step_is_reported_unpriced_rather_than_billed"
+  },
+  {
+    "label": "TQ8 the snapshot installer tests for a FILE, so no snapshot ever gets node_modules and every lens resolves imports against whatever it can find",
+    "old": "        if os.path.isdir(src) and not os.path.exists(os.path.join(path, rel)):",
+    "new": "        if os.path.isfile(src) and not os.path.exists(os.path.join(path, rel)):",
+    "expect": "killed",
+    "test": "test_snapshot_installs_the_link_for_every_installed_entry_it_finds"
+  },
+  {
+    "label": "TQ9 --maxWorkers stops taking a value, so its argument is counted as a ninth test file and a scoped run is classified heavy forever",
+    "old": "    '--outputFile', '--pool', '--maxWorkers', '--minWorkers', '--environment',",
+    "new": "    '--outputFile', '--pool', '--minWorkers', '--environment',",
+    "expect": "killed",
+    "test": "test_every_value_flag_is_swept_at_the_eight_file_boundary_in_both_spellings"
+  },
+  {
+    "label": "TQ12 clock_discontinuity ignores the end-of-job offset again",
+    "old": "        if r.get('coff_end') is not None:\n            pts.append((float(r.get('end') or r.get('start') or 0), float(r['coff_end']), who))",
+    "new": "        if False:\n            pts.append((float(r.get('end') or r.get('start') or 0), float(r['coff_end']), who))",
+    "expect": "killed",
+    "test": "test_a_clock_step_inside_one_long_run_is_seen"
+  },
+  {
+    "label": "TQ13 the anchor rule accepts a stranded mutant (0 occurrences reads as armable)",
+    "old": "        if n != 1:\n            out.append('%s -- %d occurrence(s)' % (m.get('label') or '<unlabelled>', n))\n",
+    "new": "        if n > 1:\n            out.append('%s -- %d occurrence(s)' % (m.get('label') or '<unlabelled>', n))\n",
+    "expect": "killed",
+    "test": "test_a_mutant_whose_anchor_was_rewritten_away_is_reported"
+  },
+  {
+    "label": "TQ14 an EMPTY anchor counts as a substring of everything instead of being refused",
+    "old": "        n = src.count(anchor) if anchor else 0\n",
+    "new": "        n = src.count(anchor)\n",
+    "expect": "killed",
+    "test": "test_a_mutant_with_no_anchor_at_all_is_reported_as_matching_NOTHING"
   }
 ]

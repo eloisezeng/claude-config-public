@@ -48,7 +48,7 @@ Structure she prefers (this is strong — she restructures almost every draft th
 - Keep bullets grammatically parallel — lead each with the same verb form ("Let… / Tell… / Give…") — and punctuate them consistently (all end with a period, or none do).
 - Short paragraphs are the connective tissue between lists, never one stream-of-consciousness block.
 - Numbered list when she's posing distinct questions.
-- Greeting and sign-off stay simple: "Hi [name]," / "Thanks, the user".
+- Greeting and sign-off stay simple: "Hi [name]," / "Thanks, Quinn".
 
 What to avoid:
 
@@ -104,4 +104,4 @@ This is a full email the user wrote and signed off on. It's the single best refe
 >
 > Thanks,
 >
-> The user
+> Quinn

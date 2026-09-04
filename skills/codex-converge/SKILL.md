@@ -157,12 +157,17 @@ The rule that does bind: no usage-based overage without explicit per-action perm
 ```
 SKILL=~/dotfiles/claude/skills/codex-converge
 ARC="$CLAUDE_JOB_DIR/tmp"   # one directory per arc holds the ledger; TRACK is the lens, ROUND the panel number
-"$SKILL/run-codex.sh" --policy-version 2026-09-02-scheduler-v1 --arc "$ARC" --track "$TRACK" --round "$ROUND" /tmp/cc-prompt.txt /tmp/cc-verdict.json /tmp/cc-run.log "$WORKTREE" \
+"$SKILL/run-codex.sh" --policy-version 2026-09-02-scheduler-v1 --arc "$ARC" --track "$TRACK" --round "$ROUND" "$ARC/$TRACK-r$ROUND.prompt.txt" "$ARC/$TRACK-r$ROUND.verdict.json" "$ARC/$TRACK-r$ROUND.run.log" "$WORKTREE" \
   -p sol --output-schema "$SKILL/review-output.schema.json"
 ```
 
 Its contract is `run-codex.sh --policy-version 2026-09-02-scheduler-v1 [--write] (--arc DIR --track T --round N [--name NAME] | --one-off) <prompt-file> <out-file> <log-file> <workdir> [codex-args...]`.
 Attribution is mandatory: an unattributed launch exits 2 before touching codex, because it would be unscheduled and unprofiled.
+
+**Give every run its own `<out-file>` and `<log-file>`, derived from the arc, track and round — never a fixed `/tmp/cc-verdict.json`.**
+The launcher truncates the log at the start of each attempt and renames the verdict into place at the end, so two runs sharing a pair of paths destroy each other's evidence: the second truncates the first's log mid-run, and whichever finishes last overwrites the other's verdict, leaving a caller reading a verdict about a range it never asked about.
+Since the parallel-lens panel runs three reviews at once, shared paths are the normal case rather than the exotic one.
+This is now enforced — the launcher takes an `mkdir` lock on each path and refuses a second run aimed at either, and refuses outright if the two paths are the same file.
 `CC_ARC` / `CC_TRACK` / `CC_ROUND` in the environment also count, and the arc defaults to `$CLAUDE_JOB_DIR/tmp`; `--one-off` is for a single call outside any arc (the `codex-opinion` skill uses it).
 An attributed launch re-executes itself under `loop.py run`, which ledgers it in `<arc>/jobs.jsonl`, takes the tree lock, and refuses (rc 6) while the previous round of that track is unclosed or has a TRIGGERED lever nobody has dispositioned — see "Keeping the loop short".
 The version handshake is a fail-closed session refresh: when this review policy changes, increment
@@ -170,7 +175,7 @@ the version in both files. A session holding old instructions cannot launch anot
 launcher tells it to re-read this file and acknowledge the current version. It cannot alter a
 review process already in flight, so apply the new policy starting with that process's result.
 It supplies exactly one `-s` — **never pass your own** — plus `-C <workdir>`, `-o <out-file>` and stdin-piping; everything after `<workdir>` is passed through to `codex exec`, which is where the profile and schema go.
-It kills a run whose log has been idle 150s, clears the output file before each attempt, and exits non-zero unless a non-empty verdict landed.
+It kills a run whose log has been idle 150s (600s with `--write`; `RUN_CODEX_POLL` and `RUN_CODEX_IDLE_WINDOW` shorten both, which exists so the watchdog can be tested in seconds rather than never), clears the output file before each attempt, and exits non-zero unless a non-empty verdict landed.
 
 Sandbox and retries depend on the mode, and the defaults below apply **only without `--write`**:
 
@@ -202,7 +207,7 @@ Pass the vendored schema so the CLI enforces the shape, instead of the prompt me
 ```
 SKILL=~/dotfiles/claude/skills/codex-converge
 ARC="$CLAUDE_JOB_DIR/tmp"   # one directory per arc holds the ledger; TRACK is the lens, ROUND the panel number
-"$SKILL/run-codex.sh" --policy-version 2026-09-02-scheduler-v1 --arc "$ARC" --track "$TRACK" --round "$ROUND" /tmp/cc-prompt.txt /tmp/cc-verdict.json /tmp/cc-run.log "$WORKTREE" \
+"$SKILL/run-codex.sh" --policy-version 2026-09-02-scheduler-v1 --arc "$ARC" --track "$TRACK" --round "$ROUND" "$ARC/$TRACK-r$ROUND.prompt.txt" "$ARC/$TRACK-r$ROUND.verdict.json" "$ARC/$TRACK-r$ROUND.run.log" "$WORKTREE" \
   -p sol --output-schema "$SKILL/review-output.schema.json"
 ```
 
@@ -244,6 +249,23 @@ It cannot take `-C <worktree>`, so it would review the wrong checkout — the ex
 `codex:rescue` is for handing Codex one self-contained task, not for running this loop.
 
 ## The pipeline (loop each ↔ until convergence)
+
+0. **Cost preflight — before the first paid launch, and round 1 is GATED on it.**
+   (Distinct from the per-machine tier check above; this one is per ARC.)
+   Price the arc against its RISK in writing, with `python3 "$SKILL/loop.py" preflight --arc "$ARC"`:
+   `--critical-path` (what actually has to happen in order), `--parallel` (what does not, and therefore launches together),
+   `--batch` (which checks share a run because they need no isolation), `--scope` (which surfaces the change really invalidated
+   — a scoped review beats a full panel whenever the rest is unchanged), `--stop` (a BOUNDED condition; the recorder refuses
+   "until no findings remain" and accepts "no new production-risk finding" or a named round count), and `--drivers` (the top
+   cost drivers) — then cut the largest driver before spending on it.
+   Buy ONE cheap Codex critique of the PROCESS itself — unnecessary serialization, duplicated verification, over-broad review
+   scope, excessive stopping criteria, cheaper orders that keep the same guarantees — and record it with `--codex <file>`.
+   It is a planning consultation, not a second loop. If Codex is down, record `--codex-unavailable "<why>"` and do the same
+   analysis yourself; an outage never blocks the arc.
+   A `review`, `write` or `mutant` launch at round 1 exits `RC_GATE` until this record exists, because the round-boundary
+   profiler below cannot fire until a round has already been paid for — which is precisely the round this preflight prices.
+   None of it buys speed with correctness, security, data integrity, deploy safety, or an explicitly required independent
+   check: the target is equivalent safety with less serialization, less duplicated work, and less wall-clock.
 
 1. **Brainstorm (Claude + Codex).**
    Run `superpowers:brainstorming` to explore intent and options.
@@ -563,7 +585,10 @@ The permitted dispositions differ by severity, and there is exactly one way to r
 Read the gate off the validated JSON, never off the prose summary.
 A summary that says "looks good" above a `high` finding is a real and observed failure mode.
 
-Always run at least one extra confirming round after the first clean result.
+A confirming round after the first clean result is SCOPED to what the last fix actually invalidated, and it is owed only when that fix touched production behaviour — a test-only, golden or documentation fix does not re-earn the full panel.
+That scoped round is the LAST one for the region unless it raises a NEW production-risk finding; one more low-value observation is not a reason to buy another.
+An unconditional extra round is ceremony, and ceremony is exactly what the round-1 preflight prices: record the stop as a bound (`--stop`), never as "until no findings".
+Keep "safe to ship" and "all review work complete" as separate verdicts — the first does not wait on the second, so an otherwise-shippable artifact is never held behind unrelated hardening.
 
 **Reproduce a reviewer's claim before acting on it** — run the scenario yourself; the minute it costs pays either way.
 Either the claim is right and you now know the exact shape (verified here: SQL `json_extract` takes the FIRST duplicate key, JS `JSON.parse` the LAST), or it is right about the risk while its recommended fix is wrong — one proposed validator-flag tightening could not be reproduced and would have re-introduced a narrowing bug from two rounds earlier; it was rejected with evidence, the class fixed instead, and the rejection recorded in the spec.
@@ -578,6 +603,10 @@ Carry adjudicated disputes into the next round's `<verified_environment_facts>` 
 
 The gate above defines *when* you are done; these rules keep the number of rounds it takes small.
 They were extracted from a real loop that ran 30+ rounds, roughly half of them grinding a single validator family one finding at a time.
+
+**The first round is priced before it is bought — the profiler is one increment late by construction.**
+`loop.py` refuses a round-1 `review`, `write` or `mutant` launch in an arc with no `preflight` record on the ledger, and the record is derived, never a name: an arc whose paid jobs all predate the gate is grandfathered, while a job that was refused the lock spent nothing and grandfathers nothing.
+That closes the hole this section otherwise leaves open — everything below measures a loop that is already running, so a loop that should never have been launched in that shape reads perfectly healthy at every boundary.
 
 **Profile the loop at EVERY round boundary — the launcher now refuses to skip it.**
 Every review or `--write` launch is attributed (`--arc DIR --track T --round N`) and runs through `loop.py`, which writes an exact per-job ledger (`<arc>/jobs.jsonl`: requested / started / ended, queue wait, CPU class, tree state, exit code) and holds two locks.
@@ -595,13 +624,19 @@ The snapshot is taken and compared while the tree lock is HELD, so a writer that
 
 Run scoped tests through it too: `python3 "$SKILL/loop.py" run --arc "$ARC" --track T --round N --kind vitest --tree "$WORKTREE" -- npx vitest run <changed test files>`.
 It counts the `Test Files` / `Tests` summary lines and fails CLOSED (rc 5) on the zero-file or zero-test run that vitest itself exits 0 on; a wide run (no file arguments, or more than 8 files) is refused (rc 4) unless declared a checkpoint (`--checkpoint "pre-merge"`), and `--affected BASE` derives the file list from `git diff --name-only` and escalates to a checkpoint by itself when a config file moved.
+`--no-capture` is REFUSED for `--kind vitest` (rc 2): the zero-test gate is read out of the child's output, so suppressing the capture would turn vitest's exit 0 on a name filter that selected nothing back into a green.
 Route mutation testing through `mutate.py --arc "$ARC" --track T --round N` — it shares the ledger and the light CPU lock, turns a `-t` that matched nothing into MISARMED instead of a green, and never arms a mutant in the tracked tree.
+It takes the SAME round-locked admission transaction as `loop.py run`, so a battery cannot execute against an already-closed round (rc 6) or land its events after a `close-round` has snapshotted the ledger; round 1 therefore needs the preflight on record like any other paid job.
+The attribution tuple is all-or-nothing: `--arc` with no `--round` (or any other partial spelling) is a usage error (rc 4), because the old behaviour was to run the whole battery unledgered and unGATED while LOOKING addressed, with its wall-clock landing in the unexplained-gap bucket.
 To mutate a helper that lives in the test file itself (a wait, a deadline, a fixture rule), pass the same file as `--src` and `--test` and give the module it imports with `--also-copy loop.py`; companions are placed unmutated beside the copy each round and hashed as tracked.
 The copy dir holds the source under its basename and the test under ITS basename, test written second, so a basename collision between two DIFFERENT files would overwrite the armed source and report every mutant SURVIVED at exit 0 — that shape is refused as usage (rc 4), and the same-file case writes one file once instead.
 At the boundary run `profile-loop.sh "$ARC" --round T:N` and paste its `timeline` and `levers` blocks into the scorecard, then `python3 "$SKILL/loop.py" close-round --arc "$ARC" --track T --round N`.
+A job that ledgered a `start` but never a `child` recorded no process group, so its liveness cannot be established at all — `--abandon-unfinished` does NOT cover it (that flag abandons jobs measured dead), and the operator must name each one with `--abandon-unverifiable=<names>` after confirming by hand that it is gone; the round-close record keeps those separate from `abandoned`, because one says "we saw it die" and the other says "nobody could see, and a human asserted it".
 `close-round` records which levers read TRIGGERED for that track and round, and every launcher for round N+1 of that track exits 6 until each one is dispositioned with `python3 "$SKILL/loop.py" lever --arc "$ARC" --track T --round N --id L3 --state landed|declined --note "…"`.
 A lever that reads TRIGGERED is landed before the next panel launches, never listed as an option (memory `optimize-the-loop-unprompted`); a decline carries the reason into the ledger.
 Gaps in the arc's wall-clock are classed from evidence only — `declared` (via `loop.py note`), `seat-blocked` / `seat-active` / `seat-silent` from the job heartbeat, else `unknown` — the profiler never names a cause it cannot show.
+A wall-clock STEP is separated from real elapsed time by the offset between each job's wall and monotonic clocks, recorded at BOTH ends of every job: a step that lands while a 20-minute lens is running moves only the end offset, so a detector built from start offsets alone would bill it to the seat as work.
+Such a step is reported with that job on both sides of the boundary, which is the truthful attribution — it happened while that job was what was running.
 A flat artifact directory with no ledger still profiles under the old birth→mtime heuristics, and every such artifact is reported UNATTRIBUTED (lever L7).
 The profiler's own fail-opens remain: a span read as "the suite got slower" is usually two runs contending for one machine — L4 names the overlapping jobs, so rerun the slow one ALONE before touching compiler or test config — and the one thing the scheduler cannot lock is a vitest run that codex launches inside a `--write` job.
 
@@ -655,6 +690,9 @@ The one real serialisation is never editing tracked files while a lens or a muta
 
 **Reuse the round mechanics instead of rewriting them each arc.**
 `mutate.py` beside this file is the mutation harness: a mutants JSON in (`label`, `old`, `new`, `expect: killed|survived|unobservable`, `test`), one line per mutant out (`KILLED`/`SURVIVED`/`MISARMED` against its expectation), armed only on a copy, with `--census 'REGEX=N'` as the completeness guard for an enumerated class and sha256 asserts on the tracked files.
+A mutant is only as good as its ANCHOR, and an anchor rots the moment the code under it is rewritten: 0 matches means the mutant arms nothing, 2+ means it rewrites every site so the kill no longer isolates the line the label names.
+`loop.stranded_mutant_anchors` is that rule as a pure function, checked over every battery by `loop_test.py` in milliseconds, so a rewrite that strands a mutant reddens on the next unit run instead of surfacing as MISARMED forty minutes into a battery.
+It is a checkout-only check — inside a mutation copy there are no batteries to scan, so it SKIPS visibly rather than passing, and section 12c of `tests/codex-loop.test.sh` pins that an in-repo run really ran it.
 Give every `expect: killed` mutant a `test` naming the test that must kill it — it becomes vitest's `-t` filter, turning a 9-mutant round over a 52-test file from 468 test executions into 9, and pinning WHICH test kills the mutant rather than accepting a kill by any neighbour. A filter that selects no test is MISARMED, never SURVIVED (vitest exits 0 on a zero-match `-t`, which would read every `killed` expectation as satisfied).
 Give it a copy dir unique to your session, and expect the census to correct you: on its first run it refused a site count of 13 carried from memory — the code had 12.
 Write one `make-prompts.py` per arc at round 1, parameterised by round number, HEAD and the previous round's results, and re-run it each round; hand-editing three lens prompts per round costs wall-clock comparable to a lens run.

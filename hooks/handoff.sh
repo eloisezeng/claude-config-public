@@ -3233,7 +3233,7 @@ This work is lane $LANE in the operational ledger (~/.claude/ops/ — read its R
   # can background a session, print its id, and still exit nonzero afterwards on
   # a client-side error. Recording that as `failed` — the one previous state a
   # retry walks straight past — is what pays for the second successor. This is
-  # the money lesson already written down for Dynadot: "intent sent, outcome
+  # the money lesson already written down for the registrar: "intent sent, outcome
   # unknown" is its own state, and it is not the retryable one. So the exit
   # status decides nothing on its own; the id does, and failing that, the
   # registry.

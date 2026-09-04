@@ -13,7 +13,7 @@
 # opt-out for a single call outside any arc: unscheduled, unprofiled, no gate.  --scheduled is
 # the inner marker loop.py passes back; callers never pass it.
 #
-#   run-codex.sh --policy-version 2026-09-02-scheduler-v1 prompt.txt /tmp/verdict.json /tmp/run.log "$WT" \
+#   run-codex.sh --policy-version 2026-09-02-scheduler-v1 prompt.txt "$ARC/$T-r$N.verdict.json" "$ARC/$T-r$N.run.log" "$WT" \
 #     -p sol --output-schema "$HOME/dotfiles/claude/skills/codex-converge/review-output.schema.json"
 #
 # Supplies exactly one -s (never pass your own), plus -C <workdir>, -o <tmp> and stdin-piping;
@@ -32,9 +32,12 @@
 #   - exit 0 ONLY if codex exited 0 AND wrote a non-empty regular file, which is then renamed
 #     into place within the destination directory. A partial file is never promoted, and a
 #     failed promotion leaves no partial destination behind.
-#   - exit 8 if the run resolved to reasoning effort 'none' (a silent profile fall-through): the
-#     verdict came from a tier nobody chose, so it is moved aside to <out-file>.void rather than
-#     returned as a completed review.
+#   - exit 8 if the tier the run ACTUALLY used cannot be established, or is not the one asked for:
+#     no model/effort banner in the log, effort 'none' (a silent profile fall-through), or a banner
+#     naming a different model/effort than an explicit -m / -c model_reasoning_effort requested.
+#     The verdict is moved aside to <out-file>.void rather than returned as a completed review.
+#   - <out-file> and <log-file> are locked for the run (an mkdir lock beside each), so two runs
+#     cannot share a pair of paths and overwrite each other's evidence; they may not be equal.
 #   - a run whose log goes idle for ~STALL_SECS is killed by process GROUP, escalated to
 #     SIGKILL while any group member survives, and reaped under a deadline that the final
 #     wait cannot exceed.
@@ -54,22 +57,43 @@ WRITE_MODE=0
 POLICY_VERSION="2026-09-02-scheduler-v1"
 ACK_POLICY_VERSION=""
 ARC=""; TRACK=""; ROUND=""; NAME=""; ONE_OFF=0; SCHEDULED=0
+# Every long option takes BOTH `--flag value` and `--flag=value`.  The `=` form used to fall through
+# to the `*) break` arm and become the <prompt-file> positional, which is the worst possible outcome:
+# `--policy-version=<v>` left ACK_POLICY_VERSION empty and printed "convergence policy changed",
+# sending the caller off to re-read SKILL.md over a shell-quoting difference, and `--arc=DIR` would
+# have been opened as the prompt.  An unrecognised option must never silently become a positional.
 while [ "$#" -gt 0 ]; do
-  case "$1" in
+  _opt="$1"; _val=""; _has_val=0
+  case "$_opt" in
+    --*=*) _val="${_opt#*=}"; _opt="${_opt%%=*}"; _has_val=1 ;;
+  esac
+  # For the space form, consume the next argv element as the value.
+  _take() {
+    if [ "$_has_val" -eq 1 ]; then printf '%s' "$_val"; return 0; fi
+    [ "$#" -ge 2 ] || return 1
+    printf '%s' "$2"
+  }
+  case "$_opt" in
     --write) WRITE_MODE=1; shift ;;
     --arc|--track|--round|--name)
-      [ "$#" -ge 2 ] || { echo "run-codex: $1 requires a value" >&2; exit 2; }
-      case "$1" in
-        --arc) ARC="$2" ;; --track) TRACK="$2" ;; --round) ROUND="$2" ;; --name) NAME="$2" ;;
+      _v="$(_take "$@")" || { echo "run-codex: $_opt requires a value" >&2; exit 2; }
+      case "$_opt" in
+        --arc) ARC="$_v" ;; --track) TRACK="$_v" ;; --round) ROUND="$_v" ;; --name) NAME="$_v" ;;
       esac
-      shift 2 ;;
+      if [ "$_has_val" -eq 1 ]; then shift; else shift 2; fi ;;
     --one-off) ONE_OFF=1; shift ;;
     --scheduled)
       echo "run-codex: --scheduled is not a caller option. The inner handshake is CC_LOOP_JOB/CC_LOOP_ARC, set by loop.py and verified against its ledger." >&2
       exit 2 ;;
     --policy-version)
-      [ "$#" -ge 2 ] || { echo "run-codex: --policy-version requires a value" >&2; exit 2; }
-      ACK_POLICY_VERSION="$2"; shift 2 ;;
+      _v="$(_take "$@")" || { echo "run-codex: --policy-version requires a value" >&2; exit 2; }
+      ACK_POLICY_VERSION="$_v"
+      if [ "$_has_val" -eq 1 ]; then shift; else shift 2; fi ;;
+    --*)
+      echo "run-codex: unrecognised option '$1' before <prompt-file>." >&2
+      echo "run-codex: launcher options are --policy-version, --write, --arc, --track, --round, --name, --one-off;" >&2
+      echo "run-codex: codex's own flags go AFTER <workdir>." >&2
+      exit 2 ;;
     *) break ;;
   esac
 done
@@ -189,9 +213,30 @@ else
   DEFAULT_STALL_LIMIT=15   # ~150s of silence
 fi
 
-POLL=10           # seconds between liveness checks
-IDLE_WINDOW=25    # log counts as idle if untouched this long
-STALL_LIMIT="${RUN_CODEX_STALL_LIMIT:-$DEFAULT_STALL_LIMIT}"  # consecutive idle windows before we kill (~150s read-only, ~600s --write; override via env for runs with long silent final composition)
+# POLL and IDLE_WINDOW are overridable for ONE reason: at their real values a test that wants to
+# see the watchdog actually fire has to sit through 150s of silence, so no test ever did, and
+# `find ... -newermt` could be broken to `false` -- classifying every long run as idle and killing
+# it -- with the whole suite still green. They are read from the environment, validated as positive
+# whole numbers (an empty or non-numeric override would make `sleep` and `find` fail every poll,
+# which reads as a stall and kills a healthy run), and echoed into the log so a run always records
+# the window it was actually judged against.
+# It refuses with `return`, never `exit`: the function runs inside `$( )`, so an `exit` there ends
+# only the SUBSHELL. The message still reaches stderr -- which is what hid this for so long -- but
+# the caller's variable is left EMPTY, `set -e` is not in force here, and the run proceeds to poll
+# with a broken window and exits 0. A refusal that refuses nothing is worse than no check at all,
+# so the non-zero status has to travel back through the assignment: every call site is
+# `VAR="$(_posint ...)" || exit 2`, and a new knob added here must carry that suffix too.
+_posint() {   # $1 = value, $2 = variable name; echoes the value, or RETURNS non-zero to refuse
+  case "$1" in ''|*[!0-9]*|0*[!0-9]*) echo "run-codex: $2 must be a positive whole number, got '$1'" >&2; return 2 ;; esac
+  [ "$1" -gt 0 ] || { echo "run-codex: $2 must be greater than 0, got '$1'" >&2; return 2; }
+  printf '%s' "$1"
+}
+POLL="$(_posint "${RUN_CODEX_POLL:-10}" RUN_CODEX_POLL)" || exit 2                 # seconds between liveness checks
+IDLE_WINDOW="$(_posint "${RUN_CODEX_IDLE_WINDOW:-25}" RUN_CODEX_IDLE_WINDOW)" || exit 2   # log counts as idle if untouched this long
+# STALL_LIMIT was read straight from the environment while the comment above claimed all three were
+# validated. It is the multiplier in `POLL * STALL_LIMIT`, so a non-numeric override made every
+# `[ "$STALE" -ge "$STALL_LIMIT" ]` a shell error and the watchdog never fired at all.
+STALL_LIMIT="$(_posint "${RUN_CODEX_STALL_LIMIT:-$DEFAULT_STALL_LIMIT}" RUN_CODEX_STALL_LIMIT)" || exit 2  # consecutive idle windows before we kill (~150s read-only, ~600s --write; override via env for runs with long silent final composition)
 REAP_LIMIT=15     # seconds to wait at each escalation step before giving up
 
 [ -f "$PROMPT" ] || { echo "run-codex: prompt file not found: $PROMPT" >&2; exit 2; }
@@ -203,6 +248,53 @@ for d in "$OUT_DIR" "$(dirname "$LOG")"; do
   [ -d "$d" ] && [ -w "$d" ] || { echo "run-codex: not a writable directory: $d" >&2; exit 2; }
 done
 
+# --- one run per artifact path -----------------------------------------------------------------
+# `: > "$LOG"` truncates, and the verdict is renamed over <out-file>. Two runs aimed at one pair of
+# paths therefore destroy each other's evidence: the second truncates the first's log mid-run (which
+# the watchdog reads as freshness, and the tier check then reads as an absent banner), and whichever
+# finishes last silently overwrites the other's verdict -- so a caller reads a verdict about a range
+# it never asked about. SKILL.md's own examples used the fixed /tmp/cc-verdict.json and /tmp/cc-run.log
+# for years, which makes two concurrent one-offs the DEFAULT, not the exotic case.
+#
+# A lock, not a warning: an mkdir on the path itself, which is atomic on every filesystem this runs on
+# (no flock(1) on macOS). A holder that died leaves its directory behind, so the pid inside is checked
+# and a dead holder's lock is taken over once -- a wedged path that can never be reused is a worse
+# failure than the collision.
+_norm() {   # resolve the DIRECTORY physically; the basename may not exist yet
+  printf '%s/%s\n' "$(cd "$(dirname "$1")" && pwd -P)" "$(basename "$1")"
+}
+if [ "$(_norm "$OUT")" = "$(_norm "$LOG")" ]; then
+  echo "run-codex: <out-file> and <log-file> are the same path ($OUT)." >&2
+  echo "run-codex: the log redirect would truncate the verdict and the verdict would overwrite the log." >&2
+  exit 2
+fi
+ARTIFACT_LOCKS=""
+_release_artifact_locks() {
+  for _d in $ARTIFACT_LOCKS; do rm -f "$_d/pid" 2>/dev/null; rmdir "$_d" 2>/dev/null; done
+  ARTIFACT_LOCKS=""
+}
+trap _release_artifact_locks EXIT
+for _p in "$OUT" "$LOG"; do
+  _l="$_p.runlock"
+  if ! mkdir "$_l" 2>/dev/null; then
+    _holder="$(cat "$_l/pid" 2>/dev/null || true)"
+    if [ -n "$_holder" ] && kill -0 "$_holder" 2>/dev/null; then
+      echo "run-codex: $_p is already in use by run-codex pid $_holder." >&2
+      echo "run-codex: give this run its own <out-file>/<log-file> (they must be unique per run)." >&2
+      exit 2
+    fi
+    # No live holder: a crashed run left the directory. Take it over, once.
+    rm -f "$_l/pid" 2>/dev/null
+    rmdir "$_l" 2>/dev/null
+    if ! mkdir "$_l" 2>/dev/null; then
+      echo "run-codex: cannot lock $_p (stale lock $_l could not be reclaimed)." >&2
+      exit 2
+    fi
+  fi
+  printf '%s\n' "$$" > "$_l/pid" 2>/dev/null || true
+  ARTIFACT_LOCKS="$ARTIFACT_LOCKS $_l"
+done
+
 # --- Codex profile preflight ------------------------------------------------
 # `codex exec -p <name>` with no matching profile is NOT an error: it silently falls through
 # to the base config. Measured on this Mac 2026-08-17: `-p terrax` (absent here) ran
@@ -212,14 +304,41 @@ done
 # downgraded tier.
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 REQ_PROFILE=""
+REQ_MODEL=""
+REQ_EFFORT=""
 _want_profile=0
+_want_model=0
+_want_config=0
 for _a in "$@"; do
   if [ "$_want_profile" -eq 1 ]; then REQ_PROFILE="$_a"; _want_profile=0; continue; fi
+  if [ "$_want_model" -eq 1 ]; then REQ_MODEL="$_a"; _want_model=0; continue; fi
+  if [ "$_want_config" -eq 1 ]; then
+    case "$_a" in model_reasoning_effort=*) REQ_EFFORT="${_a#model_reasoning_effort=}" ;; esac
+    _want_config=0; continue
+  fi
   case "$_a" in
     -p|--profile) _want_profile=1 ;;
     --profile=*)  REQ_PROFILE="${_a#--profile=}" ;;
+    -m|--model)   _want_model=1 ;;
+    --model=*)    REQ_MODEL="${_a#--model=}" ;;
+    -c|--config)  _want_config=1 ;;
+    --config=model_reasoning_effort=*) REQ_EFFORT="${_a#--config=model_reasoning_effort=}" ;;
+    # The tier check below reads codex's own plain-text banner out of the log. `--json` replaces
+    # that banner with JSONL, so every read comes back empty, every run reports the tier as
+    # "unknown", and the one check standing between a silent profile fall-through and a promoted
+    # verdict abstains on every single run. This skill never needs it (the output contract is
+    # `--output-schema`, which is unaffected), so it is refused rather than silently unverified.
+    --json|--experimental-json)
+      echo "run-codex: $_a is refused: it replaces codex's plain banner with JSONL, and the tier" >&2
+      echo "run-codex: check reads that banner -- every run would promote a verdict from an" >&2
+      echo "run-codex: unverified tier. Use --output-schema for a structured verdict instead." >&2
+      exit 2 ;;
   esac
 done
+# Quotes are stripped so `-c model_reasoning_effort="xhigh"` compares equal to the banner's `xhigh`
+# (the shell removes them for an unquoted value, but not from `--config=...="xhigh"` written literally).
+REQ_EFFORT="${REQ_EFFORT%\"}"; REQ_EFFORT="${REQ_EFFORT#\"}"
+REQ_EFFORT="${REQ_EFFORT%\'}"; REQ_EFFORT="${REQ_EFFORT#\'}"
 if [ "$_want_profile" -eq 1 ]; then
   echo "run-codex: -p/--profile given with no profile name" >&2; exit 2
 fi
@@ -421,14 +540,24 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
       RAN_MODEL="$(printf '%s\n' "$_banner"  | sed -n 's/^[[:space:]]*model:[[:space:]]*//p'            | head -1)"
       RAN_EFFORT="$(printf '%s\n' "$_banner" | sed -n 's/^[[:space:]]*reasoning effort:[[:space:]]*//p' | head -1)"
       echo "[watchdog] tier actually used: model=${RAN_MODEL:-unknown} effort=${RAN_EFFORT:-unknown}"
-      if [ "$RAN_EFFORT" = "none" ]; then
-        # This used to warn on stderr and then exit 0, so a round the launcher had ITSELF
-        # identified as void was handed to the caller as a completed review -- and a warning
-        # inside a multi-hundred-line log is not a gate. Effort 'none' is never something this
-        # skill asks for: it is what a silent profile fall-through resolves to. Fail closed.
-        echo "run-codex: the run resolved to reasoning effort 'none' (model=${RAN_MODEL:-unknown})." >&2
-        echo "run-codex: this verdict came from an unintended tier -- it is NOT a completed review" >&2
-        echo "run-codex: at the depth you requested, so the run is quarantined rather than returned." >&2
+      # A check that cannot read the banner has verified NOTHING, and "unknown" printed into a log
+      # is not a verdict about the tier -- it is the absence of one. This used to exit 0, so a run
+      # whose banner never appeared was promoted exactly like a verified one. There are only two
+      # honest outcomes: the banner names the tier, or the run is quarantined.
+      _tier_void=""
+      if [ -z "$RAN_MODEL" ] || [ -z "$RAN_EFFORT" ]; then
+        _tier_void="codex printed no model/reasoning-effort banner, so the tier this verdict came from cannot be established"
+      elif [ "$RAN_EFFORT" = "none" ]; then
+        _tier_void="the run resolved to reasoning effort 'none' (model=$RAN_MODEL)"
+      elif [ -n "$REQ_MODEL" ] && [ "${RAN_MODEL%%[ 	]*}" != "$REQ_MODEL" ]; then
+        _tier_void="the run used model '$RAN_MODEL' but '$REQ_MODEL' was requested"
+      elif [ -n "$REQ_EFFORT" ] && [ "${RAN_EFFORT%%[ 	]*}" != "$REQ_EFFORT" ]; then
+        _tier_void="the run used reasoning effort '$RAN_EFFORT' but '$REQ_EFFORT' was requested"
+      fi
+      if [ -n "$_tier_void" ]; then
+        echo "run-codex: $_tier_void." >&2
+        echo "run-codex: this verdict did NOT come from the tier you asked for -- it is not a" >&2
+        echo "run-codex: completed review at the depth you requested, so it is quarantined." >&2
         echo "run-codex: the output is kept at $OUT.void for inspection." >&2
         mv -f "$OUT" "$OUT.void" 2>/dev/null || true
         exit 8

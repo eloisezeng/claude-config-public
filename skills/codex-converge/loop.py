@@ -71,7 +71,15 @@ KINDS = ('review', 'write', 'vitest', 'tsc', 'mutant', 'ci', 'other')
 WAIT_KINDS = ('review', 'write', 'codex', 'ci')
 CPU_CLASSES = ('heavy', 'light', 'none')
 LEVER_IDS = ('L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'L7')
+
+# The six questions the efficiency PREFLIGHT must answer before round 1 launches. See
+# `preflight_decision` for why this gate exists at all and why it cannot live at a round boundary.
+PREFLIGHT_FIELDS = ('critical_path', 'parallel', 'batch', 'scope', 'stop', 'drivers')
+PREFLIGHT_FILLER = frozenset(
+    ('n/a', 'na', 'none', 'nothing', 'tbd', 'todo', '-', '--', '?', 'x', 'no', 'yes', 'same',
+     'default', 'unknown', 'as usual', 'standard', 'normal'))
 GAP_MIN_S = 1800
+REAP_GRACE_S = 10.0   # per signal: how long a killed process group gets to actually go away
 SCOPED_MAX_FILES = 8
 LEDGER = 'jobs.jsonl'
 
@@ -259,18 +267,40 @@ def cpu_class(kind: str, argv: list[str], explicit: str | None = None) -> str:
     return 'light'
 
 
-def tree_writing(kind: str, argv: list[str]) -> bool:
+def ci_snapshots_frozen(env: dict | None = None) -> bool:
+    """Does the environment PROVE vitest will refuse to write a missing snapshot?
+
+    Vitest resolves `update` to `new` whenever it is not running in CI, so a plain `vitest run`
+    with no `-u` still WRITES an absent external or inline snapshot into the source tree the first
+    time it meets one. Only CI turns that off. `''`, `'0'`, `'false'`, `'no'` and `'off'` are how
+    the major runners spell "not CI", so none of them is proof.
+    """
+    v = (os.environ if env is None else env).get('CI', '')
+    return str(v).strip().lower() not in ('', '0', 'false', 'no', 'off')
+
+
+def tree_writing(kind: str, argv: list[str], env: dict | None = None) -> bool:
     """Does this job MUTATE the tree it was handed, so that it needs an EXCLUSIVE tree lock?
 
     A `write` job does by definition. A vitest run does when it carries a snapshot-updating
     operand. An UNKNOWN vitest command line does too: `cpu_class` already fails such a line
     towards `heavy`, and the lock has to fail the same direction.
+
+    A KNOWN vitest command line with no update operand is a writer too, unless CI is set. The
+    flag is not what makes vitest write: outside CI its default `update` is `new`, so the first
+    run that meets a missing snapshot writes one. Two such runs took SHARED locks and could write
+    the same snapshot file, or let a review read a half-updated tree — and the post-run
+    tree-moved check can only refuse the verdict afterwards, never un-write the file. The escape
+    for a run that really is read-only is to set `CI=1`, which is also what makes a missing
+    snapshot FAIL rather than appear.
     """
     if kind == 'write':
         return True
     if kind == 'vitest':
         sh = vitest_shape(argv)
-        return bool(sh['writes_tree']) or not sh['known']
+        if bool(sh['writes_tree']) or not sh['known']:
+            return True
+        return not ci_snapshots_frozen(env)
     return False
 
 
@@ -332,8 +362,13 @@ def ledger_append(arc: str, ev: dict) -> None:
     # comparing two jobs' wall stamps establishes nothing about which ran first. Stamped HERE, at
     # the one chokepoint every writer goes through (loop.py and mutate.py both), so no caller can
     # forget it. `clock_discontinuity` is the reader's half.
-    ev.setdefault('mono', round(time.monotonic(), 3))
-    ev.setdefault('coff', round(ev['t'] - ev['mono'], 3))
+    # Both are read from THIS process's clocks at write time, never derived from ev['t']: a caller
+    # may anchor a record at any moment it likes (record_job backdates a whole span, mutate.py
+    # anchors its row at the first mutant), and `t - monotonic` on a backdated stamp is not a clock
+    # offset at all -- it is the backdating, and it would read as a clock jump on every such row.
+    _mono = time.monotonic()
+    ev.setdefault('mono', round(_mono, 3))
+    ev.setdefault('coff', round(now() - _mono, 3))
     line = json.dumps(ev, sort_keys=True) + '\n'
     buf = line.encode('utf-8')
     # Round 3 (LIFE5). O_APPEND makes each os.write land at the end atomically, but it says nothing
@@ -449,17 +484,35 @@ def tree_lock_name(tree: str) -> str:
     return 'tree-' + hashlib.sha1(real.encode('utf-8')).hexdigest()[:16] + '.lock'
 
 
-class Locks:
-    """Acquire the job's locks in a fixed order (tree, then cpu); release on exit.
+def path_lock_name(path: str, prefix: str) -> str:
+    """One lock per literal PATH — deliberately NOT `tree_lock_name`.
 
-    tree_mode / cpu_mode ∈ {'ex', 'sh', None}.  Uses flock(2): a holder that dies releases.
+    A mutation copy dir lives INSIDE the repo (gitignored), so `tree_lock_name` would resolve it
+    to the git toplevel and hand back the TREE's lock. Taking that exclusively to protect one copy
+    dir would serialise every reader in the arc, and two batches with two different copy dirs
+    would still collide on it. Hashing the realpath names exactly one directory and nothing else.
+    """
+    return f'{prefix}-' + hashlib.sha1(os.path.realpath(path).encode('utf-8')).hexdigest()[:16] + '.lock'
+
+
+class Locks:
+    """Acquire the job's locks in a fixed order (tree, extras, then cpu); release on exit.
+
+    tree_mode / cpu_mode / each extra mode ∈ {'ex', 'sh', None}.  Uses flock(2): a holder that
+    dies releases.
     """
 
     def __init__(self, tree: str | None, tree_mode: str | None, cpu_mode: str | None,
-                 holder: str = '', max_queue_s: float | None = None):
+                 holder: str = '', max_queue_s: float | None = None,
+                 extra: list[tuple[str, str]] | None = None):
         self.specs = []
         if tree and tree_mode:
             self.specs.append((os.path.join(lock_dir(), tree_lock_name(tree)), tree_mode))
+        # Extras sit between the tree and the cpu lock so that EVERY holder takes the whole set in
+        # one order. Order is the only thing standing between two batches that each want a tree
+        # lock and a resource lock and a deadlock; it costs nothing to fix it here.
+        for name, mode in (extra or []):
+            self.specs.append((os.path.join(lock_dir(), name), mode))
         if cpu_mode:
             self.specs.append((os.path.join(lock_dir(), 'cpu-heavy.lock'), cpu_mode))
         self.holder = holder
@@ -496,7 +549,13 @@ class Locks:
                     os.write(fd, self.holder.encode('utf-8'))
                 except OSError:
                     pass
-        self.queued_s = time.monotonic() - t0
+        # Clamped for the same reason the two span_s sites are: every consumer of this number
+        # (L5's queue lever, the round profile, `--max-queue` reporting) treats it as a
+        # DURATION, and a negative duration silently subtracts from the arc's measured wait
+        # instead of failing. The clock that produces one is not reachable in production --
+        # monotonic() is monotonic -- but the invariant is free and the alternative is a
+        # profile that under-reports the very contention it exists to find.
+        self.queued_s = max(0.0, time.monotonic() - t0)
         return self.queued_s
 
     @staticmethod
@@ -593,16 +652,22 @@ def admission_decision(closed: bool, corrupt: int) -> tuple[bool, str]:
     return True, ''
 
 
-def lock_modes(kind: str, cpu: str, has_tree: bool, writes_tree: bool) -> tuple[str | None, str | None]:
+def lock_modes(cpu: str, has_tree: bool, writes_tree: bool) -> tuple[str | None, str | None]:
     """The (tree, cpu) lock modes for a job.
 
     `writes_tree` is REQUIRED and never defaulted on purpose: it is the fact that decides whether
     a reader can safely run beside this job, and a default would let a new call site inherit
     "read-only" silently. Pass `tree_writing(kind, argv)`.
+
+    The `kind` is deliberately NOT a parameter. It used to be, as a second `kind == 'write'`
+    disjunct beside `writes_tree`, and that made "a write job writes" true in two places at once:
+    `tree_writing` already answers it unconditionally, so the copy here could be deleted with no
+    test able to see it (measured — mutant M5 SURVIVED against the whole suite). One fact, one
+    owner: `tree_writing` decides, this function only spends the answer.
     """
     tree_mode = None
     if has_tree:
-        tree_mode = 'ex' if (kind == 'write' or writes_tree) else 'sh'
+        tree_mode = 'ex' if writes_tree else 'sh'
     cpu_mode = {'heavy': 'ex', 'light': 'sh', 'none': None}[cpu]
     return tree_mode, cpu_mode
 
@@ -679,6 +744,176 @@ def gate_decision(prev_closed: bool, triggered: set, dispositioned: set) -> tupl
     return (prev_closed and not missing), missing
 
 
+# ------------------------------------------------------- the preflight (round 1's gate)
+# "until it is clean" is not a stopping condition, it is the absence of one. A BOUNDED stop names a
+# number (a round ceiling), the artifact that ends the loop (a census, a last panel), or the finding
+# class that may reopen it ("a new production-risk finding"). The banned forms below are the ones
+# measured to run a region for rounds after it stopped paying -- memory convergence-loop-speed-rules
+# recorded 15->10->14->9->7->6 findings across four rounds of one region under exactly this wording.
+UNBOUNDED_STOP_RE = re.compile(
+    r'until\s+(?:there\s+are\s+)?(?:no|zero)\b|until\s+(?:it\s+is\s+)?clean\b'
+    r'|only\s+lows?\b|(?:till|until)\s+converg|repeat\s+until|no\s+more\s+findings', re.I)
+# What counts as naming a bound. Deliberately generous about WORDING -- this gate exists to make the
+# author write a bound, not to score its quality -- but not about SHAPE. An earlier version accepted
+# a bare `\d`, and because it was consulted BEFORE the banned-form check, any stray digit excused an
+# explicitly open-ended stop: measured, `"repeat until no findings remain, across 3 tracks"` PASSED,
+# as did `"until only lows remain"` with any number appended. A number is only a bound when it
+# counts the thing being bounded (rounds, panels, iterations) or is attached to a ceiling word, so
+# "3 tracks" no longer buys an exit. The limit that remains, stated rather than hidden:
+# `--stop "2 rounds maybe"` still passes. The ledger's reader is the check on that, not this regex.
+STOP_BOUND_RE = re.compile(
+    r'(?:max|at\s+most|no\s+more\s+than|ceiling|cap(?:ped)?|budget|limit|within|after)\D{0,24}\d'
+    r'|\d+\s*(?:more\s+)?(?:rounds?|panels?|iterations?|passes|lenses)\b'
+    r'|round\s+\d+\s+is\s+the\s+last|last\s+panel|census'
+    r'|no\s+new\s+(?:high|critical|production|prod)|production-risk|bounded|first\s+green', re.I)
+
+
+def thin_answer(text: str | None) -> str | None:
+    """Why this preflight answer is not an answer, or None when it is one.
+
+    A required field with a filled-in blank in it buys nothing -- it converts the gate into a
+    keystroke. Refusing the blank is the whole difference between a prompt and a mechanism.
+    """
+    t = (text or '').strip()
+    if not t:
+        return 'empty'
+    if t.lower().strip('.').strip() in PREFLIGHT_FILLER:
+        return f'filler ({t!r}) -- say the actual answer, or say why the question does not apply here'
+    if len(t) < 12:
+        return f'too short at {len(t)} chars to be an answer'
+    return None
+
+
+def repeated_answers(answers: dict) -> str | None:
+    """Which answer was pasted into more than one field, or None when all six are distinct.
+
+    Six required fields will accept six copies of one sentence: measured, "not applicable here" in
+    every field cleared thin_answer (19 chars, not a listed filler word). That is the same
+    keystroke-instead-of-thought the field validation exists to refuse, one level up -- the six
+    questions are different questions, so one answer cannot be the honest answer to all of them.
+    Compared on normalised whitespace and case so re-punctuating a paste does not defeat it.
+    """
+    seen: dict[str, list[str]] = {}
+    for f in PREFLIGHT_FIELDS:
+        key = ' '.join((answers.get(f) or '').lower().split()).strip('.')
+        if key:
+            seen.setdefault(key, []).append(f)
+    dupes = {k: v for k, v in seen.items() if len(v) > 1}
+    if not dupes:
+        return None
+    key, fields = max(dupes.items(), key=lambda kv: len(kv[1]))
+    named = ', '.join('--' + f.replace('_', '-') for f in fields)
+    return (f'{named} are the same answer ({key[:60]!r}) -- they are different questions; '
+            'answer each one, or say why that question does not apply to this workflow')
+
+
+def unbounded_stop(text: str | None) -> str | None:
+    """Why this stopping condition is not bounded, or None when it is.
+
+    One rule: the stop must NAME a bound. This does not weaken the convergence gate (every finding
+    still gets a recorded disposition); it forbids the loop whose only exit is "run it again".
+    """
+    t = (text or '').strip()
+    if not t:
+        return 'empty'
+    # The live bug was TWO defects and only one of them lives here. The order was reversed (a bound
+    # anywhere returned None before the ban was looked at) AND STOP_BOUND_RE accepted a bare digit,
+    # so "across 3 tracks" bought an exit from "repeat until no findings remain". Only the second
+    # one carries behaviour. Measured over 139 generated stop strings (every banned form x every
+    # bound shape): with the regex as tightened above, the two orders differ on NOTHING -- and they
+    # cannot, since `banned and not bound` is reachable only when `bound` is falsy, which is exactly
+    # when the early return would not have fired. The order below is kept because it is the honest
+    # reading order and it stays correct if the regex is ever loosened again; it is not the guard.
+    # The guard is the SHAPE rule in STOP_BOUND_RE, and that is what M80 arms against.
+    bound = STOP_BOUND_RE.search(t)
+    banned = UNBOUNDED_STOP_RE.search(t)
+    if banned and not bound:
+        return (f'"{banned.group(0)}" is an open-ended form and the stop names no bound beside it')
+    if bound:
+        return None
+    return ('names no bound -- give a round ceiling, the census/last-panel that ends the region, '
+            'or the finding class that may reopen it')
+
+
+# The reserved track `run-codex.sh --one-off` schedules itself onto. It exists so a single
+# unattributed Codex call still queues on the worktree's lock and still gets its movement check;
+# it is not a convergence arc and has no rounds beyond 1. run-codex.sh writes this literal, and
+# the two are pinned equal by a test -- if you rename it here, rename it there.
+ONE_OFF_TRACK = 'one-off'
+
+
+def preflight_decision(rnd: int, has_preflight: bool, paid_jobs: int, track: str = '') -> tuple[bool, str]:
+    """May round 1 launch? Pass iff the preflight is on record, or the arc already paid for the loop.
+
+    Why this gate is HERE and not at a round boundary: the round-boundary machinery (close-round +
+    lever dispositions) cannot fire until a round has been paid for -- `gate()` passed round 1
+    unconditionally, so the earliest an efficiency question could be asked was AFTER the first
+    round's bill. Measured twice (memory optimize-the-loop-unprompted): a directive telling the
+    session to optimise loops sat in CLAUDE.md and in memory, and both times the session hand-rolled
+    a serial loop anyway and profiled only when the user asked. This is the same question moved to the
+    only moment its answer is still free.
+
+    `paid_jobs` is the GRANDFATHER clause and it is derived from the ledger, never from a list of
+    arc names: an arc that has already launched review/write jobs committed to its process before
+    this gate existed, and refusing it now wedges live work without saving any. It counts review and
+    write jobs only -- a scoped vitest run is not committing to a process, so a brand-new arc cannot
+    buy its way past the gate by running one test first.
+    """
+    if rnd != 1:
+        return True, 'not round 1 -- the close-round chain governs every later round'
+    if track == ONE_OFF_TRACK:
+        # The preflight asks what a REPEATING workflow puts on its critical path, what batches and
+        # what parallelises. A one-off has no second round to optimise, so there is no such answer
+        # to give -- and demanding one made every fresh one-off arc unusable: measured, a
+        # `CC_ONEOFF_ARC=<new dir> run-codex.sh --one-off ...` exited 6 with "round 1: no efficiency
+        # preflight on record" before codex was ever invoked, and the arc is created per user per
+        # machine, so the FIRST one-off on any box hit it. The exemption is decided HERE, by the
+        # gate, and never by the launcher writing itself a record to get past its own gate.
+        return True, f'round 1 on the reserved {ONE_OFF_TRACK!r} track -- a single call is not a loop to preflight'
+    if has_preflight:
+        return True, 'round 1: efficiency preflight on record'
+    if paid_jobs:
+        return True, (f'round 1: no preflight, but this arc has already launched {paid_jobs} '
+                      'review/write job(s), so it committed to this process before the gate existed '
+                      '-- GRANDFATHERED (refusing now would wedge live work and save nothing)')
+    return False, 'round 1: no efficiency preflight on record, and this arc has paid for nothing yet'
+
+
+def preflight_of(events: list[dict]) -> dict | None:
+    """The arc's last preflight record, or None. Per ARC, not per track: the process is the arc's."""
+    found = [ev for ev in events if ev.get('ev') == 'preflight']
+    return found[-1] if found else None
+
+
+def paid_review_jobs(events: list[dict]) -> int:
+    """Review/write jobs this arc actually launched -- the evidence it committed to a process.
+
+    `queued` lands before the lock wait, so a job REFUSED at the lock emits `queued` and then
+    `refused` without ever starting. It spent nothing, so it is not evidence of anything and is
+    subtracted here: counting it would let a fresh arc grandfather itself on a job that never ran.
+    A job that started and then failed still counts -- it paid.
+
+    `mutant` is deliberately NOT a paying kind even though it IS a gated one (see GATED_KINDS): a
+    mutation battery is an expense the preflight exists to ask about, never a licence to skip it.
+    """
+    started = {ev.get('job') for ev in events if ev.get('ev') == 'start'}
+    stillborn = {ev.get('job') for ev in events if ev.get('ev') == 'refused'} - started
+    return sum(1 for ev in events
+               if ev.get('ev') == 'queued' and ev.get('kind') in PAYING_KINDS
+               and ev.get('job') not in stillborn)
+
+
+# Kinds whose round-1 launch owes a preflight. `mutant` is here because an unbounded mutation
+# battery is one of the expensive loops the user named by name; `vitest`/`tsc`/`ci` are not, because a
+# scoped test run is not a process commitment and gating it would only teach people to run one first.
+GATED_KINDS = ('review', 'write', 'mutant')
+# Kinds that count as having PAID for the loop (the grandfather clause). A strict subset of
+# GATED_KINDS on purpose -- see paid_review_jobs.
+PAYING_KINDS = ('review', 'write')
+
+# 'preflight' is deliberately absent: it is a per-ARC record, not a track's history, and every
+# consumer of TRACK_EVENTS asks a per-track question (which round closed, which lever was
+# dispositioned). preflight_of() reads the ledger directly instead. Not an omission.
 TRACK_EVENTS = ('queued', 'start', 'end', 'refused', 'round-close', 'lever')
 
 
@@ -730,9 +965,24 @@ def gate(arc: str, track: str, rnd: int) -> tuple[bool, str]:
     # nothing ever writes. Rounds are 1-based; anything below that is refused, not waved through.
     if rnd < 1:
         return False, f'round {rnd} is not a valid round number — rounds start at 1'
-    if rnd == 1:
-        return True, 'round 1: nothing to close yet'
     events = ledger_read(arc)
+    if rnd == 1:
+        ok, msg = preflight_decision(1, preflight_of(events) is not None, paid_review_jobs(events), track)
+        if ok:
+            return True, msg + '; nothing to close yet'
+        return False, (msg + '''.
+
+Answer the efficiency preflight BEFORE paying for the loop -- what is actually on the critical
+path, what runs in PARALLEL, what BATCHES into one run, which surfaces the last change actually
+invalidated (re-review only those), the BOUNDED stop, and the top cost drivers. Ask Codex to
+critique the PROCESS for unnecessary serialization, redundant verification and over-broad review
+scope in ONE cheap call first; if it is down, record that and do the analysis yourself -- never
+block on it.''' + f'''
+
+  python3 {HERE}/loop.py preflight --arc {shlex.quote(arc)} \\
+    --critical-path '...' --parallel '...' --batch '...' --scope '...' \\
+    --stop '...' --drivers '...' \\
+    [--codex <critique.json> | --codex-unavailable '<why>']''')
     prev = round_to_close(events, track, rnd)
     if prev is None:
         return True, f'track {track} has no earlier rounds in the ledger — nothing to close'
@@ -935,7 +1185,12 @@ def rows_from_ledger(events: list[dict], t_now: float | None = None) -> tuple[li
                          note=('refused while queued' if (fin or {}).get('ev') == 'refused'
                                else 'ended while queued (no start event)' if fin
                                else 'killed or abandoned while queued (no start event)'),
-                         track=ev.get('track'), round=ev.get('round'), queued=max(0.0, q_end - q_t),
+                         # The refusal's own MONOTONIC measurement when it left one, and only then
+                         # the difference of two wall stamps -- which is a reconstruction, not a
+                         # measurement, and collapses to ~0 across a clock step in either direction.
+                         track=ev.get('track'), round=ev.get('round'),
+                         queued=(float(fin['queued_s']) if fin and fin.get('queued_s') is not None
+                                 else max(0.0, q_end - q_t)),
                          cpu=ev.get('cpu'), job=ev['job'], t_req=q_t, checkpoint=None,
                          rc=(fin or {}).get('rc'), unscoped=0, mutants=0, never_started=True,
                          coff=ev.get('coff'), coff_end=(fin or {}).get('coff')))
@@ -1080,6 +1335,35 @@ def classify_gap(a: float, b: float, notes: list[dict], timeline: list | None) -
     return 'seat-silent', 'heartbeat file present, nothing recorded inside the gap'
 
 
+def stranded_mutant_anchors(mutants: list[dict], src: str) -> list[str]:
+    """Which mutants can no longer arm the code they name?
+
+    A mutant is a text substitution, so it is only as good as its anchor. Two ways an anchor goes
+    bad, and both read as a passing battery to anyone who does not look:
+
+      0 occurrences -- the source was rewritten under the mutant (renamed, reindented, lifted into
+        another expression). `mutate.py` reports MISARMED and fails the run, but only after paying
+        for the whole battery, and only if the battery is run at all.
+      2+ occurrences -- the snippet is not unique, so the substitution rewrites every site. The
+        mutant may still be killed, but the kill says nothing about the line the label names.
+
+    So the rule is EXACTLY ONE, and it is a rule about text, which makes it a few milliseconds
+    rather than a suite run per mutant -- cheap enough to sit in the unit tests, where a rewrite
+    that strands a mutant reddens immediately instead of forty minutes into a battery.
+
+    Pure and total: returns one human-readable line per bad anchor, in battery order, and the
+    empty list when every mutant resolves exactly once. It judges anchors only -- whether a
+    mutant that DOES arm is then killed is the battery's question, not this one.
+    """
+    out: list[str] = []
+    for m in mutants:
+        anchor = m.get('old') or ''
+        n = src.count(anchor) if anchor else 0
+        if n != 1:
+            out.append('%s -- %d occurrence(s)' % (m.get('label') or '<unlabelled>', n))
+    return out
+
+
 def clock_discontinuity(rows: list[dict], tol_s: float = 2.0) -> list[dict]:
     """Where in a wall-sorted timeline did the clock JUMP, so the order across it is unknown?
 
@@ -1092,18 +1376,59 @@ def clock_discontinuity(rows: list[dict], tol_s: float = 2.0) -> list[dict]:
     the rows: {'before', 'after', 'delta', 'at'}. Empty means every row this set was measured
     against shared one continuous clock, which is the case the profiler may sort by wall time.
 
+    TWO points per row, not one (round 4, LIFE5). A job stamps `coff` when it starts and `coff_end`
+    when it ends, and a sequence built from start offsets alone discards the second of those --
+    so a step that lands WHILE a job runs is invisible, which is the likeliest place for one to
+    land: a review lens or a `codex --write` holds the longest single window in the whole arc.
+    A row whose own two offsets disagree is reported with itself on both sides, which is the
+    truthful attribution -- the step happened while that job was what was running.
+
     Pure and total: rows with no `coff` (a legacy or hand-written record) carry no evidence either
     way and are skipped rather than guessed at, and `tol_s` is clamped at 0 so a negative tolerance
     cannot turn every ordinary row into a finding.
     """
     tol = max(0.0, float(tol_s))
-    seq = [r for r in sorted(rows, key=lambda r: float(r.get('start') or 0)) if r.get('coff') is not None]
+    pts: list[tuple[float, float, str]] = []
+    for r in rows:
+        who = r.get('path') or r.get('job') or '?'
+        if r.get('coff') is not None:
+            pts.append((float(r.get('start') or 0), float(r['coff']), who))
+        if r.get('coff_end') is not None:
+            pts.append((float(r.get('end') or r.get('start') or 0), float(r['coff_end']), who))
+    pts.sort(key=lambda p: p[0])
     out: list[dict] = []
-    for a, b in zip(seq, seq[1:]):
-        delta = float(b['coff']) - float(a['coff'])
+    for a, b in zip(pts, pts[1:]):
+        delta = b[1] - a[1]
         if abs(delta) > tol:
-            out.append(dict(before=a.get('path') or a.get('job') or '?', after=b.get('path') or b.get('job') or '?',
-                            delta=delta, at=float(b.get('start') or 0)))
+            out.append(dict(before=a[2], after=b[2], delta=delta, at=b[0]))
+    return out
+
+
+def queue_intervals(rows: list[dict], window: tuple[float, float] | None = None) -> list[tuple[float, float]]:
+    """The intervals in which jobs sat QUEUED on a lock, anchored at each job's request stamp.
+
+    A job that waited an hour behind another lane's writer was not idle, and those seconds are not
+    "editing / reading / thinking". They used to be counted TWICE: once on the `queued` line, and
+    again inside `wall - busy`, because only RUN intervals joined the union. A synthetic 3600 s
+    queue in front of a 100 s review therefore reported 3600 s queued and, simultaneously, an hour
+    with no timed artifact — which fired L6 and pointed it at the wrong remedy. The scheduler
+    working as designed must never read as unexplained silence.
+
+    The length is the MEASURED (monotonic) wait, never `start - t_req`: that is a difference of two
+    wall stamps and is wrong by exactly any clock correction that landed mid-queue. A row that
+    never started has the same two fields, so one rule prices both.
+    """
+    out: list[tuple[float, float]] = []
+    for r in rows:
+        q = float(r.get('queued') or 0.0)
+        t0 = r.get('t_req')
+        if q <= 0 or t0 is None:
+            continue
+        a, b = float(t0), float(t0) + q
+        if window:
+            a, b = max(a, window[0]), min(b, window[1])
+        if b > a:
+            out.append((a, b))
     return out
 
 
@@ -1139,17 +1464,24 @@ def analyze(rows: list[dict], window: tuple[float, float] | None = None, notes=(
     last = window[1] if window else max(e for _, e in ivs)
     wall = last - first
     busy = union(ivs)
+    # `busy` stays RUN-ONLY, because it is what the per-kind percentages are a share of. The gap
+    # and unattributed arithmetic runs on the EXPLAINED union instead: a run interval or a
+    # measured queue interval both account for their seconds.
+    qivs = queue_intervals(rows, (first, last))
+    explained_ivs = sorted(list(ivs) + qivs)
+    explained = union(explained_ivs)
+    unattr_s = max(0.0, wall - explained)
     waits = [(r['start'], r['end']) for r in rows if r['kind'] in WAIT_KINDS]
     others = [(r['start'], r['end']) for r in rows if r['kind'] not in WAIT_KINDS]
     wait_union = union(waits) if waits else 0.0
     wait_alone = solo_wait(waits, others) if waits else 0.0
-    big_gaps = gaps_of(ivs)
+    big_gaps = gaps_of(explained_ivs)
     queued_total = sum(r.get('queued') or 0.0 for r in rows)
     P('')
     P('== timeline ==')
     P(f'  window          {hms(wall):>9}   {clock(first)} → {clock(last)}')
     P(f'  timed activity  {hms(busy):>9}   union of every interval above')
-    P(f'  unattributed    {hms(wall - busy):>9}   editing / reading / thinking — not in any artifact')
+    P(f'  unattributed    {hms(unattr_s):>9}   editing / reading / thinking — neither run nor queued')
     if waits:
         P(f'  waits           {hms(wait_union):>9}   {len(waits)} review / codex --write / CI-watch run(s)')
         P(f'  waits SOLO      {hms(wait_alone):>9}   one wait in flight and nothing else at all — no second lens, no fixes')
@@ -1233,8 +1565,8 @@ def analyze(rows: list[dict], window: tuple[float, float] | None = None, notes=(
           'moving the wide ones to checkpoints; never bypass the lock to "speed up"',
           'an unscheduled run beside a scheduled one is contention the lock cannot see — see L7')
     lever('L6', 'Wall-clock not in any artifact',
-          wall > 0 and (((wall - busy) > 0.6 * wall and wall > 1800) or bool(big_gaps)),
-          (f'{hm(wall - busy)} of {hm(wall)} ({100 * (wall - busy) / wall:.0f}%) has no timed artifact'
+          wall > 0 and ((unattr_s > 0.6 * wall and wall > 1800) or bool(big_gaps)),
+          (f'{hm(unattr_s)} of {hm(wall)} ({100 * unattr_s / wall:.0f}%) has no timed artifact'
            + (f'; {len(big_gaps)} gap(s) ≥ 30 min, largest {hm(big_gaps[0][0])} classed {gap_rows[0]["cls"]}' if big_gaps else '')) if wall > 0 else 'n/a',
           'each gap above carries its evidence class: `declared` = the seat said why (loop.py note); `seat-active` = the seat '
           'was working with no ledgered job (launch that work through loop.py run so it is timed); `seat-silent` = nothing '
@@ -1258,7 +1590,8 @@ def analyze(rows: list[dict], window: tuple[float, float] | None = None, notes=(
         P(f"             fail-open: {lv['failopen']}")
     P('')
     P('A lever that changes WHAT is verified is not a speedup (memory: optimize-the-loop-unprompted).')
-    return dict(text='\n'.join(out), levers=levers, rows=rows, wall=wall, busy=busy, wait_union=wait_union,
+    return dict(text='\n'.join(out), levers=levers, rows=rows, wall=wall, busy=busy,
+                explained=explained, unattributed=unattr_s, wait_union=wait_union,
                 wait_alone=wait_alone, gaps=gap_rows, queued=queued_total)
 
 
@@ -1404,12 +1737,42 @@ def signal_child(child, signum: int) -> None:
             pass
 
 
+def reap_group(child, grace_s: float = REAP_GRACE_S) -> bool:
+    """TERM the child's process group, then KILL it, and WAIT.  True once nothing is left running.
+
+    A scheduler that writes a job's terminal event while its process group is still alive has
+    sealed a round over an untracked writer — one that still holds an inherited copy of the tree
+    lock's descriptor and can still edit the tree the next job is about to be handed. So the only
+    honest order is: kill, reap, then record. False means the group outlived both signals and the
+    job must stay NON-terminal, because nothing here can prove the tree is quiet.
+    """
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        signal_child(child, sig)
+        try:
+            child.wait(timeout=grace_s)
+            return True
+        except subprocess.TimeoutExpired:
+            continue
+        except OSError:
+            return False
+    return child.poll() is not None
+
+
 def cmd_run(args) -> int:
     arc = need_arc(args)
     if not arc:
         return RC_USAGE
     if args.kind not in KINDS:
         return die(f'--kind must be one of {KINDS}')
+    # The zero-test gate is only possible if we can READ the child's output. `vitest_verdict` used to
+    # run under `if args.kind == 'vitest' and capture`, so `--no-capture` silently skipped it and a
+    # `-t does-not-exist` run (vitest exits 0 on a zero match) was recorded and returned as GREEN --
+    # the exact false green this scheduler exists to make impossible. Capture is not optional for the
+    # one kind whose own exit status cannot be trusted.
+    if args.kind == 'vitest' and args.capture is False:
+        return die('--no-capture is refused for --kind vitest: the zero-test gate reads the child\'s '
+                   'output, and vitest exits 0 when a name filter selects nothing. Drop --no-capture '
+                   '(the log is written under the arc by default).')
     cmd = list(args.cmd)
     if cmd and cmd[0] == '--':
         cmd = cmd[1:]
@@ -1462,7 +1825,7 @@ def cmd_run(args) -> int:
             print(f'loop.py: ADMISSION REFUSED launching {args.kind} into track {args.track} round '
                   f'{args.round}:\n{msg}', file=sys.stderr)
             return RC_GATE
-        if args.kind in ('review', 'write'):
+        if args.kind in GATED_KINDS:
             ok, msg = gate(arc, args.track, args.round)
             if not ok:
                 print(f'loop.py: GATE REFUSED launching {args.kind} for track {args.track} round {args.round}:\n{msg}', file=sys.stderr)
@@ -1470,7 +1833,7 @@ def cmd_run(args) -> int:
         tree = os.path.abspath(args.tree) if args.tree else None
         if tree and tree_state(tree) is None:
             return die(f'--tree {tree} is not a git worktree')
-        tree_mode, cpu_mode = lock_modes(args.kind, cpu, bool(tree), tree_writing(args.kind, cmd))
+        tree_mode, cpu_mode = lock_modes(cpu, bool(tree), tree_writing(args.kind, cmd))
         t_req = now()
         # pid included: two jobs with the same track/round/name launched in the same millisecond used to
         # share an id, so one's `end` event closed the other's row and the profile attributed one
@@ -1487,11 +1850,17 @@ def cmd_run(args) -> int:
         # is still visible in the ledger (and the inner launcher can verify who started it).
         ledger_append(arc, dict(ev='queued', t=t_req, job=job, track=args.track, round=args.round, kind=args.kind,
                                 name=name, cpu=cpu, tree=tree, pid=os.getpid()))
+    # MONOTONIC, because this number is a DURATION and the two wall stamps it used to be
+    # reconstructed from (`refused.t - queued.t`) are not: an NTP step inside the wait wrote a
+    # collapsed or negative lock wait straight into lever L6's input. Wall time still ANCHORS the
+    # row; only the measurement is monotonic.
+    m_req = time.monotonic()
     try:
         queued = locks.acquire()
     except TimeoutError as e:
         ledger_append(arc, dict(ev='refused', t=now(), job=job, track=args.track, round=args.round, kind=args.kind,
-                                name=name, reason=f'lock not available: {e}'))
+                                name=name, queued_s=max(0.0, time.monotonic() - m_req),
+                                reason=f'lock not available: {e}'))
         return die(f'lock not available: {e}', RC_LOCK)
     except OSError as e:
         return die(f'cannot take locks under {lock_dir()}: {e} (refusing to run unlocked)', RC_LOCK)
@@ -1512,6 +1881,7 @@ def cmd_run(args) -> int:
     reason = ''
     fh = open(log, 'ab') if capture else None
     child = None
+    terminal = True     # cleared only when a launched child cannot be proven dead (see reap_group)
     try:
         # The inner handshake: run-codex.sh honours CC_LOOP_JOB only when the ledger shows this
         # job started by ITS parent pid, so the marker cannot be forged by passing a flag.
@@ -1547,25 +1917,44 @@ def cmd_run(args) -> int:
         # unsupervised under a lock that was about to be released. Signalling the group reaches them.
         for fd in locks.fds:
             os.set_inheritable(fd, True)
-        child = subprocess.Popen(cmd, cwd=cwd, stdout=fh or None, stderr=(subprocess.STDOUT if fh else None),
-                                 env=child_env, start_new_session=True, pass_fds=tuple(locks.fds))
-        # The child's identity, durable BEFORE we wait on it. start_new_session makes the child its
-        # own group leader, so child.pid is the group id — and that group, not this scheduler, is
-        # what actually holds the tree while the work runs (see the pass_fds note above). Without
-        # this event a SIGKILL of the scheduler left close-round no way to see the live writer.
-        ledger_append(arc, dict(ev='child', t=now(), job=job, track=args.track, round=args.round,
-                                name=name, kind=args.kind, pid=os.getpid(), pgid=child.pid))
-        # a signal that arrived while the child was being forked was recorded, not delivered — pass it on
-        for signum in pending:
-            signal_child(child, signum)
-        rc = child.wait()
-        reason = f'child rc={rc}'
-    except OSError as e:
-        # A launch that never starts (no such binary, not executable, fork failure) used to escape as
-        # a traceback AFTER the `queued`/`start` events were written, leaving the job with no terminal
-        # event: it read as "still running" forever, and close-round would refuse the round on a job
-        # that never existed. Every path out of here now ledgers a terminal event.
-        rc, reason = RC_FAILCLOSED, f'launch failed: {type(e).__name__}: {e}'
+        try:
+            child = subprocess.Popen(cmd, cwd=cwd, stdout=fh or None, stderr=(subprocess.STDOUT if fh else None),
+                                     env=child_env, start_new_session=True, pass_fds=tuple(locks.fds))
+        except OSError as e:
+            # A launch that never starts (no such binary, not executable, fork failure) used to escape as
+            # a traceback AFTER the `queued`/`start` events were written, leaving the job with no terminal
+            # event: it read as "still running" forever, and close-round would refuse the round on a job
+            # that never existed. Every path out of here now ledgers a terminal event.
+            #
+            # This handler covers Popen and NOTHING ELSE. It used to wrap the whole block below, so an
+            # OSError raised AFTER the fork — writing the `child` event, forwarding a pending signal,
+            # waiting — was labelled `launch failed`, the locks were released, and a terminal `end` was
+            # written while the process group was still running and still holding an inherited copy of
+            # the tree lock. The round then closed over a live untracked writer.
+            rc, reason = RC_FAILCLOSED, f'launch failed: {type(e).__name__}: {e}'
+        else:
+            try:
+                # The child's identity, durable BEFORE we wait on it. start_new_session makes the child its
+                # own group leader, so child.pid is the group id — and that group, not this scheduler, is
+                # what actually holds the tree while the work runs (see the pass_fds note above). Without
+                # this event a SIGKILL of the scheduler left close-round no way to see the live writer.
+                ledger_append(arc, dict(ev='child', t=now(), job=job, track=args.track, round=args.round,
+                                        name=name, kind=args.kind, pid=os.getpid(), pgid=child.pid))
+                # a signal that arrived while the child was being forked was recorded, not delivered — pass it on
+                for signum in pending:
+                    signal_child(child, signum)
+                rc = child.wait()
+                reason = f'child rc={rc}'
+            except BaseException as e:   # noqa: BLE001 — KeyboardInterrupt and SystemExit included ON PURPOSE
+                # There is a live process group out there. Kill it and reap it FIRST; only then is
+                # a terminal event honest. If it survives both signals we cannot say the tree is
+                # quiet, so the job stays non-terminal and close-round refuses the round — which is
+                # exactly what `--abandon-unverifiable` is the operator's escape from.
+                rc = RC_FAILCLOSED
+                reason = f'aborted after launch: {type(e).__name__}: {e}'
+                if not reap_group(child):
+                    terminal = False
+                    reason += ' — the child process group SURVIVED SIGTERM and SIGKILL'
     finally:
         if fh:
             fh.close()
@@ -1576,7 +1965,7 @@ def cmd_run(args) -> int:
     t_end = now()
     span_s = max(0.0, time.monotonic() - m_start)
     end_ev: dict = dict(ev='end', t=t_end, job=job, rc=rc, tree_moved=False)
-    if args.kind == 'vitest' and capture:
+    if args.kind == 'vitest':   # capture is guaranteed on for vitest (refused at entry)
         out = read_head_tail(log)
         rc, reason = vitest_verdict(rc, out, has_name_filter(cmd), args.allow_no_tests)
         end_ev.update(tests=tests_ran(out), test_files=test_files_ran(out), reported=reported_duration(out),
@@ -1590,6 +1979,12 @@ def cmd_run(args) -> int:
             if args.out and os.path.exists(args.out):
                 os.replace(args.out, args.out + '.tree-moved')
                 reason += f' — output quarantined to {args.out}.tree-moved'
+    if not terminal:
+        # No `end` event on purpose. The job stays OPEN in the ledger so close-round refuses the
+        # round rather than sealing it over a process nobody can account for. Our own lock fds go
+        # with this process, but the child inherited copies, so the tree stays locked while it lives.
+        print(f'loop.py: [{job}] NOT TERMINAL — {reason}', file=sys.stderr)
+        return RC_FAILCLOSED
     end_ev.update(rc=rc, reason=reason, span_s=span_s)
     ledger_append(arc, end_ev)
     print(f'loop.py: [{job}] done rc={rc} in {hms(t_end - t_start)} — {reason}', file=sys.stderr)
@@ -1603,6 +1998,56 @@ def cmd_gate(args) -> int:
     ok, msg = gate(arc, args.track, args.round)
     print(('GATE PASS: ' if ok else 'GATE REFUSED: ') + msg)
     return 0 if ok else RC_GATE
+
+
+def cmd_preflight(args) -> int:
+    arc = need_arc(args)
+    if not arc:
+        return RC_USAGE
+    answers = {f: getattr(args, f) for f in PREFLIGHT_FIELDS}
+    for f in PREFLIGHT_FIELDS:
+        why = thin_answer(answers[f])
+        if why:
+            return die(f'--{f.replace("_", "-")}: {why}.\nThe preflight is the one cheap moment to '
+                       'catch an expensive process; a filled-in blank buys nothing.')
+    why = repeated_answers(answers)
+    if why:
+        return die(f'the preflight answers repeat: {why}.')
+    why = unbounded_stop(answers['stop'])
+    if why:
+        return die(f'--stop is not a bounded stopping condition: {why}.\n'
+                   'Prefer "round N is the LAST panel for <region>, then findings are dispositioned '
+                   'against the census" or "another round needs a new production-risk finding" over '
+                   '"repeat until no findings remain".')
+    # The Codex process critique is cheap and catches the serialization the author cannot see. Its
+    # ABSENCE is recorded rather than silently skipped -- an outage must not quietly become the
+    # reason a workflow ran unexamined, and it must not block either.
+    if not args.codex and not args.codex_unavailable:
+        return die('pass --codex <path to the Codex process critique> or --codex-unavailable "<why>": '
+                   'the critique is a lightweight planning consultation, not another review loop, and '
+                   'skipping it is a recorded decision rather than a silent one')
+    if args.codex and args.codex_unavailable:
+        return die('pass one of --codex / --codex-unavailable, not both')
+    if args.codex:
+        if not os.path.exists(args.codex):
+            return die(f'--codex {args.codex} does not exist')
+        # An empty file satisfied `exists` and so satisfied the consultation requirement outright --
+        # asymmetric with how strictly the six text fields are checked, and the easiest way to record
+        # a critique that never happened. `--codex-unavailable "<why>"` is the honest route for that.
+        if os.path.getsize(args.codex) < 40:
+            return die(f'--codex {args.codex} is {os.path.getsize(args.codex)} bytes -- that is not a '
+                       'process critique. Record --codex-unavailable "<why>" instead of an empty file.')
+    prior = preflight_of(ledger_read(arc))
+    ledger_append(arc, dict(ev='preflight', codex=args.codex or None,
+                            codex_unavailable=args.codex_unavailable or None,
+                            supersedes=(prior or {}).get('t'), **answers))
+    print(f'efficiency preflight recorded for arc {arc}:')
+    for f in PREFLIGHT_FIELDS:
+        print(f'  {f.replace("_", "-"):14s} {answers[f]}')
+    print(f'  {"codex":14s} ' + (args.codex or f'UNAVAILABLE -- {args.codex_unavailable}'))
+    if prior:
+        print(f'  (supersedes the preflight recorded at {clock(prior.get("t"))})')
+    return 0
 
 
 def pid_alive(pid) -> bool:
@@ -1734,12 +2179,33 @@ def cmd_close_round(args) -> int:
                        'then closes with --abandon-unfinished).'
                        .format(args.round, args.track, len(live),
                                ', '.join(f"{j['name']} ({describe_liveness(j)})" for j in live)), RC_FAILCLOSED)
+        # UNCONDITIONAL, and deliberately not inside the `--abandon-unfinished` branch. A job that
+        # ledgered `start` but never ledgered a `child` has no recorded pgid, so `job_alive` cannot
+        # ask about its child at all -- it reads "dead" from the absence of evidence, not from a
+        # signal. That is exactly the record `--abandon-unfinished` used to close over: the flag
+        # skipped this computation, so a round could be closed over a child that is still running,
+        # still holding its tree and CPU locks through inherited fds, into a round the gate then
+        # admits. Liveness that cannot be established is never abandonable by a blanket flag; the
+        # operator must name each such job, which forces them to look at the one thing the ledger
+        # cannot tell them.
+        unverifiable = [j for j in dead if j.get('started') and not j.get('pgid')]
+        named = {n for n in (args.abandon_unverifiable or '').split(',') if n}
+        blind = [j for j in unverifiable if str(j['name']) not in named]
+        if blind:
+            return die('cannot close round {} of track {}: {} job(s) ledgered a start but never a child, '
+                       'so no process group was ever recorded and a LIVE orphan cannot be ruled out by '
+                       'inspection — {}. --abandon-unfinished does not cover these: it abandons jobs '
+                       'measured dead, and these are jobs that cannot be measured at all. Confirm each '
+                       'is gone (`ps -o pgid=,command= -p <pid>` for anything still writing under the '
+                       'arc), then name them: --abandon-unverifiable={}'
+                       .format(args.round, args.track, len(blind),
+                               ', '.join(str(j['name']) for j in blind),
+                               ','.join(str(j['name']) for j in blind)), RC_FAILCLOSED)
         if dead and not args.abandon_unfinished:
-            unresolved = [j for j in dead if j.get('started') and not j.get('pgid')]
-            extra = ('' if not unresolved else
+            extra = ('' if not unverifiable else
                      ' Of those, {} died before its child identity was durably recorded ({}), so a live '
                      'orphan cannot be ruled out by inspection.'
-                     .format(len(unresolved), ', '.join(str(j['name']) for j in unresolved)))
+                     .format(len(unverifiable), ', '.join(str(j['name']) for j in unverifiable)))
             return die('cannot close round {} of track {}: {} job(s) have no terminal ledger event and '
                        'neither their launcher nor their child process group is alive — {}. They were '
                        'killed or crashed, so their wall-clock is unmeasured. Re-run them, or pass '
@@ -1763,7 +2229,11 @@ def cmd_close_round(args) -> int:
         triggered = [lv['id'] for lv in levers if lv['triggered']]
         ledger_append(arc, dict(ev='round-close', track=args.track, round=args.round, triggered=triggered,
                                 profile=ppath, levers=lpath, empty=bool(res.get('empty')),
-                                abandoned=[j['job'] for j in dead] or None))
+                                abandoned=[j['job'] for j in dead] or None,
+                                # Separately recorded because they were closed on an OPERATOR'S WORD,
+                                # not on a measurement: `abandoned` says "we saw it die", this says
+                                # "nobody could see, and a human asserted it".
+                                unverifiable=[j['job'] for j in unverifiable] or None))
     print(txt)
     print(f'\nround {args.round} of track {args.track} CLOSED; TRIGGERED: {triggered or "none"}')
     if triggered:
@@ -1924,12 +2394,34 @@ def build_parser() -> argparse.ArgumentParser:
     common(p)
     p.set_defaults(fn=cmd_gate)
 
+    p = sub.add_parser('preflight', help="the efficiency review round 1 may not launch without")
+    common(p, track=False)
+    p.add_argument('--critical-path', dest='critical_path', required=True,
+                   help='what is actually on the critical path')
+    p.add_argument('--parallel', required=True,
+                   help='independent work that will run CONCURRENTLY (or why none of it is independent)')
+    p.add_argument('--batch', required=True,
+                   help='checks batched into one run (or which ones genuinely need isolation)')
+    p.add_argument('--scope', required=True,
+                   help='what is NOT re-reviewed/re-verified this time, and why it stays valid')
+    p.add_argument('--stop', required=True,
+                   help='the BOUNDED stopping condition (a round ceiling, a census, or the finding class that reopens it)')
+    p.add_argument('--drivers', required=True,
+                   help='projected top cost drivers, and the one being cut before execution')
+    p.add_argument('--codex', help='path to the Codex critique of the PROCESS')
+    p.add_argument('--codex-unavailable', dest='codex_unavailable',
+                   help='why the Codex critique was skipped -- recorded, never silent, and never a blocker')
+    p.set_defaults(fn=cmd_preflight)
+
     p = sub.add_parser('close-round', help='profile the round, write its levers, record the close')
     common(p)
     p.add_argument('--empty-ok', action='store_true')
     p.add_argument('--abandon-unfinished', action='store_true',
                    help='close even though some jobs have no terminal event and their launcher is gone; '
                         'the close records them as abandoned (never allowed while one is still running)')
+    p.add_argument('--abandon-unverifiable', default='',
+                   help='comma-separated job names that ledgered a start but never a child, whose '
+                        'processes you have CONFIRMED gone by hand; nothing else can close over them')
     p.add_argument('--timeline', help='heartbeat file for gap classification (default: <arc>/../timeline.jsonl)')
     p.add_argument('dirs', nargs='*', help='extra artifact dirs to scan heuristically')
     p.set_defaults(fn=cmd_close_round)

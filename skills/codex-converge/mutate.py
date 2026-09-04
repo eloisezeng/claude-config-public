@@ -33,7 +33,11 @@ mutants.json is a list of objects:
 `-t` filter, so the mutant runs the ONE test that is supposed to catch it instead of
 the whole file (a 52-test file x 9 mutants = 468 test executions becomes 9).  It is
 also a stronger assertion than the unfiltered run — it pins WHICH test does the
-killing, so a mutant killed by some unrelated neighbour no longer reads as OK.
+killing, so a mutant killed by some unrelated neighbour no longer reads as OK. But
+`test` is a SUBSTRING filter, so a name that matches more than one test (`"S4"`
+selecting "S4", "S4b" AND "S4c") lets any of them do the killing while still
+printing as "killed by its named test" — a filter that selects other than exactly
+ONE test is reported MULTI-SELECT, matched=False, same as a mismatch.
 A run that executes NO test is reported MISARMED, never SURVIVED — whether or not it
 was filtered: vitest exits 0 when its name filter matches nothing, and a whole-file
 command whose test file has moved does the same, so an unguarded run would silently
@@ -59,6 +63,7 @@ copy dir will read each other's mutants.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -71,7 +76,10 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from loop import Locks, arc_dir, ledger_append, tests_ran, now as _now  # noqa: E402
+from loop import (Locks, arc_dir, ledger_append, tests_ran, now as _now,  # noqa: E402
+                  GATED_KINDS, admission_decision, gate, ledger_corrupt, ledger_read,
+                  lock_dir_ready, path_lock_name,
+                  round_lock, round_status)
 
 
 def sha256(path: str) -> str:
@@ -80,6 +88,31 @@ def sha256(path: str) -> str:
 
 
 # tests_ran (the zero-match guard) is defined ONCE, in loop.py, and imported above.
+
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def selected_tests(summary_line: str) -> int | None:
+    """How many tests a mutant's `test` filter actually SELECTED (failed + passed, never skipped).
+
+    A `test` filter is a SUBSTRING match: `"S4"` selects "S4", "S4b" and "S4c" alike, so a mutant
+    killed by ANY of the selected tests reads as "killed by its named test" even when the intended
+    one never ran (measured: a `"test": "S4"` filter selected three tests, and the mutant read
+    KILLED on the strength of whichever one caught it). `summary_line` is vitest 4's own single
+    `Tests ...` summary line (ANSI colour codes optional — stripped here first); returns None when
+    the line is missing or its shape is not recognised, so a caller can tell "zero tests selected"
+    (a real 0) apart from "could not tell" (None) rather than silently treating both as fine.
+    """
+    if summary_line is None:
+        return None
+    line = _ANSI_RE.sub('', summary_line).strip()
+    if not line.startswith('Tests'):
+        return None
+    nums = re.findall(r'(\d+)\s+(?:passed|failed)', line)
+    if not nums:
+        return None
+    return sum(int(n) for n in nums)
 
 
 def worktree_of(path: str) -> str | None:
@@ -225,6 +258,19 @@ def run_test_cmd(cmd: str, root: str, copy_dir: str, lock_fds: tuple = ()) -> su
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 def main() -> int:
+    """Owns the batch lock's LIFETIME, so every exit path from `_main` releases it.
+
+    `_main` refuses in a dozen places between taking the lock and reaching its own `finally` —
+    a failed census, a basename collision, a refused admission, a closed round. Each of those is
+    a bare `return`, and a bare return cannot release a lock. Rather than thread a release through
+    every one of them (and lose the next one somebody adds), the stack is opened OUTSIDE and closed
+    here on the way out, whether `_main` returned or raised.
+    """
+    with contextlib.ExitStack() as batch_stack:
+        return _main(batch_stack)
+
+
+def _main(batch_stack: contextlib.ExitStack) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--root', default=os.getcwd(), help='repo root; vitest runs here (default: cwd)')
     ap.add_argument('--src', required=True, help='source file to mutate, relative to root')
@@ -325,6 +371,42 @@ def main() -> int:
             print(f'usage: --also-copy not a file: {c}', file=sys.stderr)
             return 4
 
+    # ---- BATCH SCOPE -------------------------------------------------------------------------
+    # ONE lock set, taken here — before the first hash and the first source read — and held until
+    # `main`'s ExitStack closes it, after the final census and the copy directory's removal.
+    #
+    # The TREE is taken SHARED, because this command is a reader of it: it copies the source out and
+    # hashes every tracked file before and after. Shared keeps mutation batches overlapping each
+    # other and overlapping reviews, and excludes only a writer. It used to be taken per CHILD, which
+    # left the source reads, the initial hashes, the arming, and every gap between tests unlocked —
+    # measured: a writer admitted in one of those gaps changed an untracked input the census cannot
+    # see, and the batch still printed `KILLED OK` / `1/1 mutants matched expectation` and exited 0
+    # over a tree that was two different versions during one run.
+    #
+    # The COPY DIRECTORY is taken EXCLUSIVELY, keyed on its own real path. Every mutant rmtree's and
+    # recreates it, so two batches sharing one `--copy-dir` delete each other's armed source; the
+    # spurious failures that causes satisfy `expect: killed`, and BOTH batches report green.
+    # `path_lock_name` rather than `tree_lock_name` because a copy dir lives inside the repo (it must
+    # be git-ignored, see above): resolving it to the git toplevel would hand back the TREE's lock,
+    # which serialises every reader in the arc and STILL lets two different copy dirs collide.
+    #
+    # Order is tree, then copy dir, then (per child) cpu — one order for every holder, which is the
+    # only thing standing between two batches and a deadlock. `Locks` fixes that order internally.
+    batch_fds: tuple[int, ...] = ()
+    if not args.no_lock:
+        err = lock_dir_ready()
+        if err:
+            print(f'cannot take locks: {err} (refusing to run unlocked)', file=sys.stderr)
+            return 7
+        try:
+            batch = batch_stack.enter_context(
+                Locks(root, 'sh', None, holder=f'mutate:batch {os.path.relpath(copy_dir, root)}',
+                      extra=[(path_lock_name(copy_dir, 'copy'), 'ex')]))
+        except OSError as e:
+            print(f'cannot take locks: {type(e).__name__}: {e} (refusing to run unlocked)', file=sys.stderr)
+            return 7
+        batch_fds = tuple(batch.fds)
+
     tracked = [src, test] + companions + [os.path.join(root, t) for t in args.tracked]
     before = {p: sha256(p) for p in tracked}
 
@@ -394,11 +476,13 @@ def main() -> int:
               f'copy them to distinct names', file=sys.stderr)
         return 4
 
-    # A mutation run READS the tracked tree (it copies the source out of it and hashes every
-    # tracked file before and after), so it is a reader and must hold the shared tree lock — it
-    # previously took only the cpu lock, and a concurrent `--write` job could rewrite the source
-    # between the copy and the census. Shared, so mutation runs still overlap each other.
-    lock_args = (None, None, None) if args.no_lock else (root, 'sh', 'sh')
+    # ---- CHILD SCOPE -------------------------------------------------------------------------
+    # The tree and the copy dir are already held for the whole batch (see BATCH SCOPE above), so a
+    # child adds only its cpu admission — taken and released around each test run, which is what
+    # lets a long battery yield the cpu class between mutants instead of monopolising it. The
+    # batch's descriptors are passed down alongside, so the tree stays locked for as long as any
+    # child of this batch is alive, even if this process is killed.
+    lock_args = (None, None, None) if args.no_lock else (None, None, 'sh')
 
     # Signals are handled from here on, because from here on there is a child to kill and a
     # ledger row to write. A terminated mutation run used to do neither: its suite kept running
@@ -414,14 +498,49 @@ def main() -> int:
     # running under the locks its (now inherited) descriptors still held.
     arc = arc_dir(args.arc)
     job_name = f'mutants-{os.path.splitext(src_base)[0]}'
+    # An INCOMPLETE attribution tuple is a usage error, never a quiet downgrade. `ledgered` used to
+    # be `bool(arc and args.track and args.round is not None)`, so `--arc X --track T` with no
+    # `--round` ran the whole battery with ledgering silently OFF: no queued row, no gate, no
+    # unfinished job for close-round to see, and its wall-clock landing in the unexplained gap.
+    # Ledgering is either fully addressed or deliberately absent.
+    given = [n for n, v in (('--arc', args.arc), ('--track', args.track),
+                            ('--round', args.round)) if v is not None and v != '']
+    if given and len(given) != 3:
+        print(f'usage: {", ".join(given)} given without the rest of the attribution tuple. A mutation '
+              'batch is ledgered against arc AND track AND round, or against none of them — a partial '
+              'tuple would run unattributed and unGATED while looking addressed.', file=sys.stderr)
+        return 4
     ledgered = bool(arc and args.track and args.round is not None)
     job = f'{args.track}.r{args.round}.{job_name}.{int(t_batch * 1000)}.{os.getpid()}' if ledgered else ''
     if ledgered:
-        _LEDGER[:] = [(arc, job), args.track, args.round, job_name]
-        skel = dict(job=job, track=args.track, round=args.round, kind='mutant', name=job_name,
-                    cpu='light', pid=os.getpid())
-        ledger_append(arc, dict(ev='queued', t=t_batch, tree=None, **skel))
-        ledger_append(arc, dict(ev='start', t=t_batch, t_req=t_batch, queued_s=0.0, **skel))
+        # The SAME round-locked admission transaction `loop.py run` uses, for the same reason: this
+        # command spends real wall-clock under the same locks. Without it, a direct `mutate.py --arc
+        # ... --round 1` appended and executed against an ALREADY CLOSED round, and racing a
+        # `close-round` let the closure snapshot the ledger before these events appeared — a round
+        # whose authoritative profile omits a job that ran inside it.
+        err = lock_dir_ready()
+        if err:
+            print(f'cannot take locks: {err} (refusing to run unlocked)', file=sys.stderr)
+            return 7
+        with round_lock(arc, args.track, args.round):
+            events = ledger_read(arc)
+            ok, msg = admission_decision(round_status(events, args.track, args.round)['closed'],
+                                         ledger_corrupt(events))
+            if not ok:
+                print(f'mutate.py: ADMISSION REFUSED into track {args.track} round {args.round}:\n{msg}',
+                      file=sys.stderr)
+                return 6
+            assert 'mutant' in GATED_KINDS   # if this kind ever stops being gated, this call must go too
+            ok, msg = gate(arc, args.track, args.round)
+            if not ok:
+                print(f'mutate.py: GATE REFUSED for track {args.track} round {args.round}:\n{msg}',
+                      file=sys.stderr)
+                return 6
+            _LEDGER[:] = [(arc, job), args.track, args.round, job_name]
+            skel = dict(job=job, track=args.track, round=args.round, kind='mutant', name=job_name,
+                        cpu='light', pid=os.getpid())
+            ledger_append(arc, dict(ev='queued', t=t_batch, tree=None, **skel))
+            ledger_append(arc, dict(ev='start', t=t_batch, t_req=t_batch, queued_s=0.0, **skel))
     results: list[tuple[str, str, str, bool]] = []   # label, expect, outcome, matched
     # Round 3 (LIFE7): queue and run intervals are measured with time.monotonic(), which no clock
     # adjustment can move. They used to be wall-clock differences of `loop.now()` (= time.time()),
@@ -429,6 +548,11 @@ def main() -> int:
     # inflated `queued_s`/`reported` straight into the ledger, and those two numbers are inputs to
     # the profiler's lever decisions. Wall time is kept only as the ANCHOR that positions the row.
     timings: list[dict] = []   # per executed mutant: wall anchors t_req/t_run + monotonic m_req/m_run/m_end
+    # The BASELINE's own wait and run, kept apart from the mutants'. The batch row used to be
+    # anchored at the first mutant, so both of these fell outside its span and the round profile
+    # showed a mutation batch that began after it had already run a whole suite -- the wall-clock
+    # in between landing in the unexplained-gap bucket the profiler exists to empty.
+    baseline: dict = {}
     unscoped: list[str] = []
     rc = 1
     interrupted = None
@@ -451,8 +575,11 @@ def main() -> int:
             write_source(os.path.join(copy_dir, src_base), apply_rewrites(src_text, args.src_rewrite))
             write_source(base_copy, test_copy_text)
         base_cmd = args.test_cmd.format(test=os.path.relpath(base_copy, root), filter='')
+        baseline['m_req'] = time.monotonic()
         with Locks(*lock_args, holder='mutate:baseline') as lk:
-            base_proc = run_test_cmd(base_cmd, root, copy_dir, tuple(lk.fds))
+            baseline['m_run'] = time.monotonic()
+            base_proc = run_test_cmd(base_cmd, root, copy_dir, batch_fds + tuple(lk.fds))
+        baseline['m_end'] = time.monotonic()
         base_out = base_proc.stdout + base_proc.stderr
         base_ran = tests_ran(base_out)
         if base_proc.returncode != 0 or base_ran == 0:
@@ -522,7 +649,7 @@ def main() -> int:
                 t_req, m_req = _now(), time.monotonic()
                 with Locks(*lock_args, holder=f"mutate:{m['label'][:40]}") as lk:
                     t_run, m_run = _now(), time.monotonic()
-                    proc = run_test_cmd(cmd, root, copy_dir, tuple(lk.fds))
+                    proc = run_test_cmd(cmd, root, copy_dir, batch_fds + tuple(lk.fds))
                 timings.append(dict(t_req=t_req, t_run=t_run, m_req=m_req, m_run=m_run,
                                     m_end=time.monotonic()))
                 out = proc.stdout + proc.stderr
@@ -546,6 +673,17 @@ def main() -> int:
                 matched = outcome == want
                 summary = next((ln.strip() for ln in out.splitlines() if ln.strip().startswith('Tests ')), '')
                 failing = [ln.strip() for ln in out.splitlines() if ln.strip().startswith('×') or ln.strip().startswith('FAIL ')][:4]
+                # `test` is a SUBSTRING filter, so a name that selects more than one test lets ANY
+                # of them do the killing — the mutant then reads "killed by its named test" whether
+                # or not the intended one ever ran. Require exactly one selected test whenever a
+                # filter is named; a count this cannot even parse is treated the same as "not one".
+                if name:
+                    n_sel = selected_tests(summary)
+                    if n_sel != 1:
+                        count = n_sel if n_sel is not None else 'an unparseable number of'
+                        print(f"MULTI-SELECT {m['label']}: filter \"{name}\" selected {count} tests (expected exactly 1)")
+                        results.append((m['label'], m['expect'], 'multi-select', False))
+                        continue
                 tag = 'OK  ' if matched else 'MISMATCH'
                 scope = '' if name or m['expect'] != 'killed' else '  UNSCOPED(whole file; set `test`)'
                 print(f"{outcome.upper():8} {tag} {m['label']}  (expect {m['expect']})  {summary}{scope}")
@@ -593,16 +731,26 @@ def main() -> int:
             # (rows_from_ledger keys starts by job id and takes the last one) and then closes the row
             # the skeleton above opened -- same job id, so an interrupted run leaves exactly one
             # unfinished job rather than one phantom plus one orphan.
-            m0 = timings[0]['m_run'] if timings else m_batch
-            t0 = timings[0]['t_run'] if timings else t_batch
-            t_req0 = timings[0]['t_req'] if timings else t_batch
+            # Anchored at the BATCH, never at the first mutant. Anchoring at `timings[0]` dropped
+            # the baseline suite -- often the single longest thing this command runs -- and the lock
+            # wait in front of it out of the row entirely, so a successful batch UNDER-reported its
+            # own wall-clock and the difference became unattributed gap.
+            m0, t0, t_req0 = m_batch, t_batch, t_batch
             span = max(0.0, time.monotonic() - m0)
+            base_wait = max(0.0, baseline.get('m_run', 0.0) - baseline.get('m_req', 0.0)) if baseline else 0.0
+            base_run = max(0.0, baseline.get('m_end', 0.0) - baseline.get('m_run', 0.0)) if baseline else 0.0
             note = (f'INTERRUPTED by signal {interrupted}; ' if interrupted else '')
             ledger_append(arc, dict(ev='start', t=t0, job=job, track=args.track, round=args.round,
                                     kind='mutant', name=job_name, cpu='light', pid=os.getpid(),
                                     t_req=t_req0,
-                                    queued_s=sum(max(0.0, e['m_run'] - e['m_req']) for e in timings),
+                                    queued_s=base_wait + sum(max(0.0, e['m_run'] - e['m_req'])
+                                                             for e in timings),
                                     mutants=len(timings), unscoped=len(unscoped),
+                                    # `reported` stays MUTANT-ONLY: lever L3 prices the marginal cost
+                                    # of one more mutant, and folding the baseline in would inflate
+                                    # that per-mutant figure by a constant. The baseline is its own
+                                    # field so the two never have to be separated by subtraction.
+                                    baseline_s=base_run,
                                     reported=sum(max(0.0, e['m_end'] - e['m_run']) for e in timings)))
             ledger_append(arc, dict(ev='end', t=t0 + span, job=job, rc=rc, span_s=span,
                                     reason=f'{note}{sum(1 for r in results if r[3])}/{len(results)} matched; rc={rc}'))
