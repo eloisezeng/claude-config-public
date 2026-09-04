@@ -32,7 +32,6 @@
 - [lavish-no-redisplay-answered-questions](lavish-no-redisplay-answered-questions.md) — in lavish surfaces, never re-display a question the user already answered
 - [mark-fixture-data](mark-fixture-data.md) — mark placeholder/stub data shaped like real data with a FIXTURE marker
 - [mermaid-id-collision-lavish](mermaid-id-collision-lavish.md) — v11 startOnLoad same-ms SVG ids collide in multi-diagram artifacts; render each with unique ids
-- [parse-xlsx-with-claude-for-excel](parse-xlsx-with-claude-for-excel.md) — use the Claude for Excel add-in to parse .xlsx files, not stdlib XML
 - [playwright-forcedcolors-fixture-noops](playwright-forcedcolors-fixture-noops.md) — `test.use({ forcedColors })` silently no-ops; use page.emulateMedia, assert the mode is ON as line one
 - [playwright-pins-page-visibility](playwright-pins-page-visibility.md) — visibilityState is pinned "visible" on every driven page; test hidden-tab behaviour in unit tests instead
 - [sqlite-prepare-resolves-tables-at-prepare-time](sqlite-prepare-resolves-tables-at-prepare-time.md) — table AND index names resolve at prepare(), before any guard; an unconditional INDEXED BY throws
