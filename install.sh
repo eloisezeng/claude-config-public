@@ -214,15 +214,15 @@ shq_in_dq() { printf '%s' "$1" | sed -e 's/[\\"`$]/\\&/g'; }
 # "it is already escaped over there" is never an answer. Enumerated with counts,
 # because whether every site got encoded is not a question you can answer by
 # looking at any one of them:
-#   * launchd plist (XML)  — 26 interpolations: 1 Label, 1 ProgramArguments
-#     script path, 22 WatchPaths, 2 log paths.  Encoder: xml_text.  The 22 is
+#   * launchd plist (XML)  — 27 interpolations: 1 Label, 1 ProgramArguments
+#     script path, 23 WatchPaths, 2 log paths.  Encoder: xml_text.  The 23 is
 #     ${#WATCH_ITEMS[@]} and both watchers loop over that ONE array, so this
 #     count moves when the array does — see the WATCH_ITEMS comment below.
 #   * systemd .service     — 1 interpolation: ExecStart.  Encoder: systemd_arg.
 #     Left bare, a repo at `/repo space/` generates `ExecStart=/repo space/sync.sh`
 #     whose executable token is `/repo`; the unit enables successfully and every
 #     sync then fails, which is the worst shape a bug can have.
-#   * systemd .path        — 22 interpolations: PathModified (same WATCH_ITEMS
+#   * systemd .path        — 23 interpolations: PathModified (same WATCH_ITEMS
 #     array as the plist above).  Encoder: systemd_path.
 #     These take a bare path and are NOT unquoted, so quoting them would make the
 #     quote characters part of the watched path; only `%` needs doubling.
@@ -527,7 +527,7 @@ fi
 # ONE array, two encoders (launchd XML below, systemd further down), so the two
 # platforms cannot drift apart. The rule is "every top-level entry except .git",
 # NOT a hand-picked shortlist. The old shortlist was CLAUDE.md, settings.json,
-# settings.linux.json, skills and memories — 5 of this repo's 22 entries — so an
+# settings.linux.json, skills and memories — 5 of this repo's 23 entries — so an
 # edit to sync.sh, hooks/, bin/, docs/ or plugins/ fired nothing at all and sat
 # unbacked until something happened to touch one of the five. Measured 2026-09-01:
 # 105 commits, four days, never pushed.
@@ -537,7 +537,7 @@ fi
 # this set against the real repo listing in both directions, so a forgotten entry
 # is a red test, not a silent gap.
 WATCH_ITEMS=(
-  CLAUDE.md AGENTS.md README.md .gitignore
+  CLAUDE.md AGENTS.md README.md LICENSE .gitignore
   settings.json settings.linux.json settings.windows.json
   install.sh sync.sh sync.ps1 watch.ps1 sync-memories.sh
   inject-global-memory.sh inject-global-memory.mjs inject-ops-lanes.sh

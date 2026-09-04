@@ -15,7 +15,16 @@ assert_absent()   { [ -e "$1" ] && { echo "FAIL[$2]: expected absent: $1"; fail=
 # spellings would fail on that resolution rather than on anything these cases are
 # about — and a `contains` check would pass by accident, since /private/var/x
 # contains /var/x as a substring.
-tmp="$(cd "$(mktemp -d)" && pwd -P)"; trap 'rm -rf "$tmp"' EXIT
+# mktemp failing is not hypothetical -- a full disk, a read-only or hostile TMPDIR -- and in the
+# `$(cd "$(mktemp -d)" && pwd -P)` shape the failure is SILENT and DESTRUCTIVE: bash treats
+# `cd ""` as a successful no-op, so tmp becomes the CURRENT directory and the EXIT trap below
+# deletes the checkout, uncommitted work included. Measured with mktemp stubbed to fail, not
+# reasoned about. Check it BEFORE canonicalising, and before arming the trap.
+tmp="$(mktemp -d)" || { printf '%s: cannot create a temp directory\n' "$0" >&2; exit 1; }
+[ -n "$tmp" ] && [ -d "$tmp" ] \
+  || { printf '%s: mktemp -d produced no directory\n' "$0" >&2; exit 1; }
+tmp="$(cd "$tmp" && pwd -P)"
+trap 'rm -rf "$tmp"' EXIT
 
 # install.sh is unix-only by design (symlinks + launchd/systemd). Where `ln -s`
 # silently copies, none of these assertions can hold — skip loudly.
@@ -154,7 +163,7 @@ g4root="$tmp/g4/home/$g4path/claude"
 # extra one -- and a watcher pointed at the backup file is invisible until syncs
 # stop. Written out by hand rather than recomputed from install.sh's WATCH_ITEMS:
 # a fixture that reads the array under test agrees with any edit to it.
-g4items='CLAUDE.md AGENTS.md README.md .gitignore
+g4items='CLAUDE.md AGENTS.md README.md LICENSE .gitignore
 settings.json settings.linux.json settings.windows.json
 install.sh sync.sh sync.ps1 watch.ps1 sync-memories.sh
 inject-global-memory.sh inject-global-memory.mjs inject-ops-lanes.sh

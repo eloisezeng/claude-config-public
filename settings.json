@@ -156,5 +156,5 @@
   "precomputeCompactionEnabled": true,
   "crossSessionInbound": "accept",
   "inputNeededNotifEnabled": true,
-  "agentPushNotifEnabled": false
+  "agentPushNotifEnabled": true
 }

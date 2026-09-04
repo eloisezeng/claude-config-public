@@ -141,9 +141,54 @@
         "installedAt": "2026-09-01T23:15:29.532Z",
         "lastUpdated": "2026-09-01T23:15:29.532Z"
       }
+    ],
+    "hookify@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/Users/your-org/.claude/plugins/cache/claude-plugins-official/hookify/1dd995193ba2",
+        "version": "1dd995193ba2",
+        "installedAt": "2026-09-04T01:48:41.801Z",
+        "lastUpdated": "2026-09-04T01:48:41.801Z"
+      }
+    ],
+    "pr-review-toolkit@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/Users/your-org/.claude/plugins/cache/claude-plugins-official/pr-review-toolkit/1dd995193ba2",
+        "version": "1dd995193ba2",
+        "installedAt": "2026-09-04T01:48:38.703Z",
+        "lastUpdated": "2026-09-04T01:48:38.703Z"
+      }
+    ],
+    "sonarqube@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/Users/your-org/.claude/plugins/cache/claude-plugins-official/sonarqube/2.5.0",
+        "version": "2.5.0",
+        "installedAt": "2026-09-04T01:48:41.239Z",
+        "lastUpdated": "2026-09-04T01:48:41.239Z",
+        "gitCommitSha": "e596969a083cf27bfe439ee2e9459f7ef4124a70"
+      }
     ]
   },
   "enabledPlugins": {
-    "context-mode@context-mode": true
+    "claude-md-management@claude-plugins-official": true,
+    "claude-mem@thedotmack": false,
+    "code-review@claude-plugins-official": true,
+    "code-simplifier@claude-plugins-official": true,
+    "codex@openai-codex": true,
+    "context-mode@context-mode": true,
+    "context7@claude-plugins-official": true,
+    "feature-dev@claude-plugins-official": true,
+    "frontend-design@claude-plugins-official": true,
+    "github@claude-plugins-official": true,
+    "hookify@claude-plugins-official": true,
+    "playwright@claude-plugins-official": true,
+    "pr-review-toolkit@claude-plugins-official": true,
+    "security-guidance@claude-plugins-official": true,
+    "skill-creator@claude-plugins-official": true,
+    "sonarqube@claude-plugins-official": true,
+    "superpowers@claude-plugins-official": true,
+    "typescript-lsp@claude-plugins-official": true
   }
 }

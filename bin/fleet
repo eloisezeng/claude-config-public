@@ -12,9 +12,30 @@
 
 set -uo pipefail
 BIN="$HOME/.claude/bin"
+# The helpers ship BESIDE this script. `fleet` is reached both through $BIN (a symlink at the
+# repo's bin/) and through ~/.local/bin/fleet (a symlink at the file), so resolve this script's
+# own link chain rather than assuming either path.
+SELF="$0"
+while [ -L "$SELF" ]; do
+  _l="$(readlink "$SELF")"
+  case "$_l" in /*) SELF="$_l" ;; *) SELF="$(cd "$(dirname "$SELF")" && pwd)/$_l" ;; esac
+done
+SELFDIR="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)" || SELFDIR="$BIN"
 LOG="$HOME/.claude/fleet-errors.log"
 ARGV="$*"
-TRUSTED="${CLAUDE_FLEET_DIR:-$HOME/Coding/your-other-project}"
+# The directory `claude agents` is launched from is DERIVED, not named -- see
+# bin/fleet-trusted-dir.sh. Resolved lazily and memoized in $TRUSTED / $TRUSTED_WHY, because most
+# fleet commands are read-only tails that never need it and would otherwise pay to scan every job
+# record. $TRUSTED is the empty string when nothing resolved; every caller below checks.
+TRUSTED=""; TRUSTED_WHY=""; TRUSTED_DONE=0
+ensure_trusted() {
+  [ "$TRUSTED_DONE" -eq 1 ] && return 0
+  TRUSTED_DONE=1
+  local out
+  out="$("$SELFDIR/fleet-trusted-dir.sh" --why 2>/dev/null)" || out=""
+  TRUSTED="$(printf '%s' "$out" | sed -n 1p)"
+  TRUSTED_WHY="$(printf '%s' "$out" | sed -n 2p)"
+}
 RV="/tmp/cc-daemon-$(id -u)"
 
 # VS Code terminal profiles launch this binary with NO shell, so ~/.zshrc never runs and PATH is
@@ -77,13 +98,24 @@ case "${1:-}" in
     echo "  this script  : $0"
     echo "  node         : ${NODE:-*** NOT FOUND ***} $([ -n "$NODE" ] && "$NODE" -v 2>/dev/null)"
     echo "  claude       : ${CLAUDE:-*** NOT FOUND ***}"
-    echo "  trusted dir  : $TRUSTED $([ -d "$TRUSTED" ] && echo '(exists)' || echo '*** MISSING ***')"
+    ensure_trusted
+    if [ -z "$TRUSTED" ]; then
+      echo "  trusted dir  : *** UNRESOLVED *** (no CLAUDE_FLEET_DIR, no usable job record, no repo)"
+    else
+      # The PROVENANCE is half the report. "live" means a session is running there right now;
+      # "historical" means the evidence is a finished session; "repo" means there was no session
+      # evidence at all and this is the config checkout. Without it, a wrong-looking directory is
+      # indistinguishable from a right one.
+      echo "  trusted dir  : $TRUSTED [$TRUSTED_WHY] $([ -d "$TRUSTED" ] && echo '(exists)' || echo '*** MISSING ***')"
+    fi
     # DERIVED from what the entrypoints actually import, never hand-maintained. The literal
     # list this replaces named three files and had ALREADY gone stale: fleet-flags.mjs became a
     # dependency of both viewers and was never added here, so a partial install printed three
     # cheerful `ok` lines and then died on a missing import. A doctor that cannot see a missing
     # dependency is worse than no doctor -- it certifies the broken install.
-    deps="fleet-watch.mjs fleet-tail.mjs fleet-open.sh"
+    # fleet-trusted-dir.sh is EXEC'd, not imported, so no derivation can find it -- and a
+    # partial install without it leaves `fleet write` with no directory to launch from.
+    deps="fleet-watch.mjs fleet-tail.mjs fleet-open.sh fleet-trusted-dir.sh"
     for e in fleet-watch.mjs fleet-tail.mjs; do
       [ -f "$BIN/$e" ] || continue
       # Either quote style, and any relative specifier -- './x.mjs' and '../lib/x.mjs' both.
@@ -238,8 +270,15 @@ case "${1:-}" in
       "This is exactly why 'fleet write' fails to open from a VS Code terminal profile:" \
       "profiles run with no shell, so ~/.zshrc never sets PATH." \
       "Looked in: PATH, ~/.local/bin, /opt/homebrew/bin, /usr/local/bin."
-    [ -d "$TRUSTED" ] || die "CLAUDE_FLEET_DIR ($TRUSTED) does not exist" \
-      "Point it at a Claude-trusted repo: export CLAUDE_FLEET_DIR=\$HOME/Coding/your-other-project"
+    ensure_trusted
+    [ -n "$TRUSTED" ] || die "no directory to launch 'claude agents' from" \
+      "It is normally derived from the directories your Claude sessions have run in;" \
+      "none of them resolved. Name one explicitly:" \
+      "  export CLAUDE_FLEET_DIR=/path/to/a/repo/you/have/used/claude/in" \
+      "Run 'fleet doctor' to see what was resolved and from where."
+    [ -d "$TRUSTED" ] || die "the trusted directory ($TRUSTED, from: $TRUSTED_WHY) does not exist" \
+      "If that came from CLAUDE_FLEET_DIR, point it at a repo Claude has folder-trust for." \
+      "Run 'fleet doctor' to see what was resolved and from where."
     cd "$TRUSTED" || die "cannot cd to $TRUSTED"
     exec "$CLAUDE" agents ;;
 
@@ -330,9 +369,15 @@ case "${1:-}" in
       anc="$cwd"
       while [ "$anc" != "/" ] && [ ! -d "$anc" ]; do anc="$(dirname "$anc")"; done
       case "$anc" in
-        "$HOME"|"/"|"") cwd="$TRUSTED" ;;
-        "$HOME"/*)      cwd="$anc" ;;
-        *)              cwd="$TRUSTED" ;;
+        "$HOME"/*) cwd="$anc" ;;
+        # $HOME itself, "/" and anything outside $HOME are all refused above, so fall back to
+        # the derived trusted directory. It can be empty (nothing resolved), and an empty --cwd
+        # is not a narrowing at all -- so refuse rather than widen to the whole machine.
+        *) ensure_trusted
+           [ -n "$TRUSTED" ] || die "the session's directory is gone and no trusted directory resolved" \
+             "Set one explicitly: export CLAUDE_FLEET_DIR=/path/to/a/repo" \
+             "Run 'fleet doctor' to see what was resolved and from where."
+           cwd="$TRUSTED" ;;
       esac
       # Still WIDENED, and still says so: whatever we narrowed to, it is not the
       # folder this session is running in, so the header may not promise a narrowing.

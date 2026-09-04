@@ -12,8 +12,24 @@
 
 set -euo pipefail
 
-WS="$HOME/.claude/fleet.code-workspace"
+# Overridable so a test can assert the GENERATED artifact without overwriting the workspace the
+# user has open. Asserting against the source text instead would pass on a script that never
+# reaches this line.
+WS="${FLEET_WORKSPACE:-$HOME/.claude/fleet.code-workspace}"
 TAIL="$HOME/.claude/bin/fleet-tail.mjs"
+
+# The cwd for the interactive `claude agents` task is DERIVED, not named -- see
+# bin/fleet-trusted-dir.sh. This used to be a hardcoded personal project path with no override at
+# all, so the one writable task in the generated workspace pointed at a directory that only
+# existed on one machine. Resolved here in bash and passed into the heredoc through the
+# environment, because writing the rule a second time in Python is the defect, not the fix.
+SELF="$0"
+while [ -L "$SELF" ]; do
+  _l="$(readlink "$SELF")"
+  case "$_l" in /*) SELF="$_l" ;; *) SELF="$(cd "$(dirname "$SELF")" && pwd)/$_l" ;; esac
+done
+SELFDIR="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)" || SELFDIR="$HOME/.claude/bin"
+TRUSTED="$("$SELFDIR/fleet-trusted-dir.sh" 2>/dev/null)" || TRUSTED=""
 VSCODE="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
 
 SPLIT=0; MAXAGE=60; PRINT_ONLY=0
@@ -29,13 +45,14 @@ done
 
 [[ -f "$TAIL" ]] || { echo "fleet-open: missing $TAIL" >&2; exit 1; }
 
-SPLIT=$SPLIT MAXAGE=$MAXAGE WS="$WS" TAIL="$TAIL" python3 - <<'PY'
-import json, os, glob, time
+SPLIT=$SPLIT MAXAGE=$MAXAGE WS="$WS" TAIL="$TAIL" TRUSTED="$TRUSTED" python3 - <<'PY'
+import json, os, glob, sys, time
 
 split   = os.environ['SPLIT'] == '1'
 maxage  = float(os.environ['MAXAGE']) * 60
 ws_path = os.environ['WS']
 tail    = os.environ['TAIL']
+trusted = os.environ.get('TRUSTED', '')
 home    = os.path.expanduser('~')
 
 sessions = []
@@ -113,15 +130,30 @@ for s in sessions:
     })
 
 # INTERACTIVE: the built-in fleet view is the only surface that can talk back.
-tasks.append({
-    'label': '\u2630 Fleet view (claude agents) \u2014 interactive',
-    'type': 'shell',
-    'command': 'claude agents',
-    'options': {'cwd': os.path.expanduser('~/code/your-other-project')},
-    'presentation': {'reveal': 'always', 'panel': 'dedicated',
-                     'showReuseMessage': False, 'clear': True, 'echo': False},
-    'problemMatcher': [],
-})
+# Omitted entirely when nothing resolved. A task with no cwd runs in whatever directory VS Code
+# happens to open the workspace at — which can be $HOME, the one place `claude agents` must never
+# be launched from, because it widens the picker to every session on the machine.
+#
+# The resolver returns an explicit CLAUDE_FLEET_DIR override even when it names nothing that
+# exists, deliberately, so the caller can report the typo instead of hiding it. Reporting is this
+# caller's job too: a task whose options.cwd does not exist cannot start, and VS Code says so with
+# an error that names neither the override nor this file. `fleet write` already refuses the same
+# state, so writing it here would leave the two write surfaces disagreeing about one input.
+if trusted and not os.path.isdir(trusted):
+    print(f"fleet-open: not adding the interactive fleet task — the resolved directory "
+          f"{trusted!r} does not exist (check CLAUDE_FLEET_DIR)", file=sys.stderr)
+    trusted = ''
+
+if trusted:
+    tasks.append({
+        'label': '\u2630 Fleet view (claude agents) \u2014 interactive',
+        'type': 'shell',
+        'command': 'claude agents',
+        'options': {'cwd': trusted},
+        'presentation': {'reveal': 'always', 'panel': 'dedicated',
+                         'showReuseMessage': False, 'clear': True, 'echo': False},
+        'problemMatcher': [],
+    })
 
 tasks.append({
     'label': '\u25b6 Every session as its own tab',
