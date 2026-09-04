@@ -151,12 +151,29 @@ mkdir -p "$tmp/n6/home/.claude"
 stub_bin "$tmp/n6/bin" "$tmp/n6/afplay.log"
 # Gates ON: each ringing type must reach afplay with its own sound.
 for g in $WANT; do : > "$tmp/n6/home/.claude/$g"; done
-for pair in "agent_needs_input:Glass" "agent_completed:Pop" "idle_prompt:Glass"; do
+for pair in "agent_needs_input:Glass" "idle_prompt:Glass"; do
   ntype="${pair%%:*}"; want_snd="${pair##*:}"
   : > "$tmp/n6/afplay.log"
   fire "$tmp/n6/home" "$tmp/n6/bin" "$ntype"
   assert_contains "/System/Library/Sounds/$want_snd.aiff" "$(cat "$tmp/n6/afplay.log")" "N6-$ntype"
 done
+# agent_completed must ring NOTHING even with every gate ON ("the chime shouldn't
+# ring when a background agent finishes", 2026-09-04). Asserted with the gates ON
+# because that is the only state where the bug is reachable: every type falling
+# past the explicit cases hits the fail-open generic ring, so a hook that merely
+# DROPPED agent_completed from the fleet case would still chime here -- and would
+# announce it as "Claude needs your input". A gates-off assertion could not tell
+# the two implementations apart.
+for g in $WANT; do : > "$tmp/n6/home/.claude/$g"; done
+: > "$tmp/n6/afplay.log"
+fire "$tmp/n6/home" "$tmp/n6/bin" "agent_completed"
+assert_eq "$(cat "$tmp/n6/afplay.log")" "" N6-agent_completed-silent
+# ...and the silence is RECORDED, so a suppressed event stays countable rather
+# than being indistinguishable from an event that never arrived -- the exact
+# ambiguity that hid the dead gates for months.
+assert_contains '"notification_type":"agent_completed"' \
+  "$(cat "$tmp/n6/home/.claude/hook-events.log" 2>/dev/null)" N6-agent_completed-logged
+
 # Control: with the gates removed the SAME probe must record nothing. Without
 # this, N6 would pass against a hook that rang unconditionally.
 for g in $WANT; do rm -f "$tmp/n6/home/.claude/$g"; done

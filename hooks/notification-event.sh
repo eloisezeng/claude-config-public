@@ -36,14 +36,14 @@
 # They DO double up on a terminal that raises its own OS toast from the escape
 # sequence (iTerm2, kitty, ghostty). On such a terminal pick one surface: remove
 # the gate files below, or set preferredNotifChannel to notifications_disabled.
-# Until now this hook muted agent_completed outright (it was in the same
-# blanket case as task_completed) and gave agent_needs_input a content-free
-# "Claude needs your input" chime naming neither the session nor the ask,
-# even though the payload carries a usable summary. Both now ring with the
-# payload's own message and the project it came from.
+# agent_needs_input used to get a content-free "Claude needs your input" chime
+# naming neither the session nor the ask, even though the payload carries a
+# usable summary; it now rings with the payload's own message and the project it
+# came from. agent_completed rang alongside it from 2026-08-30 until 2026-09-04,
+# when it was silenced again -- see the suppression case below for why.
 #
 # TWO GATES, deliberately independent:
-#   ~/.claude/.enable-fleet-notif  -> agent_needs_input + agent_completed
+#   ~/.claude/.enable-fleet-notif  -> agent_needs_input
 #   ~/.claude/.enable-stop-notif   -> the generic ring for everything else
 # Separate so turning the generic chime off cannot silently kill the fleet
 # events. Permission prompts and unknown types still ring (fail OPEN) so a
@@ -68,8 +68,23 @@ fi
 
 NTYPE=$(printf '%s' "$IN" | sed -n 's/.*"notification_type":"\([A-Za-z0-9_]*\)".*/\1/p' | head -1)
 
+# 2026-09-04, "the chime shouldn't ring when a background agent finishes": a
+# finish asks nothing of her, and agentPushNotifEnabled already carries it to her
+# phone for the walk-away case. It is suppressed EXPLICITLY, and HERE, rather than
+# by dropping it from the fleet case below -- every type that falls past these
+# cases reaches the fail-open generic ring at the foot of this file, so a mere
+# deletion would still chime, and would do it with the wrong "Claude needs your
+# input" text. Logged, so a silenced event is still countable in hook-events.log.
 case "$NTYPE" in
-  agent_needs_input|agent_completed)
+  agent_completed)
+    printf '%s {"hook_event_name":"NotificationSuppressed","notification_type":"agent_completed","reason":"a-finish-asks-nothing-of-her"}\n' \
+      "$(date +%FT%T)" >> "$HOME/.claude/hook-events.log"
+    [ -n "${CLAUDE_NOTIF_DEBUG:-}" ] && echo "SUPPRESS (agent_completed)"
+    exit 0 ;;
+esac
+
+case "$NTYPE" in
+  agent_needs_input)
     [ -f "$HOME/.claude/.enable-fleet-notif" ] || { [ -n "${CLAUDE_NOTIF_DEBUG:-}" ] && echo "FLEET-OFF ($NTYPE)"; exit 0; }
     # Decode with python3 (handles \uXXXX and embedded quotes); if it is not
     # on the scheduler's PATH, fall back to a plain-text label rather than
@@ -83,11 +98,7 @@ except Exception:
     [ -n "$MSG" ] || MSG="(unreadable payload -- see ~/.claude/hook-events.log)"
     PROJ=$(printf '%s' "$IN" | sed -n 's/.*"cwd":"\([^"]*\)".*/\1/p' | head -1)
     PROJ=${PROJ##*/}; [ -n "$PROJ" ] || PROJ="claude"
-    if [ "$NTYPE" = "agent_needs_input" ]; then
-      TITLE="Needs you - $PROJ"; SOUND="Glass"
-    else
-      TITLE="Finished - $PROJ";  SOUND="Pop"
-    fi
+    TITLE="Needs you - $PROJ"; SOUND="Glass"
     if [ -n "${CLAUDE_NOTIF_DEBUG:-}" ]; then echo "RING-FLEET [$TITLE] $MSG"; else ring "$MSG" "$TITLE" "$SOUND"; fi
     exit 0 ;;
 esac
