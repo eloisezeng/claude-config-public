@@ -54,7 +54,7 @@ what made the property observable. The both-green case is there to prove the rul
 just failable.
 
 **The presence half then failed its own satisfiability test — twice, in `ci-green.sh` itself.**
-Measured 2026-09-01 on `your-companyAI/your-other-project` PR #339:
+Measured 2026-09-01 on `your-org/your-other-project` PR #339:
 
 - It hard-coded `GH_TOKEN=$(gh auth token --user your-org)`, an account with no read on that org's
   repo. The `check-runs` call 404'd, the unchecked redirect left an EMPTY `runs.tsv`, and the
@@ -79,7 +79,7 @@ auth bug, and the *positive* one (real repo → must yield a real verdict) surfa
 set. Running only the failure side would have left a detector that could never say GREEN.
 
 **A check-run's `status` and its `conclusion` can disagree, and the fix's own strictness became
-the fourth fail-CLOSED.** Measured 2026-09-02 on `your-companyAI/your-other-project` sha `0f566b00`:
+the fourth fail-CLOSED.** Measured 2026-09-02 on `your-org/your-other-project` sha `0f566b00`:
 `repos/.../commits/<sha>/check-runs` served the job `deploy freeze check` as
 `status="in_progress"` **with** `conclusion="success"`, while the workflow run itself read
 `completed`/`success` and the other 23 check-runs all read `completed`/`success`. `ci-derive.py`

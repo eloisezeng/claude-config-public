@@ -218,7 +218,7 @@ d=$(dupe_case dupe_both_green completed success completed success)
 case_run "duplicate names, BOTH green -> GREEN (the rule is satisfiable)" 0 "VERDICT: GREEN" "$d"
 
 # 16. MATRIX EXPANSION. A matrix job's `name:` is a template and GitHub registers one check per leg.
-#     Measured 2026-09-01 on your-companyAI/your-other-project: taking the template literally put
+#     Measured 2026-09-01 on your-org/your-other-project: taking the template literally put
 #     `e2e (chromium layout) ${{ matrix.shard }}/${{ matrix.shardTotal }}` in the required set -- a
 #     name no check-run can ever carry -- so the predicate reported NOT-GREEN forever. This case is
 #     the SATISFIABILITY control for expansion: the legs are present, so it must go GREEN.
@@ -271,7 +271,7 @@ case_run "unresolvable templated name -> NOT-GREEN (incomplete set, not a pass)"
 
 
 # 19-21. A CHECK-RUN CAN CARRY A CONCLUSION WHILE ITS `status` STILL SAYS in_progress.
-#     REAL captured output, 2026-09-02, your-companyAI/your-other-project sha 0f566b00: the job
+#     REAL captured output, 2026-09-02, your-org/your-other-project sha 0f566b00: the job
 #     `deploy freeze check` was served as status="in_progress" conclusion="success" while the
 #     workflow run itself was completed/success and the other 23 check-runs all read
 #     completed/success. A predicate keyed on status=="completed" reports NOT-GREEN forever on

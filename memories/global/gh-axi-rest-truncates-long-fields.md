@@ -44,3 +44,13 @@ So: never scrape `gh-axi` with a regex written for `gh`, and give every poll loo
 expect) — a poller with no blind arm cannot distinguish "done" from "read nothing".
 
 **Indent depth depends on the SHAPE of the response, and a grep that assumes one depth silently returns nothing.** Measured 2026-08-30, twice in one session: `gh-axi api repos/.../actions/runs/<id>` prints a single object's fields at **zero** indent (`id:`, `status:`, `head_sha:`), while a LIST response indents item fields (`- id:` on the list-item line, nested objects deeper). So `grep -E '^\s+status:'` matches nothing on a single-run read, and the watcher polls blind forever printing empty values that read as "not started yet" rather than as a parse failure — the second time, it cost a full background watcher that had to be killed and re-armed. Read the raw head of the response once and write the grep against what it actually prints; make an empty extraction FAIL LOUDLY rather than loop.
+
+**`run list --branch <b>` does not order by recency.** Measured 2026-09-04 on
+`your-org/your-other-project`: seconds after a merge, `gh-axi run list --branch main --limit 8`
+returned runs from **27–29 days ago** as its eight newest rows, with the just-created run absent
+entirely. The same moment, `--workflow=<file>.yml` returned the new run as row 1 (`just now`), and
+`api "…/actions/runs?head_sha=<sha>"` returned exactly the two runs pinned by that commit. So when
+you need the run YOUR push triggered — which is the only run worth watching
+(`[[watch-the-run-you-triggered]]`) — select it by `head_sha` or by workflow, never by branch plus
+recency. A branch listing that silently omits the run you are looking for is the same confident-zero
+failure as the truncation above.

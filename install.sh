@@ -523,6 +523,55 @@ if [[ -d "$REPO_DIR/memories" ]]; then
   restore_memories "$REPO_DIR/memories"
 fi
 
+# --- macOS: local desktop-notification gates ----------------------------------
+# hooks/notification-event.sh raises an osascript banner ONLY when its gate file
+# exists, and on macOS nothing else delivers a local alert: Claude Code's own
+# `preferredNotifChannel` emits a terminal ESCAPE SEQUENCE, not an OS banner, and
+# in VS Code's integrated terminal it resolves to `no_method_available`. So an
+# install that skips this step is completely silent, and silence is
+# indistinguishable from "no events happened" -- measured 2026-09-04 on this
+# machine: 36 Notification events (21 idle_prompt, 8 agent_completed,
+# 4 agent_needs_input, 2 permission_prompt, 1 push_notification) fired into a
+# hook whose two gates had never been created by anything.
+#
+# The names are DERIVED from the hook, never retyped. A hand-copied list is
+# exactly how docs/replicate-setup-prompt.md came to instruct the reader to
+# create `.enable-response-ready-notif`, a gate the hook had stopped reading.
+# Deriving means renaming a gate in the hook cannot leave the installer behind.
+#
+# Set SKIP_NOTIF_FLAGS=1 on a terminal that already raises its own OS toast from
+# the escape sequence (iTerm2, kitty, ghostty), where the two would double-ring.
+if [[ "$(uname)" == "Darwin" && "${SKIP_NOTIF_FLAGS:-0}" != "1" ]]; then
+  # Scan EVERY hook, not just notification-event.sh: the turn-end chime lives in
+  # stop-event.sh behind its own gate, and a derivation that reads one hook would
+  # silently leave that one uncreated -- the same class of gap this block exists
+  # to close. The set is derived from the directory, so a new gated hook is
+  # picked up without editing this list.
+  if [[ ! -d "$REPO_DIR/hooks" ]]; then
+    echo "WARNING: $REPO_DIR/hooks missing - desktop notifications will be silent" >&2
+  else
+    NOTIF_FLAGS=()
+    while IFS= read -r f; do [[ -n "$f" ]] && NOTIF_FLAGS+=("$f"); done < <(
+      grep -rho '\.claude/\.enable-[a-z0-9-]*-notif' "$REPO_DIR/hooks" | sed 's|.*/||' | sort -u
+    )
+    # Fail CLOSED on an empty derived set: the hook is present but names no gate,
+    # which means this derivation broke, not that notifications are unwanted.
+    if (( ${#NOTIF_FLAGS[@]} == 0 )); then
+      echo "ERROR: no .enable-*-notif gates found in $REPO_DIR/hooks - derivation is stale" >&2
+      exit 1
+    fi
+    mkdir -p "$HOME/.claude"
+    for f in "${NOTIF_FLAGS[@]}"; do
+      if [[ -e "$HOME/.claude/$f" ]]; then
+        echo "Notification gate already on: $f"
+      else
+        : > "$HOME/.claude/$f"
+        echo "Enabled notification gate: $f"
+      fi
+    done
+  fi
+fi
+
 # --- What the auto-sync watchers watch ----------------------------------------
 # ONE array, two encoders (launchd XML below, systemd further down), so the two
 # platforms cannot drift apart. The rule is "every top-level entry except .git",

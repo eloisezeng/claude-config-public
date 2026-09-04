@@ -52,14 +52,19 @@
 IN=$(cat)
 printf '%s %s\n' "$(date +%FT%T)" "$IN" >> "$HOME/.claude/hook-events.log"
 
-# Pass text to osascript as ARGUMENTS, never interpolated into the script
-# source: a message containing a quote would otherwise break the AppleScript
-# (or inject into it). argv keeps it data.
-ring() { # ring <message> <title> <sound>
-  osascript -e 'on run argv' \
-            -e 'display notification (item 1 of argv) with title (item 2 of argv) sound name (item 3 of argv)' \
-            -e 'end run' -- "$1" "$2" "$3" >/dev/null 2>&1 || true
-}
+# ONE shared alert channel, defined in hooks/notif-ring.sh and IMPORTED here.
+# Never copied: a second copy is exactly how this hook and stop-event.sh drifted
+# apart, leaving the other one silently on the banner-only path. An unresolvable
+# import RAISES -- losing every local alert must not look like a quiet success.
+RING_LIB="$(dirname "$0")/notif-ring.sh"
+if [ -r "$RING_LIB" ]; then
+  . "$RING_LIB"
+else
+  printf '%s {"hook_event_name":"NotifRingLibMissing","hook":"notification-event","path":"%s"}\n' \
+    "$(date +%FT%T)" "$RING_LIB" >> "$HOME/.claude/hook-events.log"
+  echo "notification-event.sh: cannot source $RING_LIB - local alerts are DEAD" >&2
+  exit 1
+fi
 
 NTYPE=$(printf '%s' "$IN" | sed -n 's/.*"notification_type":"\([A-Za-z0-9_]*\)".*/\1/p' | head -1)
 

@@ -24,3 +24,21 @@ metadata:
 - Post-launch verification races `claude agents --json` registration; on loss the dispatch exits `state=unknown` BEFORE the auto-arm line, so no stall-watchdog is armed. Repair: append `watch_gen=<token of [0-9A-Za-z._-]>` then `nohup handoff.sh --watch <record> --watch-gen <token> --heartbeat-min 20 --poll-sec 60 &`; proof of arming is the watcher clearing/holding markers on its next poll, not the fork returning.
 
 Related: [[worker-liveness-must-reflect-progress]], [[handoff-at-boundaries-saves-tokens]].
+
+**And the converse does NOT hold: marking `state.json` `failed` does not stop a live seat.**
+Measured 2026-09-04 on job `ef6bc042`, 1 minute after dispatch. Its record carried `pid: null` —
+the daemon owns the process, not the record — so flipping `state` to `failed` and writing a
+`retired-by-decision` detail changed nothing: `claude agents --json` still read `working` 25 s
+later. The state edit is the half that makes a kill STICK; it is not itself a kill, and with no
+pid in the record there is nothing to kill from it.
+
+The hazard this creates is worse than the failed attempt. A live seat left marked
+`failed / retired-by-decision` reads as a corpse that must never be revived, so a later revival
+wave will refuse to wake a perfectly healthy session — and `retired-by-decision` is the one detail
+that is never revivable. If a stop attempt does not take, **restore the record to the truth**
+before moving on.
+
+Corollary for tier: a bg seat exports `CLAUDE_HANDOFF_MODEL`, so every seat it dispatches inherits
+the parent's tier and beats `handoff.sh`'s Fable default. Fix that by passing
+`--model 'claude-fable-5[1m]'` AT DISPATCH TIME. After the fact there is no cheap correction —
+re-dispatching means killing a seat you cannot reach through its own record.

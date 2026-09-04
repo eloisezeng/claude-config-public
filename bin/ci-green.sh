@@ -12,7 +12,7 @@ if [ "$#" -lt 1 ]; then
   echo "usage: ci-green.sh <sha> [base-ref]" >&2; exit 2
 fi
 # Do NOT hard-code an account. Measured 2026-09-01: a pinned `--user your-org` token 404s on
-# your-companyAI/your-other-project, which the active account reads fine -- and a private repo answers 404
+# your-org/your-other-project, which the active account reads fine -- and a private repo answers 404
 # for "you may not read this" byte-identically to "it is not there", so the wrong account turns a
 # permission failure into a CI verdict. Honour an ambient GH_TOKEN, else CI_GREEN_GH_USER, else the
 # account `gh` is actually active as.

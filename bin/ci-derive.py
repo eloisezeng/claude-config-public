@@ -67,7 +67,7 @@ if missing: why.append(f"workflow jobs never registered: {sorted(missing)}")
 if not rows: why.append("no check-runs at all")
 for n, st, cc, rid in rows:
     # A check-run that carries a CONCLUSION is FINISHED, whatever its `status` field says. Measured
-    # 2026-09-02 on your-companyAI/your-other-project sha 0f566b00: GitHub served the job
+    # 2026-09-02 on your-org/your-other-project sha 0f566b00: GitHub served the job
     # `deploy freeze check` as status="in_progress" WITH conclusion="success", while the run itself
     # was completed/success and every other job read completed/success. Requiring status=="completed"
     # therefore reported NOT-GREEN forever and a watcher timed out ~40 min after CI had gone green.
