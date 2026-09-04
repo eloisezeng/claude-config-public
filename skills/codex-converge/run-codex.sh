@@ -239,6 +239,25 @@ IDLE_WINDOW="$(_posint "${RUN_CODEX_IDLE_WINDOW:-25}" RUN_CODEX_IDLE_WINDOW)" ||
 STALL_LIMIT="$(_posint "${RUN_CODEX_STALL_LIMIT:-$DEFAULT_STALL_LIMIT}" RUN_CODEX_STALL_LIMIT)" || exit 2  # consecutive idle windows before we kill (~150s read-only, ~600s --write; override via env for runs with long silent final composition)
 REAP_LIMIT=15     # seconds to wait at each escalation step before giving up
 
+# Wait up to $1 seconds for the next liveness check, returning the moment the child is gone.
+# This was a bare `sleep "$POLL"`, which slept the WHOLE interval even when codex had already
+# exited milliseconds in -- so every run paid a full poll of dead time at the end, and every
+# RETRY paid it again. Measured 2026-09-04: tests/codex-loop.test.sh takes 841s, of which ~300s
+# is this sleep across ~33 launcher invocations whose stub exits instantly (23 gaps of 10-11s =
+# one poll each, 10 gaps of 29-32s = a three-attempt run) -- more than the 143s 94-mutant
+# battery, and the reason the suite sat at 7% under the 900s run-all ceiling.
+# The watchdog's JUDGEMENT is unchanged: the idle/stall accounting below still runs once per
+# COMPLETED poll of a living child, and returning early only hands that accounting a fresher
+# log than it would otherwise have read.
+poll_wait() {
+  _left="$1"
+  while [ "$_left" -gt 0 ]; do
+    kill -0 "$C_PID" 2>/dev/null || return 0
+    sleep 1
+    _left=$((_left - 1))
+  done
+}
+
 [ -f "$PROMPT" ] || { echo "run-codex: prompt file not found: $PROMPT" >&2; exit 2; }
 [ -d "$WORKDIR" ] || { echo "run-codex: workdir not found: $WORKDIR" >&2; exit 2; }
 [ -d "$OUT" ] && { echo "run-codex: <out-file> is a directory: $OUT" >&2; exit 2; }
@@ -497,7 +516,7 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
   STALE=0; KILLED=0
 
   while kill -0 "$C_PID" 2>/dev/null; do
-    sleep "$POLL"
+    poll_wait "$POLL"
     if find "$LOG" -newermt "-${IDLE_WINDOW} seconds" 2>/dev/null | grep -q .; then
       STALE=0
     else

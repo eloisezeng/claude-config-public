@@ -56,6 +56,16 @@ done
 # backgrounds ~20 pollers, so it is exactly the one that stretches under load. A ceiling here is
 # a hang-stopper, not an assertion about speed, so buy the headroom; a TIMEOUT that means "the
 # machine was busy" trains people to ignore the word.
+#
+# Measured runtimes of the two suites that get anywhere near this cap, so the next person can see
+# the margin without re-timing them (machine to itself, no cap):
+#   tests/handoff.test.sh    436s  (2026-09-01)  -- 48% of 900s
+#   tests/codex-loop.test.sh 539s  (2026-09-04)  -- 60% of 900s, 301 assertions
+# codex-loop was 841s and TIMED OUT here on 2026-09-04 at 93% of the cap. It was not the suite
+# that had grown too slow: run-codex.sh polled its child with a blind `sleep "$POLL"`, so each of
+# the ~33 launcher calls whose stub exits instantly sat out a full 10s poll, and each retry sat
+# out another. The fix is `poll_wait` in run-codex.sh, which returns as soon as the child is gone.
+# Raise this number only against a fresh measurement written above it, never to quiet a red.
 SUITE_TIMEOUT="${RUN_ALL_TIMEOUT:-900}"
 run_capped() {
   perl -e '

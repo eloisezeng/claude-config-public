@@ -1843,5 +1843,32 @@ check "a negative RUN_CODEX_STALL_LIMIT is refused (rc 2, got $rc_sl)" test "$rc
 check "the refusal names that variable too" grep -q 'RUN_CODEX_STALL_LIMIT must be' "$SANDBOX/stderr"
 check "the refused stall limit never reached codex" test ! -e "$CODEX_STUB_MARKER"
 
+# --- 50. the poll waits for the CHILD, not for the clock
+# The liveness loop used a bare `sleep "$POLL"`, so a run whose codex had already exited still sat
+# out the whole interval -- once per attempt, on every launch. Nothing here could see that: the
+# wedge test above passes whether the poll sleeps or busy-spins, and the chatty control passes
+# either way too, because its log is refreshed faster than the idle window in both. So both
+# directions are pinned here, and neither asserts a duration the machine has to be fast enough to
+# meet: the lower bound is a sleep the launcher was TOLD to take, and the upper bound is a 30s
+# knob checked against a 15s ceiling for a run that should finish in about one second.
+echo "== 50. a finished child does not cost a whole poll, and the poll still waits"
+t0=$(date +%s)
+CODEX_STUB_MODE= RUN_CODEX_POLL=30 RUN_CODEX_IDLE_WINDOW=25 RUN_CODEX_STALL_LIMIT=15 \
+  WORKDIR="$SANDBOX/plain" launch --one-off -- -p sol; rc_fast=$?
+fast=$(( $(date +%s) - t0 ))
+check "a run whose codex exits at once still succeeds (rc 0, got $rc_fast)" test "$rc_fast" -eq 0
+check "and returns without sitting out its 30s poll (took ${fast}s, want < 15)" test "$fast" -lt 15
+
+# The control for that: with the child alive and silent, the kill must not arrive before the
+# budget it was given (POLL x STALL_LIMIT = 4s, and a killed run is retried twice more). A
+# busy-spinning poll would kill it immediately and still satisfy every
+# existing assertion in section 49.
+t0=$(date +%s)
+RUN_CODEX_POLL=2 RUN_CODEX_IDLE_WINDOW=1 RUN_CODEX_STALL_LIMIT=2 CODEX_STUB_MODE=silent \
+  CODEX_STUB_SLEEP=30 WORKDIR="$SANDBOX/plain" launch --one-off -- -p sol; rc_slow=$?
+slow=$(( $(date +%s) - t0 ))
+check "control: a silent run is still killed (rc $rc_slow, non-zero)" test "$rc_slow" -ne 0
+check "control: and not before its 4s budget (took ${slow}s, want >= 3)" test "$slow" -ge 3
+
 [ "$fail" -eq 0 ] && echo "codex-loop: all checks passed" || echo "codex-loop: FAILURES"
 exit "$fail"
