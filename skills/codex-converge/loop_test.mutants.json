@@ -40,5 +40,19 @@
     "new": "    return sorted(samples)[1]\n",
     "expect": "killed",
     "test": "test_the_sample_rule_rejects_one_outlier_and_keeps_its_floor"
+  },
+  {
+    "label": "R3-TEST11-all-producers-liveness One exited producer incorrectly aborts a wait while another producer is still live",
+    "old": "all(p.poll() is not None for p in procs)",
+    "new": "any(p.poll() is not None for p in procs)",
+    "expect": "killed",
+    "test": "TestLivenessDeadlines.test_one_exited_producer_does_not_fail_a_second_live_producer"
+  },
+  {
+    "label": "R3-TEST15-calibration-three-samples Calibration takes only two observations and cannot reject one outlier by median-of-three",
+    "old": "for _ in range(3):",
+    "new": "for _ in range(2):",
+    "expect": "killed",
+    "test": "TestLivenessDeadlines.test_calibration_takes_exactly_three_observations_and_rejects_one_outlier"
   }
 ]

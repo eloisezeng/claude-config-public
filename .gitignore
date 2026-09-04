@@ -18,3 +18,16 @@
 # Python build artifacts (skills ship sources, not bytecode)
 __pycache__/
 *.py[cod]
+
+# mutate.py arms every mutant on a COPY under this directory, never in the tracked tree.
+# It REFUSES to run when the copy dir is inside a worktree and not ignored -- a commit
+# would otherwise carry an armed mutant -- so this entry is what lets the battery run
+# with --root at the repo, which is the only way its tracked-files-unchanged assertion
+# covers the REAL loop.py rather than a scratch copy of it.
+mutation-tmp*/
+
+# EnterWorktree/git-worktree checkouts live here. They are separate checkouts, not content:
+# the auto-sync watcher swept one in as a gitlink (160000) on 2026-09-03, and
+# bin/sanitize-to-public.py then REFUSED to run at all ("Is a directory"), which fails
+# every public sync closed before any gate is reached.
+.claude/worktrees/

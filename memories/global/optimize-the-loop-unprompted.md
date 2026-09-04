@@ -44,4 +44,19 @@ Since 2026-09-02 `profile-loop.sh` reads the `loop.py` ledger that every attribu
 `loop.py close-round` makes the gate mechanical: the next round's launcher exits 6 until each TRIGGERED lever is dispositioned, and the codex-converge checklist calls it.
 That call is the whole point — a directive nothing calls does not fire, measured 2026-09-02, one day after this rule was written.
 
+**The third trigger failure: this rule is one increment late BY CONSTRUCTION, and that is why round 1 is now gated.**
+Every lever here fires at a round BOUNDARY, so the cheapest possible reading is taken after a round has already been paid for.
+The shape a loop is launched in — serial where it could be parallel, a full panel where a scoped one suffices, a stop written as "until no findings" — is chosen BEFORE the first boundary exists, and no amount of boundary profiling can refund it.
+Measured 2026-09-03: she had to ask "any way to speed this up?" a third time, after the ledger and the close-round gate were both already live and both reading green.
+Diagnosis: not a directive nobody called, but a directive that could not fire yet.
+The repair is a per-arc record priced before the first launch, gated the same mechanical way — `loop.py preflight`, with round-1 `review`/`write`/`mutant` launches exiting `RC_GATE` until it exists — [[preflight-the-cost-before-you-pay-for-it]].
+Grandfathering is derived from the ledger (an arc whose paid jobs all predate the gate), never a list of names, and a job refused the lock spent nothing so it grandfathers nothing.
+
+**The fourth trigger failure: a lever that READS is not a lever that ACTS.**
+Measured 2026-09-03, with the preflight gate, the ledger and `close-round` all live and all green: the profiler correctly reported 7h34m of review and `--write` waiting that had nothing else in flight, and the arc still spent it, because every lever was a SENTENCE in a report rather than a change in how the next panel launched.
+A boundary reading that a human must act on is a recommendation wearing a measurement's clothes, and it fails exactly like the prose rule two increments ago did.
+The repair is to make the application mechanical, not the reading: once a review sha exists, snapshot-safe read-only work launches against that frozen sha in its OWN worktree (`loop.py snapshot`) instead of queueing behind an unrelated write; the per-tree exclusive lock and the CPU lock are taken from what a job actually reads and writes (`lock_modes`) so independent lanes overlap and expensive suites do not fight; and a mutation battery, like every other paid job, takes the same round-locked admission transaction so it can neither run against a closed round nor land its wall-clock in the unexplained-gap bucket.
+Measured effect on this arc's own rounds: serial sum 2536.8 s against 1172.4 s of wall (53.8% removed) in round 2, and 1887 s against 821 s (56.5%) in round 3.
+The generalisation: for every TRIGGERED lever, ask what CODE would apply it at the next launch — if the answer is "the operator reads the table and remembers", the lever is not landed.
+
 Related: [[convergence-loop-speed-rules]] (the four levers this rule tells you to go looking for), [[a-report-is-not-a-stopping-point]], [[reduce-token-burn]], [[extract-learnings-proactively]], [[a-guard-must-be-satisfiable-not-just-failable]].

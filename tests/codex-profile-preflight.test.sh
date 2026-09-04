@@ -15,6 +15,21 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 RUN="$REPO/skills/codex-converge/run-codex.sh"
 fail=0
 
+# This suite drives run-codex.sh, which verifies CC_LOOP_JOB/CC_LOOP_ARC against loop.py's
+# ledger by PARENT PID. Launched under `loop.py run`, those are inherited from an outer job
+# whose recorded pid is the runner's -- so every case below would be refused by the handshake
+# before it ever reached the profile guard it is about. Drop the inherited identity, then say
+# so out loud: a leak reintroduced later should redden as one legible line, not as five
+# failures that all point at the wrong thing.
+unset CC_LOOP_JOB CC_LOOP_ARC CC_ARC CC_TRACK CC_ROUND
+if [ -z "${CC_LOOP_JOB:-}${CC_LOOP_ARC:-}${CC_ARC:-}${CC_TRACK:-}${CC_ROUND:-}" ]; then
+  echo "case 0a: no outer loop.py job identity is inherited into these cases"
+else
+  echo "FAIL: a CC_LOOP_*/CC_* job identity survived the unset -- every case below would be"
+  echo "      refused by the inner handshake, not by the guard it claims to test"
+  fail=1
+fi
+
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -159,6 +174,102 @@ run -p sol
 grep -qi 'none' "$SANDBOX/stdout" && grep -qiE 'warn|void|not trust|effort=none' "$SANDBOX/stdout" \
   && echo "  ok: warned about effort=none" \
   || { echo "FAIL: effort=none passed without a warning"; cat "$SANDBOX/stdout"; fail=1; }
+
+# ---------------------------------------------------------------------------
+# The launcher's own option parsing. Every other guard in this file is reached
+# THROUGH it, so a parsing bug is upstream of all of them.
+#
+# `--flag=value` used to fall through the option loop's `*) break` arm and become
+# the <prompt-file> POSITIONAL. The observable damage was not a parse error: with
+# `--policy-version=<v>` the acknowledgement stayed empty, so the launcher printed
+# "convergence policy changed" and sent the caller off to re-read SKILL.md over a
+# shell-quoting difference; with `--arc=DIR` the directory would have been opened
+# as the prompt. Both forms must mean the same thing, and an option the launcher
+# does not recognise must be REFUSED rather than silently reinterpreted.
+echo "case 8: --flag=value and --flag value are the same launch"
+RCF="$SANDBOX/rcflags"; rm -rf "$RCF"; mkdir -p "$RCF/wd"; printf 'prompt\n' > "$RCF/prompt.txt"
+# An ATTRIBUTED launch, because it is the one that proves the VALUE landed rather than
+# merely that the token was consumed: loop.py's gate quotes the arc directory back, so a
+# swallowed --arc could not produce this message. A one-off launch would exercise the
+# option loop while asserting nothing about what it stored.
+rcflags_run() {  # $1 = eq|sp
+  rm -rf "$RCF/arc" "$CODEX_STUB_MARKER"; mkdir -p "$RCF/arc"
+  if [ "$1" = eq ]; then
+    set -- --policy-version="$POLICY" --arc="$RCF/arc" --track=alpha --round=1 --name=n1
+  else
+    set -- --policy-version "$POLICY" --arc "$RCF/arc" --track alpha --round 1 --name n1
+  fi
+  bash "$RUN" "$@" "$RCF/prompt.txt" "$RCF/out.json" "$RCF/run.log" "$RCF/wd" -p sol
+}
+rcflags_run eq >"$RCF/eq.out" 2>"$RCF/eq.err"; rc_eq=$?
+rcflags_run sp >"$RCF/sp.out" 2>"$RCF/sp.err"; rc_sp=$?
+[ "$rc_eq" -eq "$rc_sp" ] \
+  && echo "  ok: same exit status either way ($rc_eq)" \
+  || { echo "FAIL: --flag=value exited $rc_eq, --flag value exited $rc_sp"; fail=1; }
+if diff -q "$RCF/eq.err" "$RCF/sp.err" >/dev/null && diff -q "$RCF/eq.out" "$RCF/sp.out" >/dev/null; then
+  echo "  ok: byte-identical output either way"
+else
+  echo "FAIL: the two option forms produced different output"; diff "$RCF/sp.err" "$RCF/eq.err"; fail=1
+fi
+# The load-bearing half: the arc DIRECTORY is echoed back, so --arc=DIR was stored and not
+# consumed as a positional. Without this the diff above would still pass if BOTH forms broke.
+grep -qF -- "$RCF/arc" "$RCF/eq.err" \
+  && echo "  ok: --arc=DIR reached loop.py (the refusal names the directory)" \
+  || { echo "FAIL: --arc=DIR did not reach loop.py"; cat "$RCF/eq.err"; fail=1; }
+[ -e "$CODEX_STUB_MARKER" ] \
+  && { echo "FAIL: codex was launched by an ungated attributed run"; fail=1; } \
+  || echo "  ok: neither form got past the round gate"
+
+echo "case 8b: control — with the =-form split removed, the equals form is NOT accepted"
+# A PARTIAL break, not a rewrite: only the line that splits `--flag=value` is deleted, so the
+# space form still works and the difference the case measures is the only thing that moved. A
+# fully broken parser would refuse both forms and prove nothing about which assertion is live.
+BRK="$SANDBOX/run-codex-broken.sh"
+grep -v -- '--\*=\*) _val=' "$RUN" > "$BRK"
+[ "$(wc -l < "$BRK")" -lt "$(wc -l < "$RUN")" ] \
+  || { echo "FAIL: control did not remove the =-form split; it is asserting against an UNBROKEN copy"; fail=1; }
+rm -rf "$RCF/arc"; mkdir -p "$RCF/arc"
+bash "$BRK" --policy-version="$POLICY" --one-off \
+     "$RCF/prompt.txt" "$RCF/out.json" "$RCF/run.log" "$RCF/wd" -p sol \
+     >"$RCF/brk.out" 2>"$RCF/brk.err"
+brk_rc=$?
+[ "$brk_rc" -ne 0 ] \
+  && echo "  ok: the broken parser refuses --policy-version=<v> (exit $brk_rc), so case 8 is not vacuous" \
+  || { echo "FAIL: the broken parser ACCEPTED the equals form — case 8 proves nothing"; fail=1; }
+# And the same broken copy still accepts the SPACE form, which is what makes it a control for
+# the =-split specifically rather than a copy that is broken in general.
+rm -f "$CODEX_STUB_MARKER"
+bash "$BRK" --policy-version "$POLICY" --one-off \
+     "$RCF/prompt.txt" "$RCF/out.json" "$RCF/run.log" "$RCF/wd" -p sol \
+     >/dev/null 2>&1
+[ -e "$CODEX_STUB_MARKER" ] \
+  && echo "  ok: the broken copy still runs the space form — only the =-split is missing" \
+  || { echo "FAIL: the control is broken in general, not in the one way case 8 measures"; fail=1; }
+
+echo "case 9: an unrecognised option before <prompt-file> is refused, never taken as a positional"
+rm -f "$CODEX_STUB_MARKER"
+bash "$RUN" --policy-version "$POLICY" --one-off --bogus \
+     "$RCF/prompt.txt" "$RCF/out.json" "$RCF/run.log" "$RCF/wd" -p sol \
+     >"$RCF/unk.out" 2>"$RCF/unk.err"
+unk_rc=$?
+[ "$unk_rc" -eq 2 ] \
+  && echo "  ok: refused (exit 2)" \
+  || { echo "FAIL: an unrecognised option expected exit 2, got $unk_rc"; cat "$RCF/unk.err"; fail=1; }
+grep -q -- '--bogus' "$RCF/unk.err" \
+  && echo "  ok: named the option it did not recognise" \
+  || { echo "FAIL: the refusal did not name --bogus"; cat "$RCF/unk.err"; fail=1; }
+[ -e "$CODEX_STUB_MARKER" ] \
+  && { echo "FAIL: codex was launched with an unrecognised launcher option"; fail=1; } \
+  || echo "  ok: codex never launched"
+# codex's OWN flags come after <workdir> and must keep working -- the refusal is scoped to the
+# launcher's own option region, not to every token starting with two dashes.
+rm -f "$CODEX_STUB_MARKER" "$RCF/out.json"
+bash "$RUN" --policy-version "$POLICY" --one-off \
+     "$RCF/prompt.txt" "$RCF/out.json" "$RCF/run.log" "$RCF/wd" -p sol --output-schema /dev/null \
+     >/dev/null 2>&1
+[ -e "$CODEX_STUB_MARKER" ] \
+  && echo "  ok: a codex flag after <workdir> is still passed through" \
+  || { echo "FAIL: the unknown-option refusal swallowed a codex flag after <workdir>"; fail=1; }
 
 [ "$fail" -eq 0 ] && echo "PASS: an unknown codex profile cannot silently downgrade a review"
 exit "$fail"

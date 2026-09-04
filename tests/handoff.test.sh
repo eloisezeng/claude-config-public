@@ -3913,58 +3913,58 @@ live_json "running"
 #    the operator's shell does with the line, so it is what the test does.
 eval "$(sed -n '/^shq() {/,/^}/p' "$SCRIPT")"
 command -v shq >/dev/null 2>&1 || { echo "FAIL[DA]: shq could not be extracted from $SCRIPT -- this case asserts nothing"; fail=1; }
-da_rt() { # $1 = a value that must survive being printed and pasted
+dp_rt() { # $1 = a value that must survive being printed and pasted
   shq "$1"
-  da_got="$(eval "printf '%s' $SHQ")" || { echo "FAIL[DA]: the quoted form of [$1] is not a valid shell word: $SHQ"; fail=1; return; }
-  [ "$da_got" = "$1" ] || { echo "FAIL[DA]: [$1] quoted as $SHQ came back as [$da_got]"; fail=1; }
+  dp_got="$(eval "printf '%s' $SHQ")" || { echo "FAIL[DA]: the quoted form of [$1] is not a valid shell word: $SHQ"; fail=1; return; }
+  [ "$dp_got" = "$1" ] || { echo "FAIL[DA]: [$1] quoted as $SHQ came back as [$dp_got]"; fail=1; }
 }
-da_rt "11111111"
-da_rt "x;touch /tmp/handoff-da-pwned"
-da_rt "a'b"
-da_rt "'"
-da_rt "a'b'c"
-da_rt '$(whoami)'
-da_rt '`whoami`'
-da_rt 'a b'
-da_rt '--help'
-da_rt '*'
-da_rt 'back\slash'
-da_rt ''
+dp_rt "11111111"
+dp_rt "x;touch /tmp/handoff-da-pwned"
+dp_rt "a'b"
+dp_rt "'"
+dp_rt "a'b'c"
+dp_rt '$(whoami)'
+dp_rt '`whoami`'
+dp_rt 'a b'
+dp_rt '--help'
+dp_rt '*'
+dp_rt 'back\slash'
+dp_rt ''
 # The quoter's own negative control: an UNquoted value does not survive, so the
 # round-trips above are a property of shq and not of the values chosen.
-da_bad="a'b"
-da_got="$(eval "printf '%s' $da_bad" 2>/dev/null)" && [ "$da_got" = "$da_bad" ] && { echo "FAIL[DA]: the round-trip passes without quoting, so it proves nothing"; fail=1; }
+dp_bad="a'b"
+dp_got="$(eval "printf '%s' $dp_bad" 2>/dev/null)" && [ "$dp_got" = "$dp_bad" ] && { echo "FAIL[DA]: the round-trip passes without quoting, so it proves nothing"; fail=1; }
 
 # 2. THE PRINTED LINE. A launcher that names a session with a shell metacharacter
 #    in it -- the id is verified against the registry before it is printed, so
 #    this is a real row -- must still produce a line that runs ONE command.
 DAHO="$(NEWHO metachar)"
-DA_ID="x;touch\$IFS$tmp/DA-PWNED"
+dp_ID="x;touch\$IFS$tmp/DA-PWNED"
 mkdir -p "$tmp/dabin"
 cat > "$tmp/dabin/claude" <<'DASH'
 #!/bin/sh
-printf '%s\n' "$@" > "$DA_ARGS"
+printf '%s\n' "$@" > "$dp_ARGS"
 DASH
 chmod +x "$tmp/dabin/claude"
 rm -f "$SHIM_SPAWNS" "$tmp/DA-PWNED"
-printf 'backgrounded \xc2\xb7 %s\n' "$DA_ID" > "$SHIM_BG_OUT"
+printf 'backgrounded \xc2\xb7 %s\n' "$dp_ID" > "$SHIM_BG_OUT"
 printf '[{"id":"%s","cwd":"%s","kind":"background","startedAt":1787000000000,"sessionId":"%s","state":"running"}]\n' \
-  "$DA_ID" "$tmp/work" "$UUID" > "$SHIM_AGENTS"
+  "$dp_ID" "$tmp/work" "$UUID" > "$SHIM_AGENTS"
 out="$(GOF "$DAHO" "an id the launcher chose" 2>&1)"; code=$?
 assert_eq "$code" "0" DA
-DA_LINE="$(printf '%s\n' "$out" | sed -n 's/^ *attach  *: //p' | head -1)"
-[ -n "$DA_LINE" ] || { echo "FAIL[DA]: no attach line was printed, so the paste below asserts nothing"; fail=1; }
-( PATH="$tmp/dabin:$PATH" DA_ARGS="$tmp/da-args.txt" eval "$DA_LINE" ) >/dev/null 2>&1
+dp_LINE="$(printf '%s\n' "$out" | sed -n 's/^ *attach  *: //p' | head -1)"
+[ -n "$dp_LINE" ] || { echo "FAIL[DA]: no attach line was printed, so the paste below asserts nothing"; fail=1; }
+( PATH="$tmp/dabin:$PATH" dp_ARGS="$tmp/da-args.txt" eval "$dp_LINE" ) >/dev/null 2>&1
 assert_no_file "$tmp/DA-PWNED" DA
 # ...and the operand that reached the command is the id ITSELF, not a mangled
 # one: quoting that broke the value would also pass the assertion above.
-assert_eq "$(sed -n 2p "$tmp/da-args.txt" 2>/dev/null)" "$DA_ID" DA
+assert_eq "$(sed -n 2p "$tmp/da-args.txt" 2>/dev/null)" "$dp_ID" DA
 assert_eq "$(sed -n 1p "$tmp/da-args.txt" 2>/dev/null)" "attach" DA
 # The seam's own control: the SAME paste against an unquoted line does fire the
 # marker, so the assertion above is about the quoting and not about a shim that
 # cannot write the file.
 rm -f "$tmp/DA-PWNED"
-( PATH="$tmp/dabin:$PATH" DA_ARGS="$tmp/da-args2.txt" eval "claude attach $DA_ID" ) >/dev/null 2>&1
+( PATH="$tmp/dabin:$PATH" dp_ARGS="$tmp/da-args2.txt" eval "claude attach $dp_ID" ) >/dev/null 2>&1
 [ -f "$tmp/DA-PWNED" ] || { echo "FAIL[DA]: the unquoted control did not fire, so this case cannot tell quoting from a dead fixture"; fail=1; }
 rm -f "$tmp/DA-PWNED"
 printf 'backgrounded \xc2\xb7 %s\n  claude agents   list sessions\n' "$SHORT" > "$SHIM_BG_OUT"
@@ -3974,9 +3974,9 @@ live_json "running"
 #    operator a command, and says whether a value is interpolated into it. The
 #    counts are asserted by number: a new printed command shows up as a count
 #    change rather than as a site nobody looked at.
-DA_CENSUS="$(cd "$(dirname "$0")" && pwd)/paste-census.awk"
-[ -f "$DA_CENSUS" ] || { echo "FAIL[DA]: no census at $DA_CENSUS -- the guard this case runs does not exist"; fail=1; }
-da_count() { awk -f "$DA_CENSUS" "$1" | cut -f1,3 | grep -c "^$2	$3$"; }
+dp_CENSUS="$(cd "$(dirname "$0")" && pwd)/paste-census.awk"
+[ -f "$dp_CENSUS" ] || { echo "FAIL[DA]: no census at $dp_CENSUS -- the guard this case runs does not exist"; fail=1; }
+dp_count() { awk -f "$dp_CENSUS" "$1" | cut -f1,3 | grep -c "^$2	$3$"; }
 # 4, not 3: the `--dry-run` launch command is the fourth member of this class and
 # the census could not see it until round 6 (C5) — it is a FLAG token, with the
 # operands in front of the flag rather than behind it, and at ab92448 all four of
@@ -3984,8 +3984,8 @@ da_count() { awk -f "$DA_CENSUS" "$1" | cut -f1,3 | grep -c "^$2	$3$"; }
 # into a line the operator is invited to paste. Run the census as it now stands
 # against ab92448 and this site reports INTERP/RAW, so the assertion below is
 # what would have caught it.
-assert_eq "$(da_count "$SCRIPT" INTERP SHQ)" "4"  DA   # printed WITH a value, quoted
-assert_eq "$(da_count "$SCRIPT" INTERP RAW)" "0"  DA   # printed WITH a value, raw
+assert_eq "$(dp_count "$SCRIPT" INTERP SHQ)" "4"  DA   # printed WITH a value, quoted
+assert_eq "$(dp_count "$SCRIPT" INTERP RAW)" "0"  DA   # printed WITH a value, raw
 # 19, not 18, since the duplicate-dispatch guard's closed default (CY) prints the
 # same constant `handoff.sh --status` its sibling arm does. Class (c): the command
 # is fixed text, and the state that provoked it is interpolated into the PROSE, not
@@ -3994,7 +3994,7 @@ assert_eq "$(da_count "$SCRIPT" INTERP RAW)" "0"  DA   # printed WITH a value, r
 # --json` in the two reasons it can refuse to stop the seat with ("could not be
 # read", "no longer listed"). Both are class (c): the command is fixed text and
 # the state sits in the prose beside it, so neither can carry an unquoted value.
-assert_eq "$(da_count "$SCRIPT" CONST -)"    "21" DA   # constant text, nothing to quote
+assert_eq "$(dp_count "$SCRIPT" CONST -)"    "21" DA   # constant text, nothing to quote
 # ...and PER TOKEN, because a total is not coverage (round 6 test-quality #2).
 # The surviving mutation that forced this: rename the real `handoff.sh --status`
 # at one site to a flag the parser does not accept, and add `claude agents` to a
@@ -4002,28 +4002,28 @@ assert_eq "$(da_count "$SCRIPT" CONST -)"    "21" DA   # constant text, nothing 
 # 0 INTERP/RAW, 23 rows -- while the operator is handed a command that dies with
 # `unknown option`. A per-token census refuses that trade; case DJ then checks
 # the surviving `handoff.sh --<flag>` strings against the real parser.
-da_tok() { awk -f "$DA_CENSUS" "$1" | cut -f2 | grep -c -- "^$2$"; }
-assert_eq "$(da_tok "$SCRIPT" "claude agents")"          "15" DA
-assert_eq "$(da_tok "$SCRIPT" "handoff.sh --status")"     "6" DA
-assert_eq "$(da_tok "$SCRIPT" "claude attach")"           "2" DA
-assert_eq "$(da_tok "$SCRIPT" "rm -rf")"                  "1" DA
-assert_eq "$(da_tok "$SCRIPT" "--append-system-prompt")"    "1" DA
+dp_tok() { awk -f "$dp_CENSUS" "$1" | cut -f2 | grep -c -- "^$2$"; }
+assert_eq "$(dp_tok "$SCRIPT" "claude agents")"          "15" DA
+assert_eq "$(dp_tok "$SCRIPT" "handoff.sh --status")"     "6" DA
+assert_eq "$(dp_tok "$SCRIPT" "claude attach")"           "2" DA
+assert_eq "$(dp_tok "$SCRIPT" "rm -rf")"                  "1" DA
+assert_eq "$(dp_tok "$SCRIPT" "--append-system-prompt")"    "1" DA
 # `rmdir ` is a DEAD token: it is in the census's list and matches nothing in the
 # hook today. Asserted at 0 deliberately, so that a site which starts telling an
 # operator to `rmdir` something arrives as a count change rather than silently.
-assert_eq "$(da_tok "$SCRIPT" "rmdir ")"                  "0" DA
+assert_eq "$(dp_tok "$SCRIPT" "rmdir ")"                  "0" DA
 # The per-token control: the same trade the mutation makes must move a number.
 DATOKMUT="$tmp/handoff-da-tokentrade.sh"
 sed 's/handoff[.]sh --status/handoff.sh --stats/g' "$SCRIPT" > "$DATOKMUT"
 if cmp -s "$SCRIPT" "$DATOKMUT"; then
   echo "FAIL[DA]: the token-trade mutant is identical to the hook -- the printed flag moved, and this control cannot fail"; fail=1
 else
-  DA_TT="$(da_tok "$DATOKMUT" "handoff.sh --status")"
-  [ "$DA_TT" -lt 6 ] || { echo "FAIL[DA]: renaming a printed flag left the per-token count at $DA_TT -- the census is not reading the printed commands"; fail=1; }
+  dp_TT="$(dp_tok "$DATOKMUT" "handoff.sh --status")"
+  [ "$dp_TT" -lt 6 ] || { echo "FAIL[DA]: renaming a printed flag left the per-token count at $dp_TT -- the census is not reading the printed commands"; fail=1; }
 fi
 rm -f "$DATOKMUT"
-DA_TOTAL="$(awk -f "$DA_CENSUS" "$SCRIPT" | wc -l | tr -d ' ')"
-[ "$DA_TOTAL" -ge 15 ] || { echo "FAIL[DA]: the census found only $DA_TOTAL printed-command sites, so its tokens have drifted from the file"; fail=1; }
+dp_TOTAL="$(awk -f "$dp_CENSUS" "$SCRIPT" | wc -l | tr -d ' ')"
+[ "$dp_TOTAL" -ge 15 ] || { echo "FAIL[DA]: the census found only $dp_TOTAL printed-command sites, so its tokens have drifted from the file"; fail=1; }
 # The census's own negative control, in CX's shape: strip the quoting and it must
 # report RAW. Without this, DA passes against a census that stopped matching.
 DAMUT="$tmp/handoff-da-unquoted.sh"
@@ -4031,8 +4031,8 @@ sed 's/\$SHQ/$SHORT/g' "$SCRIPT" > "$DAMUT"
 if cmp -s "$SCRIPT" "$DAMUT"; then
   echo "FAIL[DA]: the unquoted mutant is identical to the hook -- the quoting moved, and this control cannot fail"; fail=1
 else
-  DA_RAW="$(da_count "$DAMUT" INTERP RAW)"
-  [ "$DA_RAW" -ge 4 ] || { echo "FAIL[DA]: with the quoting stripped the census still reported $DA_RAW raw site(s) -- it is not reading the printed commands"; fail=1; }
+  dp_RAW="$(dp_count "$DAMUT" INTERP RAW)"
+  [ "$dp_RAW" -ge 4 ] || { echo "FAIL[DA]: with the quoting stripped the census still reported $dp_RAW raw site(s) -- it is not reading the printed commands"; fail=1; }
 fi
 rm -f "$DAMUT"
 
@@ -4722,7 +4722,7 @@ DI_CMD="$(printf '%s\n' "$DI_OUT" | sed -n 's/ --append-system-prompt <charter> 
 # The two operands that are megabytes of text are placeholders; everything else
 # is a real word, and the shim records exactly which words arrived.
 rm -f "$tmp/di-args.txt"
-( PATH="$tmp/dabin:$PATH" DA_ARGS="$tmp/di-args.txt" eval "$DI_CMD" ) >/dev/null 2>&1
+( PATH="$tmp/dabin:$PATH" dp_ARGS="$tmp/di-args.txt" eval "$DI_CMD" ) >/dev/null 2>&1
 assert_no_file "$tmp/DI-PWNED" DI
 assert_no_file "$tmp/DI-PWNED-P" DI
 # The launcher path is the FIRST word, so an unquoted one is not a wrong
@@ -4747,11 +4747,11 @@ assert_contains "'$DI_DIR_ABS'" "$DI_OUT" DI
 # The seam's own control: the SAME paste, unquoted, does fire the marker -- so
 # the assertion above is about the quoting and not about a shim that cannot write.
 rm -f "$tmp/DI-PWNED" "$tmp/DI-PWNED-P"
-( PATH="$tmp/dabin:$PATH" DA_ARGS="$tmp/di-args2.txt" eval "claude --bg --model $DI_MODEL" ) >/dev/null 2>&1
+( PATH="$tmp/dabin:$PATH" dp_ARGS="$tmp/di-args2.txt" eval "claude --bg --model $DI_MODEL" ) >/dev/null 2>&1
 [ -f "$tmp/DI-PWNED" ] || { echo "FAIL[DI]: the unquoted control did not fire, so DI cannot tell quoting from a dead fixture"; fail=1; }
 # The same control for the LAUNCHER PATH, which is the operand a wrong word
 # boundary destroys most completely: unquoted, the first word is not a command.
-( PATH="$tmp/dabin:$PATH" DA_ARGS="$tmp/di-args3.txt" eval "$DIBIN --bg" ) >/dev/null 2>&1
+( PATH="$tmp/dabin:$PATH" dp_ARGS="$tmp/di-args3.txt" eval "$DIBIN --bg" ) >/dev/null 2>&1
 [ -f "$tmp/di-args3.txt" ] && { echo "FAIL[DI]: the unquoted launcher path still ran the launcher, so the path fixture has no metacharacter left in it"; fail=1; }
 rm -f "$tmp/DI-PWNED" "$tmp/DI-PWNED-P" "$tmp/di-args3.txt"
 

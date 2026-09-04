@@ -19,3 +19,15 @@ Diagnose before strengthening: delete the thing, then ask what would have to dif
 - Measure the invariant across the whole population BEFORE authoring the guard, so you pin a real property rather than codifying whatever the tree happens to contain — `[[reduce-token-burn]]`'s "check a guard before authoring against it".
 - Mutation-verify without editing a frozen surface: patch the loader/config in-process, never the vendored file.
 - Say plainly in the record that the earlier diagnosis was wrong and why, rather than letting "closed by the data restore" stand.
+
+## The second reading: the mutation is a semantic NO-OP, and it names which half of your fix was the fix
+
+A survivor can also mean the thing you mutated never carried behaviour — and that is the most useful survivor there is, because it settles a question you would otherwise close by assumption.
+Measured 2026-09-03 on `codex-converge/loop.py`: a live bug ("repeat until no findings remain, across 3 tracks" was accepted as a bounded stop) was repaired with TWO changes at once — the ban was moved ahead of the bound check, and the bound regex was tightened so a digit only counts when it counts the thing being bounded.
+I recorded the ORDER as the fix and armed a mutant against it. It survived, and not because the test was weak: with the ban written `if banned and not bound`, that branch is reachable only when `bound` is falsy, which is exactly when the early return would not have fired, so the two orders cannot differ. Verified over 139 generated stop strings, then independently over a smaller cross-product: zero behavioural differences.
+Only the regex tightening was load-bearing; re-arming the mutant there killed it immediately.
+
+- When a fix bundles two changes, a mutant per change ATTRIBUTES it. Do not write the ordering, the rename or the reshuffle into the record as "the fix" until a mutant says it carries behaviour.
+- Before calling a survivor a weak test, try to prove the mutation is unobservable BY CONSTRUCTION — a short reachability argument over the branch conditions beats another test.
+- Then correct the comment. A code comment that says "the reverse order was a live bug" teaches the next reader that the ordering is the guard; if a five-line proof contradicts it, the comment is the defect. Keep the honest reading order, and say plainly that it is reading order and not the guard — `[[verification-claims-are-earned-per-item]]`.
+- A control for a guarded path must break EVERY guard, or enumerate them: a probe that breaks one of two independent refusals reads as the wrong refusal, not as SURVIVED — `[[a-control-must-match-the-probes-shape]]`.

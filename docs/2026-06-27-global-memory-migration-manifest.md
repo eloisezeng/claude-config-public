@@ -21,7 +21,6 @@ APPROVED 2026-06-27. Amendment: `feedback-prefers-prose-clarification` → **del
 | lavish-axi-threading-and-collapsibles | claude/your-other-project | move | f416176ba5 | 2bdfe366 |
 | lavish-no-redisplay-answered-questions | claude/your-other-project | move | deb33fb400 | 55767a6f |
 | mark-fixture-data | claude/your-other-project | move | f1ad52e644 | bc8819fd |
-| parse-xlsx-with-claude-for-excel | claude/your-other-project | move | 0a4edad802 | 32bbc7d4 |
 | present-options-abc-not-star | claude/your-other-project | move | ab0d29189d | 32bbc7d4 |
 | claude1-second-profile | claude/your-project | move | 9ca5bf6f82 | a20cde08 |
 | feedback-prefers-prose-clarification | claude/your-company-leads | move | c5ed10e2f5 | 172f8138 |
