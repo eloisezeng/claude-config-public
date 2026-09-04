@@ -13,7 +13,7 @@ Codex exposes a set of tiers plus a per-model effort ladder. The tier sets capab
 
 | machine | tiers | profiles installed |
 | --- | --- | --- |
-| the user's Mac (CLI 0.146.0, verified 2026-08-17) | all three 5.6 tiers; **`gpt-5.6-sol` defaults to `low`** | `luna`(low) `terra`(high) `sol`(high) `solx`(xhigh) |
+| the user's Mac (CLI 0.153.2, re-measured 2026-09-04) | all three 5.6 tiers; **`gpt-5.6-sol` defaults to `low`** | **NONE.** `ls ~/.codex/*.config.toml` matches nothing. The four below were present 2026-08-17 and had vanished by 2026-09-04 — so a profile set is not a stable property of a machine either, and `~/.codex` is not this config repo's to keep. Was: `luna`(low) `terra`(high) `sol`(high) `solx`(xhigh) |
 | deathstrxder's Windows (his ChatGPT account, CLI 0.147.0) | Sol 400s `not supported when using Codex with a ChatGPT account`; Terra is the ceiling | `luna` `terra` `terrax` `terramax` |
 | your-university cluster (CLI 0.146.0) | base config is `gpt-5.6-sol`, and Sol runs fine | **none** — every `-p` falls back |
 
@@ -21,9 +21,9 @@ Codex exposes a set of tiers plus a per-model effort ladder. The tier sets capab
 
 **Guard, don't remember:** `run-codex.sh` refuses a `-p` with no matching `$CODEX_HOME/<name>.config.toml` (listing what is installed) and prints `tier actually used: model=… effort=…` read from codex's own banner. **Confirm the tier from that banner, never from the flag you passed**, and treat `effort=none` as a void review.
 
-Routing on the user's Mac: Luna/low for textual traceability only; Terra/medium for breadth; Terra/high (`-p terra`) for spec and plan convergence and for Codex `--write` implementation of mechanical tasks; **Sol/high (`-p sol`) for adversarial diff review; Sol/xhigh (`-p solx`) for security, money, migrations and schema**; `-m gpt-5.6-sol -c model_reasoning_effort="max"` extends one reasoning chain (a race, an ordering bug — splitting it loses the thread); `ultra` spawns internal subagents (independent workstreams only) and its cost is unbounded in principle, so ask first.
+Routing, written as tiers rather than profile names because the profiles are currently absent here — spell the route as `-m gpt-5.6-sol -c model_reasoning_effort=high` and let the banner confirm it: Luna/low for textual traceability only; Terra/medium for breadth; Terra/high (`-p terra`) for spec and plan convergence and for Codex `--write` implementation of mechanical tasks; **Sol/high for adversarial diff review; Sol/xhigh for security, money, migrations and schema**; `-m gpt-5.6-sol -c model_reasoning_effort="max"` extends one reasoning chain (a race, an ordering bug — splitting it loses the thread); `ultra` spawns internal subagents (independent workstreams only) and its cost is unbounded in principle, so ask first.
 
-There is **no `--effort` flag on the Codex CLI** (that belongs to the `codex:*` plugin's companion script). Use `-c model_reasoning_effort="high"` or a profile; an explicit `-m`/`-c` beats the profile on the same command line.
+There is **no `--effort` flag on the Codex CLI** (that belongs to the `codex:*` plugin's companion script). Use `-c model_reasoning_effort="high"`, which always works, in preference to a profile, which may not exist; an explicit `-m`/`-c` beats the profile on the same command line.
 
 Gotchas verified live, not from docs:
 - GPT-5.6 needs CLI **≥ 0.144.0**; an older CLI 400s rather than falling back. `codex --version` reports the PATH binary, which can lag the desktop app that refreshes the shared catalog — **trust a live probe, not the catalog**.
