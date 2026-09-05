@@ -157,5 +157,5 @@
   "crossSessionInbound": "accept",
   "preferredNotifChannel": "notifications_disabled",
   "inputNeededNotifEnabled": true,
-  "agentPushNotifEnabled": true
+  "agentPushNotifEnabled": false
 }
