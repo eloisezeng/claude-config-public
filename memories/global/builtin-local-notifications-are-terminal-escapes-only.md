@@ -22,6 +22,12 @@ VS Code's integrated terminal is in that last bucket, and VS Code raises no OS t
 **The binary contains no `display notification` for these events.** Its single osascript banner is the re-authentication prompt.
 
 **`inputNeededNotifEnabled` / `agentPushNotifEnabled` are MOBILE push over Remote Control** — a different device, not the local machine. Reading them as "the built-in version of my local chime" is the mistake that makes the hook look redundant.
+They are two independent switches behind two independent server flags, and the settings UI names them plainly: `inputNeededNotifEnabled` = "Push when actions required" (flag `tengu_kairos_input_needed_push`, described as "Push to mobile when a permission prompt or question is waiting"); `agentPushNotifEnabled` = "Push when Claude decides" (flag `tengu_kairos_push_notifications`, described as "Allow Claude to push proactive mobile notifications"), whose settings row is internally named `doneEnabled`.
+
+**`agentPushNotifEnabled` is not a delivery setting — it is a PROMPT-INJECTION setting**, so grepping for a push call site finds nothing and reads as "there is no such feature."
+`tJ() = <flag> && agentPushNotifEnabled` gates whether several *instruction strings* are non-empty, among them the stop preamble "Before you stop, send a one-line outcome via PushNotification — the user may be away and waiting to hear it's done", the Monitor-event line, and the persistent-loop line.
+With it off, those strings are `""`, the model is never told to push, and the `PushNotification` tool itself is withheld — which is how you silence a phone buzz on *agent finished* while `inputNeededNotifEnabled: true` keeps the buzz for *agent needs you*.
+Turned off for the user 2026-09-04, mirroring the `agent_completed` chime suppression in `hooks/notification-event.sh`.
 
 **Consequence.** A `Notification`-hook script that rings `osascript display notification` is a *different surface* from the built-in channel, not a second implementation of it. The two double up only on a terminal that raises its own OS toast from the escape sequence (iTerm2, kitty, ghostty); there, pick one surface rather than deleting the hook. Anywhere else, deleting the hook removes local notification entirely — along with anything the hook does that the product has no equivalent for, such as muting the ~60 s `idle_prompt` chime while background agents are still running.
 
