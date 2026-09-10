@@ -1,194 +1,100 @@
 {
   "version": 2,
   "plugins": {
-    "skill-creator@claude-plugins-official": [
+    "claude-md-management@claude-plugins-official": [
       {
-        "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/skill-creator/e18ff5086423",
-        "version": "e18ff5086423",
-        "installedAt": "2026-05-29T21:36:03.992Z",
-        "lastUpdated": "2026-09-01T18:52:18.054Z",
-        "gitCommitSha": "6ec4b4020230e4c600407a1c46d76bc4f28a0d48"
-      }
-    ],
-    "superpowers@claude-plugins-official": [
-      {
-        "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/superpowers/6.3.0",
-        "version": "6.3.0",
-        "installedAt": "2026-05-29T21:36:21.462Z",
-        "lastUpdated": "2026-08-12T23:52:04.960Z",
-        "gitCommitSha": "f2cbfbefebbfef77321e4c9abc9e949826bea9d7"
-      }
-    ],
-    "context-mode@context-mode": [
-      {
-        "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/context-mode/context-mode/1.0.169",
-        "version": "1.0.169",
-        "installedAt": "2026-05-29T21:37:06.487Z",
-        "lastUpdated": "2026-08-31T07:36:17.715Z",
-        "gitCommitSha": "f66230d94f03e5ae43d14c1d267f9b037e06e895"
+        "scope": "user"
       }
     ],
     "claude-mem@thedotmack": [
       {
-        "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/thedotmack/claude-mem/13.4.0",
-        "version": "13.4.0",
-        "installedAt": "2026-05-29T21:37:44.121Z",
-        "lastUpdated": "2026-05-29T21:37:44.121Z",
-        "gitCommitSha": "84636894740724cb424e993d2e37a5a06a2aff2e"
-      }
-    ],
-    "frontend-design@claude-plugins-official": [
-      {
-        "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/frontend-design/e18ff5086423",
-        "version": "e18ff5086423",
-        "installedAt": "2026-05-29T21:37:51.842Z",
-        "lastUpdated": "2026-09-01T18:52:18.056Z",
-        "gitCommitSha": "6ec4b4020230e4c600407a1c46d76bc4f28a0d48"
-      }
-    ],
-    "codex@openai-codex": [
-      {
-        "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/openai-codex/codex/1.0.6",
-        "version": "1.0.6",
-        "installedAt": "2026-08-02T15:30:28.616Z",
-        "lastUpdated": "2026-08-02T15:30:28.616Z",
-        "gitCommitSha": "db52e28f4d9ded852ab3942cea316258ae4ef346"
+        "scope": "user"
       }
     ],
     "code-review@claude-plugins-official": [
       {
-        "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/code-review/e18ff5086423",
-        "version": "e18ff5086423",
-        "installedAt": "2026-09-01T23:15:10.271Z",
-        "lastUpdated": "2026-09-01T23:15:10.271Z"
-      }
-    ],
-    "context7@claude-plugins-official": [
-      {
-        "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/context7/e18ff5086423",
-        "version": "e18ff5086423",
-        "installedAt": "2026-09-01T23:15:11.766Z",
-        "lastUpdated": "2026-09-01T23:15:11.766Z"
+        "scope": "user"
       }
     ],
     "code-simplifier@claude-plugins-official": [
       {
-        "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/code-simplifier/1.0.0",
-        "version": "1.0.0",
-        "installedAt": "2026-09-01T23:15:13.486Z",
-        "lastUpdated": "2026-09-01T23:15:13.486Z"
+        "scope": "user"
       }
     ],
-    "playwright@claude-plugins-official": [
+    "codex@openai-codex": [
       {
-        "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/playwright/e18ff5086423",
-        "version": "e18ff5086423",
-        "installedAt": "2026-09-01T23:15:15.624Z",
-        "lastUpdated": "2026-09-01T23:15:15.624Z"
+        "scope": "user"
       }
     ],
-    "github@claude-plugins-official": [
+    "context-mode@context-mode": [
       {
-        "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/github/e18ff5086423",
-        "version": "e18ff5086423",
-        "installedAt": "2026-09-01T23:15:17.799Z",
-        "lastUpdated": "2026-09-01T23:15:17.799Z"
+        "scope": "user"
       }
     ],
-    "claude-md-management@claude-plugins-official": [
+    "context7@claude-plugins-official": [
       {
-        "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/claude-md-management/1.0.0",
-        "version": "1.0.0",
-        "installedAt": "2026-09-01T23:15:20.100Z",
-        "lastUpdated": "2026-09-01T23:15:20.100Z"
+        "scope": "user"
       }
     ],
     "feature-dev@claude-plugins-official": [
       {
-        "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/feature-dev/e18ff5086423",
-        "version": "e18ff5086423",
-        "installedAt": "2026-09-01T23:15:22.405Z",
-        "lastUpdated": "2026-09-01T23:15:22.405Z"
+        "scope": "user"
       }
     ],
-    "security-guidance@claude-plugins-official": [
+    "frontend-design@claude-plugins-official": [
       {
-        "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/security-guidance/2.0.7",
-        "version": "2.0.7",
-        "installedAt": "2026-09-01T23:15:27.277Z",
-        "lastUpdated": "2026-09-01T23:15:27.277Z"
+        "scope": "user"
       }
     ],
-    "typescript-lsp@claude-plugins-official": [
+    "github@claude-plugins-official": [
       {
-        "scope": "user",
-        "installPath": "$HOME/.claude/plugins/cache/claude-plugins-official/typescript-lsp/1.0.0",
-        "version": "1.0.0",
-        "installedAt": "2026-09-01T23:15:29.532Z",
-        "lastUpdated": "2026-09-01T23:15:29.532Z"
+        "scope": "user"
       }
     ],
     "hookify@claude-plugins-official": [
       {
-        "scope": "user",
-        "installPath": "/Users/your-org/.claude/plugins/cache/claude-plugins-official/hookify/1dd995193ba2",
-        "version": "1dd995193ba2",
-        "installedAt": "2026-09-04T01:48:41.801Z",
-        "lastUpdated": "2026-09-04T01:48:41.801Z"
+        "scope": "user"
+      }
+    ],
+    "mattpocock-skills@mattpocock": [
+      {
+        "scope": "user"
+      }
+    ],
+    "playwright@claude-plugins-official": [
+      {
+        "scope": "user"
       }
     ],
     "pr-review-toolkit@claude-plugins-official": [
       {
-        "scope": "user",
-        "installPath": "/Users/your-org/.claude/plugins/cache/claude-plugins-official/pr-review-toolkit/1dd995193ba2",
-        "version": "1dd995193ba2",
-        "installedAt": "2026-09-04T01:48:38.703Z",
-        "lastUpdated": "2026-09-04T01:48:38.703Z"
+        "scope": "user"
+      }
+    ],
+    "security-guidance@claude-plugins-official": [
+      {
+        "scope": "user"
+      }
+    ],
+    "skill-creator@claude-plugins-official": [
+      {
+        "scope": "user"
       }
     ],
     "sonarqube@claude-plugins-official": [
       {
-        "scope": "user",
-        "installPath": "/Users/your-org/.claude/plugins/cache/claude-plugins-official/sonarqube/2.5.0",
-        "version": "2.5.0",
-        "installedAt": "2026-09-04T01:48:41.239Z",
-        "lastUpdated": "2026-09-04T01:48:41.239Z",
-        "gitCommitSha": "e596969a083cf27bfe439ee2e9459f7ef4124a70"
+        "scope": "user"
+      }
+    ],
+    "superpowers@claude-plugins-official": [
+      {
+        "scope": "user"
+      }
+    ],
+    "typescript-lsp@claude-plugins-official": [
+      {
+        "scope": "user"
       }
     ]
-  },
-  "enabledPlugins": {
-    "claude-md-management@claude-plugins-official": true,
-    "claude-mem@thedotmack": false,
-    "code-review@claude-plugins-official": true,
-    "code-simplifier@claude-plugins-official": true,
-    "codex@openai-codex": true,
-    "context-mode@context-mode": true,
-    "context7@claude-plugins-official": true,
-    "feature-dev@claude-plugins-official": true,
-    "frontend-design@claude-plugins-official": true,
-    "github@claude-plugins-official": true,
-    "hookify@claude-plugins-official": true,
-    "playwright@claude-plugins-official": true,
-    "pr-review-toolkit@claude-plugins-official": true,
-    "security-guidance@claude-plugins-official": true,
-    "skill-creator@claude-plugins-official": true,
-    "sonarqube@claude-plugins-official": true,
-    "superpowers@claude-plugins-official": true,
-    "typescript-lsp@claude-plugins-official": true
   }
 }

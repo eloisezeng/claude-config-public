@@ -6,16 +6,30 @@ metadata:
   scope: global
 ---
 
-A `;`-joined command line exits with the status of its **last** component, and the background-task
-harness reports that line's status. So the ubiquitous idiom
+A compound command line exits with the status of its **last** component, and the background-task
+harness reports that line's status. Two shapes, one defect:
 
 ```sh
-long_command > out.log 2>&1; echo "EXIT=$?"; tail -25 out.log
+long_command > out.log 2>&1; echo "EXIT=$?"; tail -25 out.log   # reports tail's exit
+v=$(long_command | tail -1); ec=$?                              # reports tail's exit
 ```
 
-reports **`tail`'s** exit — always 0 — no matter what `long_command` did. Capture the status into a
-variable the instant the command returns (`long_command > out.log 2>&1; ec=$?`) and assert on `$ec`,
-or run the command bare and let the harness report it.
+Both report **`tail`'s** status — always 0 — no matter what `long_command` did. The `;` form is the
+one people quote; the **pipe** form is the one that actually ships, because piping a verbose command
+into `tail` to keep a log readable is the same reflex that makes the bug invisible. Capture the
+status into a variable the instant the command returns, with nothing between
+(`out=$(long_command 2>&1); ec=$?`), and trim for display **afterwards** — never inside the
+substitution whose status you are about to read. Or run the command bare and let the harness report
+it. In zsh a pipeline's real statuses are in `$pipestatus` (`${PIPESTATUS[@]}` is the bash spelling),
+but reaching for that is a sign the pipe belongs on a later line.
+
+The instrument this defends is a **polling predicate**, which is where it costs the most: a poll
+loop that misreads its predicate's status does not merely mis-report once, it exits early and
+certifies the thing it was watching. Measured 2026-09-08: a CI poll written `v=$(ci-green.sh | tail
+-1); ec=$?` exited on poll 1 with `CI_GREEN_EXIT=0` while the verdict text it had just captured, and
+written to its own log, read `NOT-GREEN ... still running` with ten jobs unfinished. The control is
+cheap and must reproduce the SHAPE: run the same predicate against the same live state through the
+corrected capture and require the opposite answer — 1 where the broken form read 0.
 
 **Why:** measured 2026-09-01. A full vitest suite printed `Tests 5 failed` and the harness reported
 exit 0, which reads as a catastrophic CI-integrity defect: `npm test` gates a required check, so a

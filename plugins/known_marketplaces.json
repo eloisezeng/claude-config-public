@@ -1,34 +1,35 @@
 {
-  "claude-plugins-official": {
-    "source": {
-      "source": "github",
-      "repo": "anthropics/claude-plugins-official"
+  "version": 1,
+  "marketplaces": {
+    "claude-plugins-official": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/claude-plugins-official"
+      }
     },
-    "installLocation": "$HOME/.claude/plugins/marketplaces/claude-plugins-official",
-    "lastUpdated": "2026-09-01T23:21:04.482Z"
-  },
-  "context-mode": {
-    "source": {
-      "source": "github",
-      "repo": "mksglu/context-mode"
+    "context-mode": {
+      "source": {
+        "source": "github",
+        "repo": "mksglu/context-mode"
+      }
     },
-    "installLocation": "$HOME/.claude/plugins/marketplaces/context-mode",
-    "lastUpdated": "2026-05-29T21:36:53.784Z"
-  },
-  "thedotmack": {
-    "source": {
-      "source": "github",
-      "repo": "thedotmack/claude-mem"
+    "mattpocock": {
+      "source": {
+        "source": "github",
+        "repo": "mattpocock/skills"
+      }
     },
-    "installLocation": "$HOME/.claude/plugins/marketplaces/thedotmack",
-    "lastUpdated": "2026-05-29T21:37:33.483Z"
-  },
-  "openai-codex": {
-    "source": {
-      "source": "github",
-      "repo": "openai/codex-plugin-cc"
+    "openai-codex": {
+      "source": {
+        "source": "github",
+        "repo": "openai/codex-plugin-cc"
+      }
     },
-    "installLocation": "$HOME/.claude/plugins/marketplaces/openai-codex",
-    "lastUpdated": "2026-08-01T16:12:31.928Z"
+    "thedotmack": {
+      "source": {
+        "source": "github",
+        "repo": "thedotmack/claude-mem"
+      }
+    }
   }
 }

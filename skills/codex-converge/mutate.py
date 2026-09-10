@@ -701,10 +701,31 @@ def _main(batch_stack: contextlib.ExitStack) -> int:
         for label, expect, outcome, matched in results:
             if not matched:
                 print(f'  mismatch: {label}: expected {expect}, got {outcome}')
-        unscoped[:] = [m['label'] for m in mutants if m['expect'] == 'killed' and not m.get('test')]
+        # Every unscoped mutant runs the WHOLE test file, so this warning is about COST and it must
+        # see all of them. It used to read `m['expect'] == 'killed'`, which made it blind to the only
+        # unscoped mutant that actually exists: `control: docstring wording is unobservable`, the sole
+        # entry in loop.mutants.json with no `test` key, is `expect: unobservable`. The guard existed
+        # to catch full-file runs and could not see the one full-file run in the manifest
+        # (`[[a-guard-must-be-satisfiable-not-just-failable]]`). Measured: that mutant alone costs
+        # 38.6s of the battery.
+        #
+        # The remedy DIFFERS by expectation, so the message splits rather than giving one instruction:
+        #   expect: killed        -> a bug. Scope it with `test`; a whole-file run is wasted work.
+        #   expect: unobservable  -> DELIBERATE, and must stay unscoped. "No test can see this change"
+        #                            is only meaningful if every test ran. Scoping it to save the 38.6s
+        #                            would silently weaken the claim into "one chosen test cannot see
+        #                            it". Do not "optimize" this one away.
+        unscoped[:] = [m['label'] for m in mutants
+                       if m['expect'] == 'killed' and not m.get('test')]
+        unscoped_ok = [m['label'] for m in mutants
+                       if m['expect'] != 'killed' and not m.get('test')]
         if unscoped:
             print(f"  UNSCOPED: {len(unscoped)} `expect: killed` mutant(s) ran the whole file — set `test` on each: "
                   + ', '.join(unscoped[:6]))
+        if unscoped_ok:
+            print(f"  full-file (by design): {len(unscoped_ok)} non-`killed` mutant(s) ran the whole file, "
+                  f"which is what makes their expectation meaningful — do not scope them: "
+                  + ', '.join(unscoped_ok[:6]))
         if changed:
             for p in changed:
                 print(f'  TRACKED FILE CHANGED DURING RUN: {os.path.relpath(p, root)}')

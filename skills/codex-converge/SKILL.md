@@ -102,14 +102,20 @@ codex exec -p solx -s read-only -C <worktree> ...
 ```
 
 `-p <name>` layers `$CODEX_HOME/<name>.config.toml` over the base config, and an explicit `-m` / `-c` on the same command line still wins over the profile.
-Profiles installed **on the user's Mac** (`ls ~/.codex/*.config.toml` — always check this rather than trusting the table, because the set differs per machine):
+**On the user's Mac there are currently NO profiles at all** (re-measured 2026-09-09: `~/.codex` holds only `config.toml`, and `ls ~/.codex/*.config.toml` matches nothing).
+Every `-p` route below is therefore unavailable here and `run-codex.sh` refuses it with rc 2 — correctly, since codex would otherwise fall through to the base config and hand back a verdict from a tier nobody chose.
+**Until they are reinstalled, pass the tier explicitly:** `-m gpt-5.6-sol -c model_reasoning_effort="high"` for the review route, and read the tier back off codex's own banner line.
 
-| Profile | model | effort |
-| --- | --- | --- |
-| `luna` | `gpt-5.6-luna` | `low` |
-| `terra` | `gpt-5.6-terra` | `high` |
-| `sol` | `gpt-5.6-sol` | `high` |
-| `solx` | `gpt-5.6-sol` | `xhigh` |
+The four profiles this table used to promise — and which the stage-routing table below still names — were:
+
+| Profile | model | effort | present 2026-09-09? |
+| --- | --- | --- | --- |
+| `luna` | `gpt-5.6-luna` | `low` | no |
+| `terra` | `gpt-5.6-terra` | `high` | no |
+| `sol` | `gpt-5.6-sol` | `high` | no |
+| `solx` | `gpt-5.6-sol` | `xhigh` | no |
+
+Always run `ls ~/.codex/*.config.toml` rather than trusting any of this: the set differs per machine and, as this correction shows, per week on one machine.
 
 A profile name with no matching file is not a codex error — it silently falls back to the base config, so `run-codex.sh` refuses it instead (see the preflight above).
 Route through `run-codex.sh`; a bare `codex exec -p <name>` has no such guard.
@@ -289,7 +295,15 @@ It cannot take `-C <worktree>`, so it would review the wrong checkout — the ex
    ready to review.
 
    1. **What already does this, or most of it?** Name the existing machinery by file and symbol.
-      "Nothing" is an answer only after you have searched for it — say what you searched.
+      "Nothing" is an answer only after a search from the REPO ROOT over EVERY prior round, stream,
+      worktree and vendored tree — `git grep -il '<concept synonyms>' -- '*.py'` (plus the project's
+      generated tool inventory where one exists, e.g. `make_tools_index.py --find <concept>`) — with
+      the exact command AND its hit list pasted into the gate. A search scoped to the directories you
+      happened to think of is not a search: measured 2026-09-05, a per-band error decomposition was
+      built for the THIRD time in one repo because the gate grepped two directories and a wrong path
+      and declared "no spectral or band tool exists anywhere in rounds 1–4" while round 1 held three
+      band tools and round 4 a `band_profile`. Every hit is classified reuse / extend / superseded
+      with the reason, before any new component is planned.
    2. **Why can't this reuse or extend that?** A concrete blocker (different lifecycle, incompatible
       contract, a gate it must not inherit), not "cleaner" or "simpler to start fresh".
    3. **Does it contradict a recorded decision or a "don't do X" constraint?** Grep the spec, the
@@ -324,6 +338,10 @@ It cannot take `-C <worktree>`, so it would review the wrong checkout — the ex
    Run the plan with `superpowers:test-driven-development` (red→green→refactor) and `superpowers:subagent-driven-development` / `superpowers:executing-plans`.
    Record the red-phase command and output for each test as you go; that transcript is the only admissible evidence that TDD actually happened.
    Keep tests and the type-checker green; commit atomically.
+   **Route the per-task gate runs through `loop.py run --kind vitest|tsc` (attributed `--arc/--track/--round`), never a bare `npm test`.**
+   An execute phase IS a loop — N plan tasks, one suite run each — and a bare run is invisible to the ledger, so nothing prices the repeat and `profile-loop.sh` books the whole arc as unexplained gap.
+   Measured 2026-09-07: a 25-commit arc ran to completion against a 1,067-file suite with no ledger line written at all, so the one question worth asking at task 1 was never asked at any of the twenty-five.
+   Scope each task's run (`--affected BASE..HEAD`, or name the files) and it stays free forever; the third WHOLE-PROJECT run trips the cadence gate ("Keeping the loop short"), which is the first boundary at which the saving is still collectable forward.
    Finish the other relevant superpowers skills (e.g. `superpowers:verification-before-completion`).
 
 7. **Codex ↔ Claude review each other's work — till convergence.**
@@ -607,6 +625,17 @@ They were extracted from a real loop that ran 30+ rounds, roughly half of them g
 **The first round is priced before it is bought — the profiler is one increment late by construction.**
 `loop.py` refuses a round-1 `review`, `write` or `mutant` launch in an arc with no `preflight` record on the ledger, and the record is derived, never a name: an arc whose paid jobs all predate the gate is grandfathered, while a job that was refused the lock spent nothing and grandfathers nothing.
 That closes the hole this section otherwise leaves open — everything below measures a loop that is already running, so a loop that should never have been launched in that shape reads perfectly healthy at every boundary.
+
+**The preflight prices the first round; the cadence gate prices the hundredth cheap one.**
+`GATED_KINDS` deliberately waves `vitest` / `tsc` / `ci` through, on the grounds that one scoped run is not a process commitment — which is true of one run and false of the twenty-fifth.
+A gate keyed on KIND is structurally blind to a wrong RATE: every instance passes the per-instance question while the AGGREGATE is the bill.
+So `loop.py` also refuses the THIRD **whole-project** run of any of those kinds in an arc until `loop.py cadence --arc "$ARC" --kind <k> --remaining <N> --each '<measured cost of one run>'` names one of two things.
+Either `--schedule` — what actually MOVES, and batch / background / cap / drop is the shape it insists on, because making each instance marginally cheaper preserves the defect at a discount and reads as progress while doing it.
+Or `--fixed-by`, naming the project rule that fixes the rate: that is an accepted answer, not an escape hatch — the cadence is then not yours to lower, and the saving has to come from somewhere else.
+The refusal prices itself from the ledger's own recorded `span_s`, so it hands you a measured count rather than a feeling; runs 1 and 2 are free, because the rule is to profile what you will run more than twice, not what you ran once.
+A **scoped** run — eight files or fewer, the `light` CPU class `loop.py` already computes — is exempt in both directions: it never counts toward the rate and is never refused by it.
+That is the whole difference between a gate and a nuisance, and it is not a courtesy: running the changed test files after each edit is the pattern this skill asks for, so a gate that priced it as waste would only teach you to route around the gate.
+The bill was never the scoped run; it was the whole-project repeat.
 
 **Profile the loop at EVERY round boundary — the launcher now refuses to skip it.**
 Every review or `--write` launch is attributed (`--arc DIR --track T --round N`) and runs through `loop.py`, which writes an exact per-job ledger (`<arc>/jobs.jsonl`: requested / started / ended, queue wait, CPU class, tree state, exit code) and holds two locks.

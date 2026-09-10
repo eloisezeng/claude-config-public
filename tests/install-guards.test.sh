@@ -165,9 +165,9 @@ g4root="$tmp/g4/home/$g4path/claude"
 # a fixture that reads the array under test agrees with any edit to it.
 g4items='CLAUDE.md AGENTS.md README.md LICENSE .gitignore
 settings.json settings.linux.json settings.windows.json
-install.sh sync.sh sync.ps1 watch.ps1 sync-memories.sh
+install.sh sync.sh sync.ps1 watch.ps1 sync-memories.sh statusline-command.sh
 inject-global-memory.sh inject-global-memory.mjs inject-ops-lanes.sh
-bin docs hooks memories plugins skills tests'
+bin docs hooks memories output-styles plugins skills tests'
 g4want=""
 for g4i in $g4items; do g4want="$g4want${g4want:+
 }PathModified=$g4root/$g4i"; done

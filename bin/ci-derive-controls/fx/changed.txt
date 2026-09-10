@@ -1,0 +1,7 @@
+.githooks/pre-commit
+.github/workflows/ci.yml
+.github/workflows/your-module.yml
+CLAUDE.md
+scripts/e2e-shard-ceiling.mjs
+scripts/e2e-shard-ceiling.test.ts
+scripts/install-git-hooks.sh

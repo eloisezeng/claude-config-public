@@ -78,8 +78,14 @@ FRAME
 # Both the tier AND the effort, always: profile defaults are per-machine and luna's is `low`.
 # --policy-version is REQUIRED by run-codex.sh since 2026-08-30; without it the launcher
 # refuses the call as a stale-session launch (measured 2026-09-01, rc=2).
-"$RUNNER" --policy-version 2026-09-02-scheduler-v1 --one-off "$PROMPT" "$VERDICT" "$LOG" "$WORKDIR" \
-  -p "$TIER" -c model_reasoning_effort="high"
+# A profile file is per-machine (the cluster has none): with one, layer it; without one, name the
+# model explicitly — the launcher refuses an absent profile rather than letting codex fall back silently.
+if [ -f "${CODEX_HOME:-$HOME/.codex}/$TIER.config.toml" ]; then
+  TIER_ARGS=(-p "$TIER" -c model_reasoning_effort="high")
+else
+  TIER_ARGS=(-m "gpt-5.6-$TIER" -c model_reasoning_effort="high")
+fi
+"$RUNNER" --policy-version 2026-09-02-scheduler-v1 --one-off "$PROMPT" "$VERDICT" "$LOG" "$WORKDIR" "${TIER_ARGS[@]}"
 rc=$?
 
 # The banner is the measurement; the flag above is only a request.

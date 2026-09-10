@@ -19,6 +19,20 @@ metadata:
 - **Worker locality:** a dispatched seat carries `CLAUDE_HANDOFF_LANE` and its session-start view shows only its own lane plus a count of others — leave other lanes to their owners.
 - **Coordinator reconstruction:** any fresh session's boot (SessionStart hook `inject-ops-lanes.sh`) lists the open set, so a coordinator death is recoverable without transcripts.
 
+**A second config root gives you a second, EMPTY ledger — and every read of it fails open.**
+The resolution chain above ends at `$CLAUDE_CONFIG_DIR/ops`, so a session booted under `.claude1`
+resolved to `~/.claude1/ops`, which existed, contained `lanes/` and `dispatches/`, and was empty —
+while the real ledger under `~/.claude/ops` held 203 lanes (measured 2026-09-07). Nothing errors:
+`handoff.sh --close` reports "no open lane named …", the boot listing shows an empty open set, and
+the pre-irreversible-act check in [[grep-the-ledger-for-the-artifact-not-your-lane]] greps zero
+files and passes vacuously. That is the worst shape a safety gate can take — satisfied by absence,
+see [[a-guard-must-be-satisfiable-not-just-failable]]. The fix is one symlink per extra root
+(`ln -s ~/.claude/ops ~/.claude1/ops`), the same rule as project memory in
+[[project-memory-lives-in-the-project-repo]]: link EVERY config root the machine uses, because a
+record under an unused root is not merely hard to find, it is invisible AND it reads as "clear".
+Before trusting an empty open set, count the lanes and confirm the path you read is the one with
+the history in it.
+
 **How to apply:** trust the boot listing; when finishing a dispatched objective, close the lane in the same breath as the final report; when discovering new unresolved work, write a `lanes/` file immediately, not at session end; never delete a dangling `dispatches/` link without reading what happened to its record.
 
 Related: [[handoff-at-boundaries-saves-tokens]], [[a-handoff-doc-must-not-assert-a-drop-it-has-not-made]], [[fleet-burn-budget]].

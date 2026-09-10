@@ -885,6 +885,19 @@ def preflight_of(events: list[dict]) -> dict | None:
     return found[-1] if found else None
 
 
+def stillborn_jobs(events: list[dict]) -> set:
+    """Jobs that emitted `queued` and never started -- they spent nothing and prove nothing.
+
+    `queued` lands before the lock wait, so a job REFUSED at the lock sits in the ledger having
+    never run. Both the preflight's grandfather clause and the cadence gate's rate must subtract
+    them, and they said so in two byte-identical copies until this extraction -- which silently
+    un-armed the mutant guarding the rule, since `mutate.py` needs a UNIQUE site to arm at all. A
+    duplicated invariant is not merely repetition here: it disables its own guard.
+    """
+    started = {ev.get('job') for ev in events if ev.get('ev') == 'start'}
+    return {ev.get('job') for ev in events if ev.get('ev') == 'refused'} - started
+
+
 def paid_review_jobs(events: list[dict]) -> int:
     """Review/write jobs this arc actually launched -- the evidence it committed to a process.
 
@@ -896,8 +909,7 @@ def paid_review_jobs(events: list[dict]) -> int:
     `mutant` is deliberately NOT a paying kind even though it IS a gated one (see GATED_KINDS): a
     mutation battery is an expense the preflight exists to ask about, never a licence to skip it.
     """
-    started = {ev.get('job') for ev in events if ev.get('ev') == 'start'}
-    stillborn = {ev.get('job') for ev in events if ev.get('ev') == 'refused'} - started
+    stillborn = stillborn_jobs(events)
     return sum(1 for ev in events
                if ev.get('ev') == 'queued' and ev.get('kind') in PAYING_KINDS
                and ev.get('job') not in stillborn)
@@ -916,6 +928,125 @@ PAYING_KINDS = ('review', 'write')
 # dispositioned). preflight_of() reads the ledger directly instead. Not an omission.
 TRACK_EVENTS = ('queued', 'start', 'end', 'refused', 'round-close', 'lever')
 
+
+# ------------------------------------------------- the cadence gate (what a REPEAT owes)
+# GATED_KINDS waves `vitest`/`tsc`/`ci` through on the grounds that "a scoped test run is not a
+# process commitment". That is true of ONE run and false of the twenty-fifth, and the difference is
+# structurally invisible to a gate keyed on KIND: every instance passes the per-instance question
+# while the AGGREGATE is the bill. Measured 2026-09-07 on one feature branch of a private repo --
+# 25 commits, a project rule requiring the whole suite green before each one, 1,067 tracked test
+# files, and seven days in which no arc ledger was written at all, so nothing ever priced the repeat.
+#
+# So this gate keys on REPETITION instead -- of the WHOLE-PROJECT runs only, see `cadence_jobs` --
+# and it fires at the FIRST boundary where the saving is still collectable: everything it needs is
+# available at iteration one, and a saving is only collectable forward. Runs 1 and 2 are free
+# (profile what you will run more than twice, not what you ran once) and run 3 must name the
+# schedule.
+CADENCE_KINDS = ('vitest', 'tsc', 'ci')
+# The lock class that is cheap BY CONSTRUCTION and therefore never counts toward a rate, and is
+# never refused by the rate. Keyed on the class `cpu_class` already computes rather than on a second
+# rule of this gate's own, so a run cannot be cheap for the locks and expensive for the gate. `tsc`
+# is always `heavy` and `ci` is always `none`, so neither is quietly dropped from the gate by this.
+CADENCE_EXEMPT_CPU = 'light'
+CADENCE_FREE_RUNS = 2
+# A wrong cadence is fixed by changing the SCHEDULE (batch, background, cap, drop), never by making
+# each instance marginally cheaper -- that preserves the defect at a discount and reads as progress.
+# Generous about wording and strict about shape, for the reason STOP_BOUND_RE is: this gate exists
+# to make the author move the schedule, not to score the prose.
+CADENCE_SCHEDULE_RE = re.compile(
+    r'\bbatch|\bgroup(?:ed|s|ing)?\b|\bbackground|\bparallel|\bdefer|\bcoalesc|\bcombin'
+    r'|\bcap(?:ped|s)?\b|\bceiling|\bdrop(?:ped|s)?\b|\bskip|\bonce\b|\bfewer\b|\bstop\b'
+    r'|\bat the (?:end|tip|last)|\bper (?:group|arc|surface|tip)|\bonly (?:at|on|when)', re.I)
+
+
+def cadence_jobs(events: list[dict], kind: str) -> set:
+    """The job ids of this arc's WHOLE-PROJECT runs of `kind` -- the repeat that is actually the bill.
+
+    A SCOPED run is exempt permanently and by construction, and that exemption is the difference
+    between a gate and a nuisance: running the changed test files after each edit is the pattern
+    this skill asks for, and gating it would only teach people to route around the gate -- the same
+    objection GATED_KINDS raises against gating cheap kinds at all. What costs is the whole-project
+    repeat (`npm test`, a wide vitest, a `tsc`, a CI run), and `cpu_class` has already sorted
+    exactly that, failing towards `heavy` whenever it cannot tell. Measured: the first draft of this
+    gate counted every run and refused the THIRD one-file vitest in an arc, breaking a live overlap
+    test whose three scoped runs were cheap and correct.
+
+    Stillborn jobs are subtracted for the same reason `paid_review_jobs` subtracts them: a run
+    refused at the lock spent nothing, and must not push the arc toward a gate it did not earn.
+    """
+    stillborn = stillborn_jobs(events)
+    return {ev.get('job') for ev in events
+            if ev.get('ev') == 'queued' and ev.get('kind') == kind
+            and ev.get('cpu') != CADENCE_EXEMPT_CPU and ev.get('job') not in stillborn} - {None}
+
+
+def runs_of(events: list[dict], kind: str) -> int:
+    """How many whole-project runs of `kind` this arc has actually launched."""
+    return len(cadence_jobs(events, kind))
+
+
+def cadence_bill(events: list[dict], kind: str) -> tuple[int, float, float]:
+    """(runs measured, median span, total span) for `kind` -- the count the refusal argues with.
+
+    Read from each run's own recorded `span_s`, never estimated: a bare count can only be believed,
+    and the point of refusing here is to hand the author a number they can check. The `end` event
+    carries neither `kind` nor `cpu`, so the billed jobs resolve through `cadence_jobs` -- the SAME
+    set the gate counts, so the count and the price can never disagree about what is billed. Runs open
+    contribute nothing -- a bill that under-reports is honest, one that guesses is not, and
+    under-reporting can only make this gate more permissive, never less.
+    """
+    jobs = cadence_jobs(events, kind)
+    spans = sorted(float(ev['span_s']) for ev in events
+                   if ev.get('ev') == 'end' and ev.get('job') in jobs
+                   and isinstance(ev.get('span_s'), (int, float)) and not isinstance(ev.get('span_s'), bool))
+    if not spans:
+        return 0, 0.0, 0.0
+    n = len(spans)
+    mid = spans[n // 2] if n % 2 else (spans[n // 2 - 1] + spans[n // 2]) / 2.0
+    return n, mid, sum(spans)
+
+
+def cadence_of(events: list[dict], kind: str) -> dict | None:
+    """This arc's last cadence record for `kind`, or None. Per ARC and per KIND.
+
+    Per arc for the same reason the preflight is (the process is the arc's), but per KIND because
+    the answer is kind-specific: batching the suite says nothing about how often the type-checker
+    runs, and one record standing for both is how a real answer becomes a keystroke.
+    """
+    found = [ev for ev in events if ev.get('ev') == 'cadence' and ev.get('kind') == kind]
+    return found[-1] if found else None
+
+
+def cadence_decision(kind: str, prior_runs: int, has_cadence: bool) -> tuple[bool, str]:
+    """May this launch proceed, or does the repeat owe its cadence answer first?"""
+    if kind not in CADENCE_KINDS:
+        return True, f'{kind} is not a repeating cheap kind -- round 1 preflight and close-round govern it'
+    if prior_runs < CADENCE_FREE_RUNS:
+        return True, (f'whole-project run {prior_runs + 1} of {kind}: inside the {CADENCE_FREE_RUNS}-run '
+                      'free window -- profile what you will run more than twice, not what you ran once')
+    if has_cadence:
+        return True, f'whole-project run {prior_runs + 1} of {kind}: cadence on record'
+    return False, (f'whole-project run {prior_runs + 1} of {kind}: no cadence on record, and this arc '
+                   f'has already run the whole project {prior_runs} times under {kind}')
+
+
+def cadence_help(arc: str, kind: str, n: int, mid: float, total: float) -> str:
+    """The refusal, priced from the ledger, with the command that answers it."""
+    bill = (f'measured so far: {n} whole-project run(s) of {kind}, median {hms(mid)}, {hms(total)} total'
+            if n else f'no {kind} run has recorded a span yet, so the bill is unmeasured')
+    return f'''{bill}.
+
+Ask the CADENCE question, not the per-action one: a per-step self-check passes on every instance
+while a wrong RATE is the bill. Answer it with a COUNT -- iterations remaining x cost each -- and
+fix a wrong cadence by changing the SCHEDULE (batch, background, cap, drop), never by making each
+instance marginally cheaper, which preserves the defect at a discount.
+
+Where a PROJECT RULE fixes the rate, the cadence is not yours to lower: record it with --fixed-by
+and find the cost somewhere else.
+
+  python3 {HERE}/loop.py cadence --arc {shlex.quote(arc)} --kind {kind} \\
+    --remaining <N> --each '<measured cost of one run>' \\
+    --schedule '<what moves: batch/background/cap/drop>' | --fixed-by '<the rule that fixes it>' '''
 
 def round_to_close(events: list[dict], track: str, rnd: int) -> int | None:
     """The round this track must have closed before it may launch into `rnd`, or None.
@@ -1005,6 +1136,10 @@ DUR_RE = re.compile(r'^\s*Duration\s+([\d.]+)(m?s)\b', re.M)
 DUR_MIN_RE = re.compile(r'^\s*Duration\s+(\d+)m\s*([\d.]+)s', re.M)
 TF_RE = re.compile(r'^\s*Test Files\s+(.*?)\s*$', re.M)
 T_RE = re.compile(r'^\s*Tests\s+(.*?)\s*$', re.M)
+# This scheduler's own stdout signature, from the three sites that print it (`loop.py: [<job>] ...`
+# on launch, on a non-terminal exit, and on completion). It is how a scanned artifact can NAME the
+# ledgered job that produced it.
+JOB_LINE_RE = re.compile(r'^loop\.py: \[([^\]]+)\]', re.M)
 
 
 def birth(st) -> float | None:
@@ -1039,8 +1174,13 @@ def reported_duration(text: str) -> float | None:
     return None
 
 
-def rows_from_dir(d: str, seen_paths: set) -> list[dict]:
-    """The legacy heuristic scan of a flat artifact dir (birth → mtime spans)."""
+def rows_from_dir(d: str, seen_paths: set, ledgered_jobs: set | None = None) -> list[dict]:
+    """The legacy heuristic scan of a flat artifact dir (birth → mtime spans).
+
+    `ledgered_jobs` is the set of job ids the ledger already accounts for. A scanned log that
+    names one of them is that job's own captured output, not a separate unscheduled run.
+    """
+    ledgered_jobs = ledgered_jobs or set()
     rows = []
     seen = set(seen_paths)
     for v in sorted(glob.glob(os.path.join(d, '*.verdict.json'))):
@@ -1093,6 +1233,22 @@ def rows_from_dir(d: str, seen_paths: set) -> list[dict]:
             continue
         span = st.st_mtime - b
         text = read_head_tail(p) if st.st_size else ''
+        # A caller that redirects the scheduler's own stdout to a file (`run-codex.sh ... >
+        # x.wrap.log 2>&1`) leaves an artifact this scan cannot distinguish from an unscheduled
+        # run — and it is nothing of the kind: its first line carries the loop.py job id of the
+        # LEDGERED run it captured. Two defects came out of that. L7 ("jobs launched outside the
+        # scheduler") fired on three such captures, and the same interval was counted twice in
+        # `busy` — once from the ledger row, once from this one.
+        #
+        # Attribute it by READING it, not by skipping a filename: a `.wrap.log` exclusion only
+        # holds for the suffix someone typed, and the identical redirect under any other name
+        # would keep both defects. Fail-closed in the direction that matters — a log with no job
+        # line, or one naming a job this ledger does not have, stays a stray, so absence of
+        # evidence never attributes and a genuinely unscheduled run is still seen.
+        jm = JOB_LINE_RE.search(text)
+        if jm and jm.group(1) in ledgered_jobs:
+            seen.add(ap)
+            continue
         reported = reported_duration(text)
         tests = ''
         tf = TF_RE.search(text)
@@ -1598,6 +1754,9 @@ def analyze(rows: list[dict], window: tuple[float, float] | None = None, notes=(
 def gather_rows(arc: str | None, dirs: list[str]) -> tuple[list[dict], list[dict]]:
     events = ledger_read(arc) if arc else []
     rows, seen = rows_from_ledger(events)
+    # Derived from the ledger rows themselves rather than restated, so a job the reader knows about
+    # is a job the dir scan can attribute — the two sets cannot drift apart.
+    ledgered_jobs = {r['job'] for r in rows if r.get('job')}
     scan = list(dirs)
     if arc and arc not in [os.path.abspath(d) for d in scan]:
         scan.append(arc)
@@ -1605,7 +1764,7 @@ def gather_rows(arc: str | None, dirs: list[str]) -> tuple[list[dict], list[dict
         if not os.path.isdir(d):
             print(f'!! not a directory: {d}', file=sys.stderr)
             continue
-        rows.extend(rows_from_dir(d, seen))
+        rows.extend(rows_from_dir(d, seen, ledgered_jobs))
     notes = [ev for ev in events if ev.get('ev') == 'note']
     return rows, notes
 
@@ -1830,6 +1989,20 @@ def cmd_run(args) -> int:
             if not ok:
                 print(f'loop.py: GATE REFUSED launching {args.kind} for track {args.track} round {args.round}:\n{msg}', file=sys.stderr)
                 return RC_GATE
+        # Keyed on how many times this arc has already run this kind, never on the kind alone: the
+        # gate above cannot see a cheap check whose RATE is the expense. Same round lock, same
+        # already-read `events`, and refused BEFORE the queued event so a refusal cannot count
+        # itself toward the next refusal's bill.
+        # `cpu != CADENCE_EXEMPT_CPU` on BOTH sides: a scoped run neither counts toward the rate
+        # nor is refused by it. Gating the cheap run is what would teach people around the gate.
+        if args.kind in CADENCE_KINDS and cpu != CADENCE_EXEMPT_CPU:
+            ok, msg = cadence_decision(args.kind, runs_of(events, args.kind),
+                                       cadence_of(events, args.kind) is not None)
+            if not ok:
+                n, mid, total = cadence_bill(events, args.kind)
+                print(f'loop.py: CADENCE REFUSED launching {args.kind}:\n{msg}.\n'
+                      + cadence_help(arc, args.kind, n, mid, total), file=sys.stderr)
+                return RC_GATE
         tree = os.path.abspath(args.tree) if args.tree else None
         if tree and tree_state(tree) is None:
             return die(f'--tree {tree} is not a git worktree')
@@ -2047,6 +2220,61 @@ def cmd_preflight(args) -> int:
     print(f'  {"codex":14s} ' + (args.codex or f'UNAVAILABLE -- {args.codex_unavailable}'))
     if prior:
         print(f'  (supersedes the preflight recorded at {clock(prior.get("t"))})')
+    return 0
+
+
+def cmd_cadence(args) -> int:
+    arc = need_arc(args)
+    if not arc:
+        return RC_USAGE
+    if args.kind not in CADENCE_KINDS:
+        return die(f'--kind {args.kind} is not a cadence-gated kind (one of {", ".join(CADENCE_KINDS)})')
+    if args.remaining < 0:
+        return die(f'--remaining {args.remaining} is not a count of iterations left')
+    why = thin_answer(args.each)
+    if why:
+        return die(f'--each: {why}.\nA cadence answer is "iterations remaining x cost EACH"; without '
+                   'the cost of one run there is no total, and a total is the only form a wrong rate '
+                   'is visible in.')
+    # Exactly one of the two routes. A run that supplies both has not decided whether the rate is
+    # its own to change, and that is the whole question this gate asks.
+    if bool(args.schedule) == bool(args.fixed_by):
+        return die('pass one of --schedule "<what moves>" / --fixed-by "<the project rule that fixes '
+                   'the rate>", not both and not neither')
+    if args.fixed_by:
+        why = thin_answer(args.fixed_by)
+        if why:
+            return die(f'--fixed-by: {why}. Name the rule (and where it is written), so the next '
+                       'session can check whether it still says that.')
+    else:
+        why = thin_answer(args.schedule)
+        if why:
+            return die(f'--schedule: {why}.')
+        # The banned shape, not a banned wording: an answer that only makes each instance cheaper
+        # leaves the rate exactly where it was, and reads as progress while doing it.
+        if not CADENCE_SCHEDULE_RE.search(args.schedule):
+            return die(f'--schedule does not change the SCHEDULE: {args.schedule!r}.\n'
+                       'Batch it, background it, cap it, or drop it. Making each instance marginally '
+                       'cheaper preserves the defect at a discount -- and if the rate is fixed by a '
+                       'project rule, say so with --fixed-by and find the cost elsewhere.')
+    events = ledger_read(arc)
+    n, mid, total = cadence_bill(events, args.kind)
+    prior = cadence_of(events, args.kind)
+    ledger_append(arc, dict(ev='cadence', t=now(), kind=args.kind, remaining=args.remaining,
+                            each=args.each, schedule=args.schedule or None,
+                            fixed_by=args.fixed_by or None,
+                            measured_runs=n, measured_median_s=mid, measured_total_s=total,
+                            supersedes=(prior or {}).get('t')))
+    print(f'cadence recorded for arc {arc}, kind {args.kind}:')
+    print(f'  {"remaining":14s} {args.remaining}')
+    print(f'  {"each":14s} {args.each}')
+    print(f'  {"schedule" if args.schedule else "fixed-by":14s} {args.schedule or args.fixed_by}')
+    print(f'  {"measured":14s} ' + (f'{n} run(s), median {hms(mid)}, {hms(total)} total so far'
+                                    if n else 'no span recorded yet'))
+    if args.fixed_by:
+        print('  NOTE: the rate is fixed by a project rule -- the saving has to come from somewhere else.')
+    if prior:
+        print(f'  (supersedes the cadence recorded at {clock(prior.get("t"))})')
     return 0
 
 
@@ -2412,6 +2640,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--codex-unavailable', dest='codex_unavailable',
                    help='why the Codex critique was skipped -- recorded, never silent, and never a blocker')
     p.set_defaults(fn=cmd_preflight)
+
+    p = sub.add_parser('cadence', help='what a REPEATING cheap check owes before its third run')
+    common(p, track=False)
+    p.add_argument('--kind', required=True, choices=CADENCE_KINDS,
+                   help='the repeating kind being priced')
+    p.add_argument('--remaining', type=int, required=True,
+                   help='iterations still to come -- the count that turns a per-run cost into a bill')
+    p.add_argument('--each', required=True,
+                   help='measured cost of ONE run')
+    p.add_argument('--schedule',
+                   help='what MOVES: batch, background, cap, drop (not "make each run cheaper")')
+    p.add_argument('--fixed-by', dest='fixed_by',
+                   help='the project rule that fixes this rate, when the cadence is not yours to lower')
+    p.set_defaults(fn=cmd_cadence)
 
     p = sub.add_parser('close-round', help='profile the round, write its levers, record the close')
     common(p)

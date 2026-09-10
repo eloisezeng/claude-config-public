@@ -59,4 +59,13 @@ The repair is to make the application mechanical, not the reading: once a review
 Measured effect on this arc's own rounds: serial sum 2536.8 s against 1172.4 s of wall (53.8% removed) in round 2, and 1887 s against 821 s (56.5%) in round 3.
 The generalisation: for every TRIGGERED lever, ask what CODE would apply it at the next launch — if the answer is "the operator reads the table and remembers", the lever is not landed.
 
+**The fifth trigger failure: every repair so far is bound to a codex round boundary, and a plain ship arc has none.**
+Measured 2026-09-07, with the preflight gate, the ledger, `close-round` and `snapshot` all live and all green: she asked a fourth time, on an arc that never launched a single codex round.
+`profile-loop.sh` reads round dirs, `loop.py` gates paid job launches — so on a build → test → push → CI-wait → merge arc, every mechanism sits armed behind a trigger that never fires, and the rule falls back to recall at a busy moment, which is where it has lost all four previous times.
+The boundaries on that arc are real and repeat: each push starts a ~26-check matrix (19 sharded Playwright jobs), each CI wait is an iteration, and each local full-suite run duplicates what CI is about to run on the same tree.
+The instance: an 80-iteration 45 s poll stayed armed against a commit already superseded by the next fix; the branch had taken an optional `main` merge whose entire content was `.claude/memory/*.md`, which reset a green check matrix for nothing; and a 21,512-test local suite ran against the same tree CI was testing, competing for the same CPU.
+None of that needed a profiler to see — it needed the cadence question asked at the first boundary instead of the fourth.
+The repair is to bind the question to the ARTIFACT rather than to the workflow: at any boundary where work is about to be re-run — a push, a CI wait, a suite invocation, a poll — state iterations-remaining x cost-each before arming it, and fix a wrong rate by changing the SCHEDULE (batch the commits into one push, kill a poll whose subject is superseded, let CI own the full suite and run only the changed spec locally), never by making each iteration marginally cheaper — [[check-the-cadence-not-only-the-action]].
+The generalisation over all five: the mechanism must key on what is being SPENT, not on which skill happens to be running.
+
 Related: [[convergence-loop-speed-rules]] (the four levers this rule tells you to go looking for), [[a-report-is-not-a-stopping-point]], [[reduce-token-burn]], [[extract-learnings-proactively]], [[a-guard-must-be-satisfiable-not-just-failable]].

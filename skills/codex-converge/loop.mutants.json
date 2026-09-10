@@ -539,8 +539,8 @@
   },
   {
     "label": "M82 a job that never started still grandfathers the arc, so a refused lock buys a free round 1",
-    "old": "    stillborn = {ev.get('job') for ev in events if ev.get('ev') == 'refused'} - started\n",
-    "new": "    stillborn = set()\n",
+    "old": "    return {ev.get('job') for ev in events if ev.get('ev') == 'refused'} - started\n",
+    "new": "    return set()\n",
     "expect": "killed",
     "test": "test_a_job_refused_at_the_lock_does_not_grandfather_the_arc"
   },
@@ -655,5 +655,40 @@
     "new": "        n = src.count(anchor)\n",
     "expect": "killed",
     "test": "test_a_mutant_with_no_anchor_at_all_is_reported_as_matching_NOTHING"
+  },
+  {
+    "label": "C1 the cadence free window is off by one, so the run that owes an answer is waved through",
+    "old": "    if prior_runs < CADENCE_FREE_RUNS:\n",
+    "new": "    if prior_runs <= CADENCE_FREE_RUNS:\n",
+    "expect": "killed",
+    "test": "test_cadence_decision_sweep"
+  },
+  {
+    "label": "C2 a per-instance speedup passes as a schedule change",
+    "old": "        if not CADENCE_SCHEDULE_RE.search(args.schedule):\n",
+    "new": "        if not args.schedule:\n",
+    "expect": "killed",
+    "test": "test_the_cli_refuses_a_per_instance_speedup_and_takes_a_schedule"
+  },
+  {
+    "label": "C3 the bill counts every job's span, not this kind's (the `end` event carries no kind)",
+    "old": "                   if ev.get('ev') == 'end' and ev.get('job') in jobs\n",
+    "new": "                   if ev.get('ev') == 'end'\n",
+    "expect": "killed",
+    "test": "test_the_bill_reads_spans_only_through_this_kinds_jobs"
+  },
+  {
+    "label": "C4 a run refused at the lock counts toward the rate it never contributed to",
+    "old": "            and ev.get('cpu') != CADENCE_EXEMPT_CPU and ev.get('job') not in stillborn} - {None}\n",
+    "new": "            and ev.get('cpu') != CADENCE_EXEMPT_CPU} - {None}\n",
+    "expect": "killed",
+    "test": "test_a_run_refused_at_the_lock_does_not_count_toward_the_rate"
+  },
+  {
+    "label": "C5 a scoped run counts toward the rate, so the gate refuses the cheap pattern it asks for",
+    "old": "            and ev.get('cpu') != CADENCE_EXEMPT_CPU and ev.get('job') not in stillborn} - {None}\n",
+    "new": "            and ev.get('job') not in stillborn} - {None}\n",
+    "expect": "killed",
+    "test": "test_a_scoped_run_is_never_counted_and_never_refused"
   }
 ]

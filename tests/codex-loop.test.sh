@@ -85,6 +85,16 @@ export CC_LOCK_DIR="$SANDBOX/locks"
 unset CC_ARC CC_TRACK CC_ROUND CLAUDE_JOB_DIR CODEX_STUB_TOUCH CODEX_STUB_MODE CC_LOOP_JOB CC_LOOP_ARC CODEX_STUB_EFFORT
 unset CODEX_STUB_NO_BANNER CODEX_STUB_MODEL CODEX_STUB_SLEEP CODEX_STUB_TICKS CC_ONEOFF_ARC
 unset RUN_CODEX_POLL RUN_CODEX_IDLE_WINDOW RUN_CODEX_STALL_LIMIT
+unset RUN_CODEX_SALVAGE_LINES RUN_CODEX_QUEUE_STEP
+# run-codex.sh counts `codex exec` processes MACHINE-wide before it spends, and reads the process
+# table for sibling launchers in the same background job. Both are fleet-facing rules, so leaving
+# them live here would make every section below measure how busy this machine happens to be: a real
+# convergence arc in another terminal would queue or refuse the whole suite. Neutralise them at the
+# top -- a cap nothing can reach, and a declared job pid that cannot exist, which the guard reports
+# as an ABSTENTION -- and let sections 52 and 53, which take a LIVE baseline and set their own
+# thresholds against it, be the only places the two rules are exercised.
+export RUN_CODEX_MAX_CODEX_PROCS=100000
+export RUN_CODEX_JOB_PID=0
 POLICY="$(sed -n 's/^POLICY_VERSION="\(.*\)"$/\1/p' "$RUN")"
 ARC="$SANDBOX/arc"
 LEDGER="$ARC/jobs.jsonl"
@@ -1869,6 +1879,171 @@ RUN_CODEX_POLL=2 RUN_CODEX_IDLE_WINDOW=1 RUN_CODEX_STALL_LIMIT=2 CODEX_STUB_MODE
 slow=$(( $(date +%s) - t0 ))
 check "control: a silent run is still killed (rc $rc_slow, non-zero)" test "$rc_slow" -ne 0
 check "control: and not before its 4s budget (took ${slow}s, want >= 3)" test "$slow" -ge 3
+
+# --- 51. evidence survives a kill
+# Measured 2026-09-07 (arc 8109eefe): the harness's low-memory guard killed the one background job
+# holding three review lenses, the SIGTERM reached every codex child, and three verdict files were
+# empty.  850 KB of reasoning had already been written to the three run logs and nothing said so;
+# one HIGH finding was recovered from them BY HAND, days later.  The retry path made it worse by
+# truncating the log at the start of the next attempt.
+#
+# This section pins the preservation in BOTH directions, because "a file exists" is the easiest
+# assertion in the world to satisfy by accident: a killed run must leave the evidence, and a healthy
+# run must leave NOTHING behind -- otherwise a successor reads a previous run's salvage as if it
+# described this one, which is adjudicating a dead lead.
+echo "== 51. a killed run leaves its evidence; a healthy run leaves none"
+SALV="$SANDBOX/art/out.json.salvage.txt"
+PART="$SANDBOX/art/out.json.partial.json"
+
+RUN_CODEX_POLL=1 RUN_CODEX_IDLE_WINDOW=1 RUN_CODEX_STALL_LIMIT=2 CODEX_STUB_MODE=silent \
+  CODEX_STUB_SLEEP=40 WORKDIR="$SANDBOX/plain" launch --one-off -- -p sol; rc_reap=$?
+unset RUN_CODEX_POLL RUN_CODEX_IDLE_WINDOW RUN_CODEX_STALL_LIMIT CODEX_STUB_MODE CODEX_STUB_SLEEP
+check "a run killed by the watchdog still fails (rc $rc_reap, non-zero)" test "$rc_reap" -ne 0
+check "no verdict is promoted from it" test ! -e "$SANDBOX/art/out.json"
+check "but the evidence is preserved" test -s "$SALV"
+check "the salvage says what it is, so it cannot be read as a verdict" \
+  grep -q 'EVIDENCE, not a verdict' "$SALV"
+check "the salvage says a killed run's reasoning is a lead, never a finding" \
+  grep -q 'never a finding' "$SALV"
+check "the salvage names the reason it exists" grep -q 'attempts ended without a usable verdict' "$SALV"
+check "the salvage carries real log content, not just a header" grep -q 'model: gpt-5.6-sol' "$SALV"
+check "stderr points the successor at the file" grep -q 'EVIDENCE PRESERVED' "$SANDBOX/stderr"
+# The retry used to truncate the log, so the recovery path destroyed the record of what it was
+# recovering from. Three attempts must leave the first two behind, named by attempt.
+check "attempt 1's log survived the retry" test -s "$SANDBOX/art/run.log.attempt1"
+check "attempt 2's log survived too" test -s "$SANDBOX/art/run.log.attempt2"
+check "the salvage lists the earlier attempt logs" grep -q 'earlier: .*run.log.attempt1' "$SALV"
+
+# A run that answered and then failed has a non-empty -o file that is never promoted. That partial
+# answer is the single most useful thing a lost round can leave, so it is kept beside the verdict.
+CODEX_STUB_MODE=fail-with-output WORKDIR="$SANDBOX/plain" launch --one-off -- -p sol; rc_fwo=$?
+unset CODEX_STUB_MODE
+check "a run that answered then failed is still a failure (rc $rc_fwo, non-zero)" test "$rc_fwo" -ne 0
+check "its unpromoted answer is kept as .partial.json" test -s "$PART"
+check "and it is the bytes codex actually wrote" grep -q '"ok":true' "$PART"
+check "the unpromoted answer never became the verdict" test ! -e "$SANDBOX/art/out.json"
+
+# The other direction, and the one that matters most: a run that SUCCEEDS clears every sidecar the
+# previous run left. Both files above are live on disk right now, so this is not vacuous.
+check "precondition: stale sidecars exist before the healthy run" test -s "$SALV" -a -s "$PART"
+WORKDIR="$SANDBOX/plain" launch --one-off -- -p sol; rc_clean=$?
+check "the healthy run succeeds (rc 0, got $rc_clean)" test "$rc_clean" -eq 0
+check "and leaves no salvage of its own" test ! -e "$SALV"
+check "and no partial verdict" test ! -e "$PART"
+check "and no rolled attempt logs" bash -c "! ls '$SANDBOX/art/'run.log.attempt* >/dev/null 2>&1"
+
+# The shape that actually cost the round: not a watchdog kill from inside, but a SIGTERM from
+# outside, arriving while codex is mid-reasoning. Nothing in the launcher gets to decide anything.
+CODEX_STUB_MODE=silent CODEX_STUB_SLEEP=40 \
+  bash "$RUN" --policy-version "$POLICY" --one-off \
+  "$SANDBOX/prompt.txt" "$SANDBOX/art/term.json" "$SANDBOX/art/term.log" "$SANDBOX/plain" -p sol \
+  >/dev/null 2>"$SANDBOX/term.stderr" &
+term_pid=$!
+_w=0; while [ ! -s "$SANDBOX/art/term.log" ] && [ "$_w" -lt 20 ]; do sleep 0.5; _w=$((_w + 1)); done
+kill -TERM "$term_pid" 2>/dev/null
+wait "$term_pid" 2>/dev/null; rc_term=$?
+check "a launcher killed from outside dies (rc $rc_term, non-zero)" test "$rc_term" -ne 0
+check "the reap shape preserves its evidence too" test -s "$SANDBOX/art/term.json.salvage.txt"
+check "and the salvage names the signal that ended it" \
+  grep -q 'terminated by SIGTERM' "$SANDBOX/art/term.json.salvage.txt"
+rm -f "$SANDBOX/art/term.json.salvage.txt" "$SANDBOX/art/term.json.partial.json"
+
+# --- 52. one lens per background job
+# Three lenses in one background Bash job is how a single low-memory kill took a whole review round:
+# the job is the reapable unit, and three tracks inside it share one fate. Parallel lenses stay the
+# policy -- they just have to stop sharing a job.
+#
+# The unit is the job SHELL, never the process group: loop.py starts its child in a NEW process
+# group, so a pgid comparison sees three siblings as three jobs and would never fire. That is why
+# this drives a REAL sibling launcher rather than a hand-made process -- a fixture whose ancestry
+# and command line were written to satisfy the guard would prove nothing about either.
+echo "== 52. a second track in the same job is refused before anything is spent"
+sib_out="$SANDBOX/art/sib.json"
+CODEX_STUB_MODE=silent CODEX_STUB_SLEEP=40 RUN_CODEX_JOB_PID=0 \
+  bash "$RUN" --policy-version "$POLICY" --arc "$ARC" --track SIBLING --round 1 \
+  "$SANDBOX/prompt.txt" "$sib_out" "$SANDBOX/art/sib.log" "$WORK" -p sol \
+  >/dev/null 2>&1 &
+sib_pid=$!
+_w=0; while [ ! -s "$SANDBOX/art/sib.log" ] && [ "$_w" -lt 30 ]; do sleep 0.5; _w=$((_w + 1)); done
+check "precondition: the sibling track is really running" kill -0 "$sib_pid"
+
+RUN_CODEX_JOB_PID=$$ launch --arc "$ARC" --track MINE --round 1 -- -p sol; rc_two=$?
+check "a second track in the same job is refused (rc 2, got $rc_two)" test "$rc_two" -eq 2
+check "the refusal names the track already running" grep -q "ALREADY running track 'SIBLING'" "$SANDBOX/stderr"
+check "the refusal says why one job is the wrong unit" grep -q 'one reap kills a whole job' "$SANDBOX/stderr"
+check "the refusal says what to do instead" grep -q 'OWN background job' "$SANDBOX/stderr"
+check "nothing was spent on the refused launch" test ! -e "$CODEX_STUB_MARKER"
+check "the refused launch added no ledger event" ledger_untouched
+
+# Control 1 -- the guard is about a DIFFERENT track, not about any sibling at all. Relaunching the
+# same track must not trip it, or the rule would forbid every retry.
+RUN_CODEX_JOB_PID=$$ launch --arc "$ARC" --track SIBLING --round 1 -- -p sol
+check "control: the SAME track in the same job is not refused by this guard" \
+  bash -c "! grep -q 'ALREADY running track' '$SANDBOX/stderr'"
+
+# Control 2 -- the guard is about a job it can identify. A declared job pid that does not exist is
+# an ABSTENTION, said out loud, not a silent pass and not a refusal.
+RUN_CODEX_JOB_PID=999999 launch --arc "$ARC" --track MINE --round 1 -- -p sol; rc_abs=$?
+check "control: an unidentifiable job ABSTAINS rather than refusing (rc $rc_abs, not 2)" test "$rc_abs" -ne 2
+check "control: and says so instead of passing silently" grep -q 'guard ABSTAINED' "$SANDBOX/stderr"
+check "control: the abstention names the way to enable the guard" grep -q 'RUN_CODEX_JOB_PID' "$SANDBOX/stderr"
+
+# Control 3 -- and it is the sibling's LIVENESS that decides, not the fact that a sibling once ran.
+kill -TERM "$sib_pid" 2>/dev/null; wait "$sib_pid" 2>/dev/null
+_w=0; while kill -0 "$sib_pid" 2>/dev/null && [ "$_w" -lt 20 ]; do sleep 0.5; _w=$((_w + 1)); done
+RUN_CODEX_JOB_PID=$$ launch --arc "$ARC" --track MINE --round 1 -- -p sol; rc_solo=$?
+check "control: with the sibling gone the same launch runs (rc 0, got $rc_solo)" test "$rc_solo" -eq 0
+check "control: and was not refused by the guard" \
+  bash -c "! grep -q 'ALREADY running track' '$SANDBOX/stderr'"
+rm -f "$sib_out" "$sib_out.salvage.txt" "$sib_out.partial.json" "$SANDBOX/art/sib.log"*
+
+# --- 53. the machine-load preflight
+# At the reap that cost round 1 the machine read 52% FREE memory with 158 claude processes alive, so
+# a free-memory threshold would have been green at the exact moment of the kill. Free memory is
+# therefore recorded and NOT gated, and the gate is the count of `codex exec` processes -- the one
+# quantity this launcher can see itself adding to. Both halves are asserted here, because a number
+# printed next to a refusal reads like the reason for it whether or not it is.
+#
+# Every threshold below is taken relative to a LIVE baseline count. A fixed cap would make this
+# section measure how busy the machine happens to be.
+echo "== 53. the launcher queues under load, and refuses only after queueing"
+codex_now() { ps -Ao command= 2>/dev/null | grep -c '[c]odex exec' || true; }
+start_decoy() { bash -c 'exec -a "codex exec --codex-loop-test-decoy" sleep 120' & }
+cbase="$(codex_now)"
+start_decoy; decoy1=$!
+_w=0; while [ "$(codex_now)" -le "$cbase" ] && [ "$_w" -lt 20 ]; do sleep 0.2; _w=$((_w + 1)); done
+cap=$((cbase + 1))
+check "precondition: the decoy is visible to the same counter the launcher uses" \
+  test "$(codex_now)" -ge "$cap"
+
+RUN_CODEX_MAX_CODEX_PROCS="$cap" RUN_CODEX_QUEUE_WAIT=0 WORKDIR="$SANDBOX/plain" \
+  launch --one-off -- -p sol; rc_cap=$?
+check "at the cap with no patience left, the launch is refused (rc 2, got $rc_cap)" test "$rc_cap" -eq 2
+check "the refusal names the cap and the count" grep -q "processes are already running on this machine (cap $cap)" "$SANDBOX/stderr"
+check "the refusal says nothing was spent" grep -q 'Nothing has been spent' "$SANDBOX/stderr"
+check "and nothing was: codex was never invoked" test ! -e "$CODEX_STUB_MARKER"
+
+# The whole point of the design: an unattended arc that waits ten minutes has lost ten minutes; one
+# that refuses has lost the round. So load must QUEUE by default, and clear on its own.
+( sleep 3; kill "$decoy1" 2>/dev/null ) &
+RUN_CODEX_MAX_CODEX_PROCS="$cap" RUN_CODEX_QUEUE_WAIT=60 RUN_CODEX_QUEUE_STEP=1 \
+  WORKDIR="$SANDBOX/plain" launch --one-off -- -p sol; rc_q=$?
+check "a run held by load waits and then proceeds (rc 0, got $rc_q)" test "$rc_q" -eq 0
+check "it said it was queueing before it spent anything" grep -q 'queueing up to' "$SANDBOX/stderr"
+check "and the preflight records how long it waited" grep -qE 'queued [1-9][0-9]*s' "$SANDBOX/stderr"
+check "the queued run landed its verdict" test -s "$SANDBOX/art/out.json"
+kill "$decoy1" 2>/dev/null
+
+# Control -- below the cap nothing waits, and free memory is recorded WITHOUT being a gate. If the
+# memory reading were ever wired into the decision, this run is the one that would start failing on
+# a busy machine while the codex count sat at zero.
+RUN_CODEX_MAX_CODEX_PROCS=100000 WORKDIR="$SANDBOX/plain" launch --one-off -- -p sol; rc_free=$?
+check "control: below the cap the run is not held at all (rc 0, got $rc_free)" test "$rc_free" -eq 0
+check "control: and it did not queue" grep -q 'queued 0s' "$SANDBOX/stderr"
+check "control: no queueing notice was printed" \
+  bash -c "! grep -q 'queueing up to' '$SANDBOX/stderr'"
+check "the preflight records free memory" grep -qE 'free memory (unavailable|[0-9]+)%' "$SANDBOX/stderr"
+check "and says in the line itself that it is not a gate" grep -q 'recorded, NOT gated' "$SANDBOX/stderr"
 
 [ "$fail" -eq 0 ] && echo "codex-loop: all checks passed" || echo "codex-loop: FAILURES"
 exit "$fail"

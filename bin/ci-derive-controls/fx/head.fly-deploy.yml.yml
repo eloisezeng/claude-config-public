@@ -1,0 +1,72 @@
+name: Deploy to Fly
+
+# A deploy REPLACES the single Fly machine. Anything long-running on it dies with no
+# controlled abort: a migration mid-write, a detached sweep, a zone burst. That is not
+# hypothetical — on 2026-08-11 it happened three times in one afternoon, and the closest call left only THIRTEEN SECONDS: the migration's process exited at
+# 22:04:46 and the machine was replaced at 22:04:59. (Measured from its last WRITE it looks like
+# 37s — 22:04:22 to 22:04:59 — but the process stayed alive ~24s past its last write finishing the
+# cards phase and assembling its report, and killing it there would still have been damage. Quote
+# the write-to-reboot number and a future reader thinks they had nearly 3x the margin they had.
+# Process lifetime is the measure that binds, not write activity.)
+#
+# So the deploy is INTERLOCKED. `.deploy-freeze` on the deploy-control branch is a hard stop,
+# checked before flyctl is ever invoked. See scripts/deploy-freeze.sh and the CLAUDE.md section
+# "Freezing deploys".
+on:
+  push:
+    branches: [main]
+  # Manual re-run. Needed because a deploy refused by the interlock does NOT retry itself:
+  # once the freeze lifts, main is deployed only on the NEXT push, so whatever merged during
+  # the freeze would sit undeployed indefinitely. scripts/deploy-freeze.sh off offers to
+  # dispatch this for exactly that reason.
+  workflow_dispatch:
+
+jobs:
+  interlock:
+    name: deploy interlock
+    runs-on: ubuntu-latest
+    steps:
+      # Read the freeze from the deploy-control BRANCH, not from main. It lived on main until
+      # 2026-08-18, when the "Protect main" ruleset made an armed freeze unclearable: the
+      # freeze turns the required "deploy freeze check" red on every PR including the one that
+      # would clear it, and direct push to main is refused (GH013, bypass: never). The control
+      # branch is outside the ruleset, so a freeze can always be lifted.
+      #
+      # The signal is the file's CONTENT, never its existence. On a PRIVATE repo GitHub answers
+      # 404 for "you may not see this" exactly as it does for "not there" — measured 2026-08-18
+      # on this repo unauthenticated: the contents URL, the branch ref and the repo root ALL
+      # return 404. So an interlock that treats 404 as "no freeze" fails OPEN the moment the
+      # token loses Contents:read, or someone deletes deploy-control, and it prints a healthy
+      # green line while doing it. Only "STATE: CLEAR", read successfully, permits a deploy.
+      # The predicate lives in scripts/deploy-freeze-check.sh so this job, the last-moment
+      # re-check below, and ci.yml's PR gate cannot drift apart. Checking out to reach it is
+      # deliberate: this workflow file is already read from the same commit, so sourcing the
+      # rule from that commit adds no exposure it did not have.
+      - uses: actions/checkout@v4
+      - name: Refuse to deploy while a freeze is active
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bash scripts/deploy-freeze-check.sh deploy
+
+  deploy:
+    name: fly deploy
+    needs: interlock   # the ONLY thing standing between a merge and a machine replacement
+    runs-on: ubuntu-latest
+    concurrency: deploy-group   # one deploy at a time
+    steps:
+      - uses: actions/checkout@v4
+      # Re-read the freeze as late as possible. `needs: interlock` proves a freeze was absent
+      # when that job ran — which is minutes ago: checkout, toolchain setup and the
+      # deploy-group queue all sit between the two. A freeze armed in that window was
+      # previously ignored outright, because an authorised deploy never looked again. This
+      # does NOT close the race (see CLAUDE.md); it shrinks it from minutes to seconds.
+      - name: Re-check the freeze immediately before deploying
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bash scripts/deploy-freeze-check.sh precheck
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

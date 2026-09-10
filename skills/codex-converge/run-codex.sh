@@ -62,6 +62,71 @@ ARC=""; TRACK=""; ROUND=""; NAME=""; ONE_OFF=0; SCHEDULED=0
 # `--policy-version=<v>` left ACK_POLICY_VERSION empty and printed "convergence policy changed",
 # sending the caller off to re-read SKILL.md over a shell-quoting difference, and `--arc=DIR` would
 # have been opened as the prompt.  An unrecognised option must never silently become a positional.
+# --- one lens per background job ------------------------------------------------------------------
+# Parallel lenses are the policy; three lenses sharing ONE reapable job is not, and the difference is
+# invisible at the moment of launch. Measured 2026-09-07 (arc 8109eefe): three review lenses were
+# launched from one background Bash job, the harness's low-memory guard killed that job, the SIGTERM
+# reached every codex child it had started, and a single reap cost the whole round.
+#
+# The unit is the job SHELL, not the process group. loop.py starts its child in a NEW process group
+# (verified live: three sibling run-codex.sh processes each led their own group), so a pgid
+# comparison sees three siblings as three jobs and this guard would never fire. The job shell is the
+# last ancestor below the first `claude` ancestor -- one Bash tool call, one shell, one reap.
+# `--track` is read from a sibling run-codex.sh OR loop.py, because the SCHEDULED inner launcher
+# carries no --track on its own command line; its loop.py parent does. `claude` is matched on ucomm
+# as a separate ps field, never inside the command line, where every /Users/*/.claude/... path is a
+# false positive.
+#
+# Where no job shell can be identified (a plain terminal, CI) the guard ABSTAINS and says so on
+# stderr: an abstention that announces itself is not a silent pass. RUN_CODEX_JOB_PID names the job
+# explicitly, which is also how the test suite reaches the rule.
+_refuse_multitrack_job() {
+  [ -n "$TRACK" ] || return 0
+  _sib="$(ps -Ao pid=,ppid=,ucomm=,command= 2>/dev/null | awk -v me="$$" -v mytrack="$TRACK" -v forced="${RUN_CODEX_JOB_PID:-}" '
+    { pid = $1; ppid[pid] = $2; ucomm[pid] = $3; cmd[pid] = $0 }
+    END {
+      if (forced != "") { job = forced }
+      else {
+        p = me; prev = ""
+        while (p != "" && p != "1" && p != "0" && (p in ppid)) {
+          if (ucomm[p] ~ /claude/) { job = prev; break }
+          prev = p; p = ppid[p]
+        }
+      }
+      if (job == "" || !(job in ppid)) { print "ABSTAIN"; exit }
+      for (q in cmd) {
+        if (q == me) continue
+        if (cmd[q] !~ /run-codex\.sh/ && cmd[q] !~ /loop\.py/) continue
+        n = split(cmd[q], f, /[ \t]+/); t = ""
+        for (i = 1; i <= n; i++) {
+          if (f[i] == "--track" && i < n) { t = f[i + 1]; break }
+          if (f[i] ~ /^--track=/) { t = substr(f[i], 9); break }
+        }
+        if (t == "" || t == mytrack) continue
+        a = q; hit = 0
+        while (a != "" && a != "1" && a != "0" && (a in ppid)) {
+          if (a == job) { hit = 1; break }
+          a = ppid[a]
+        }
+        if (hit) { print q " " t; exit }
+      }
+    }')"
+  case "$_sib" in
+    ABSTAIN)
+      echo "run-codex: one-lens-per-job guard ABSTAINED -- no job shell in this process's ancestry." >&2
+      echo "run-codex: export RUN_CODEX_JOB_PID=<pid whose death would take this run with it> to enable it." >&2
+      return 0 ;;
+    "") return 0 ;;
+  esac
+  _sib_pid="${_sib%% *}"; _sib_track="${_sib#* }"
+  echo "run-codex: this background job is ALREADY running track '$_sib_track' (pid $_sib_pid); this launch is track '$TRACK'." >&2
+  echo "run-codex: one reap kills a whole job. Three lenses in one job is how a single low-memory kill" >&2
+  echo "run-codex: cost an entire review round on 2026-09-07 -- 850 KB of reasoning, zero verdicts." >&2
+  echo "run-codex: launch each lens in its OWN background job. The lenses stay parallel; they just" >&2
+  echo "run-codex: stop sharing one fate." >&2
+  exit 2
+}
+
 while [ "$#" -gt 0 ]; do
   _opt="$1"; _val=""; _has_val=0
   case "$_opt" in
@@ -175,6 +240,9 @@ if [ "$SCHEDULED" -eq 0 ]; then
   fi
   if [ -n "$ARC" ]; then
     case "$ROUND" in ''|*[!0-9]*) echo "run-codex: --round must be a whole number, got '$ROUND'" >&2; exit 2 ;; esac
+    # Only the OUTER launcher reaches here with a --track; the scheduled inner one has TRACK empty
+    # and the guard returns immediately, so a run is never refused because of its own loop.py parent.
+    _refuse_multitrack_job
     [ -x "$HERE/loop.py" ] || [ -f "$HERE/loop.py" ] || { echo "run-codex: $HERE/loop.py is missing — cannot schedule" >&2; exit 2; }
     # loop.py runs the inner launcher with cwd=<workdir>, so every path must be absolute before the
     # re-exec or a relative prompt/out/log resolves somewhere else inside the child.
@@ -454,6 +522,57 @@ fi
 # $OUT after a non-zero exit would consume the previous round's answer as if it were this one's.
 rm -f "$OUT" || { echo "run-codex: cannot remove existing output file: $OUT" >&2; exit 2; }
 [ -e "$OUT" ] && { echo "run-codex: output path still exists after removal: $OUT" >&2; exit 2; }
+# The salvage sidecars below are per-RUN evidence, and stale evidence is worse than none: a successor
+# that reads a previous run's salvage as if it described this one is adjudicating a dead lead.
+rm -f "$OUT.salvage.txt" "$OUT.partial.json" 2>/dev/null || true
+rm -f "$LOG".attempt* 2>/dev/null || true
+
+# --- machine preflight ----------------------------------------------------------------------------
+# Measured 2026-09-07, at the reap that cost round 1: the machine was at 52% free memory with 158
+# claude processes alive. Free memory is therefore NOT the signal -- a threshold on it would have
+# read green at the exact moment of the kill. It is RECORDED here for the postmortem and deliberately
+# not gated on, and saying which of the two readings is the gate is the point: a number printed
+# beside a refusal reads like the reason for it.
+#
+# What IS gated is the count of `codex exec` processes already running on this machine -- the one
+# quantity this launcher can see itself adding to. Above the cap the run QUEUES rather than refusing:
+# an unattended arc that waits ten minutes has lost ten minutes, one that refuses has lost the round,
+# and losing the round is the failure this whole section exists to stop repeating.
+CODEX_CAP="$(_posint "${RUN_CODEX_MAX_CODEX_PROCS:-12}" RUN_CODEX_MAX_CODEX_PROCS)" || exit 2
+# Zero is a legitimate value here and _posint refuses it, so this one is checked separately:
+# RUN_CODEX_QUEUE_WAIT=0 means "refuse immediately instead of queueing", which is how the test
+# suite reaches the refusal without waiting a quarter of an hour for it.
+QUEUE_WAIT="${RUN_CODEX_QUEUE_WAIT:-900}"
+case "$QUEUE_WAIT" in ''|*[!0-9]*) echo "run-codex: RUN_CODEX_QUEUE_WAIT must be a whole number of seconds, got '$QUEUE_WAIT'" >&2; exit 2 ;; esac
+QUEUE_STEP="$(_posint "${RUN_CODEX_QUEUE_STEP:-15}" RUN_CODEX_QUEUE_STEP)" || exit 2
+_codex_procs() { ps -Ao command= 2>/dev/null | grep -c '[c]odex exec' || true; }
+_free_pct() {
+  command -v vm_stat >/dev/null 2>&1 || { printf 'unavailable'; return 0; }
+  vm_stat 2>/dev/null | awk '
+    /^Pages free/        { gsub(/\./, "", $3); free  = $3 }
+    /^Pages inactive/    { gsub(/\./, "", $3); inact = $3 }
+    /^Pages speculative/ { gsub(/\./, "", $3); spec  = $3 }
+    /^Pages active/      { gsub(/\./, "", $3); act   = $3 }
+    /^Pages wired down/  { gsub(/\./, "", $4); wired = $4 }
+    END { tot = free + inact + spec + act + wired
+          if (tot > 0) printf "%d", ((free + inact + spec) * 100) / tot; else printf "unavailable" }'
+}
+_queued=0
+while :; do
+  _running="$(_codex_procs)"
+  [ "$_running" -lt "$CODEX_CAP" ] && break
+  if [ "$_queued" -ge "$QUEUE_WAIT" ]; then
+    echo "run-codex: $_running 'codex exec' processes are already running on this machine (cap $CODEX_CAP)," >&2
+    echo "run-codex: and ${QUEUE_WAIT}s of queueing did not clear it. Refusing rather than adding to a load" >&2
+    echo "run-codex: that gets whole jobs reaped. Raise RUN_CODEX_MAX_CODEX_PROCS deliberately if this" >&2
+    echo "run-codex: machine can take it. Nothing has been spent." >&2
+    exit 2
+  fi
+  [ "$_queued" -eq 0 ] && echo "run-codex: $_running 'codex exec' processes running (cap $CODEX_CAP) -- queueing up to ${QUEUE_WAIT}s before spending anything." >&2
+  sleep "$QUEUE_STEP"
+  _queued=$((_queued + QUEUE_STEP))
+done
+echo "[preflight] codex processes $(_codex_procs)/$CODEX_CAP - free memory $(_free_pct)% (recorded, NOT gated) - queued ${_queued}s" >&2
 
 group_alive() { pgrep -g "$1" >/dev/null 2>&1; }
 
@@ -473,6 +592,48 @@ kill_group() {
   fi
 }
 
+# --- evidence survives a kill ---------------------------------------------------------------------
+# Measured 2026-09-07 (arc 8109eefe, review round 1): the harness's low-memory guard killed the one
+# background job that held all three review lenses, and that SIGTERM reached every `codex exec` child
+# it had launched. Three verdict files were empty and the round was lost -- yet 850 KB of reasoning
+# had already been written across the three run logs, and one HIGH finding was recovered from them BY
+# HAND afterwards. Nothing in the launcher said that evidence existed, and the retry path below used
+# to truncate it.
+#
+# So an abnormal end now leaves two artifacts beside the verdict path:
+#   <out-file>.salvage.txt   a bounded, ANSI-stripped tail of the reasoning stream, with its reason
+#   <out-file>.partial.json  whatever codex had already written to -o, when that is non-empty
+# and a retried attempt rolls the previous log to <log-file>.attempt<N> instead of truncating it.
+#
+# What this does NOT do, said plainly rather than left to be discovered: `codex exec -o` writes the
+# structured verdict ONCE, at the end, so a killed run has no findings to check-point and this cannot
+# recover a verdict. What it preserves is the EVIDENCE a successor adjudicates -- and a killed run's
+# reasoning is a LEAD to reproduce, never a finding to accept.
+SALVAGE_TAIL_LINES="$(_posint "${RUN_CODEX_SALVAGE_LINES:-400}" RUN_CODEX_SALVAGE_LINES)" || exit 2
+_salvage() {
+  _reason="$1"
+  if [ -n "${TMP_OUT:-}" ] && [ -s "${TMP_OUT:-/nonexistent}" ]; then
+    cp -f "$TMP_OUT" "$OUT.partial.json" 2>/dev/null || true
+  fi
+  [ -s "$LOG" ] || return 0
+  _esc="$(printf '\033')"
+  {
+    echo "run-codex salvage -- this is EVIDENCE, not a verdict."
+    echo "reason:  $_reason"
+    echo "arc:     ${ARC:-<none>}   track: ${TRACK:-<none>}   round: ${ROUND:-<none>}"
+    echo "verdict: $OUT (never written)"
+    echo "log:     $LOG ($(wc -c < "$LOG" 2>/dev/null | tr -d ' ') bytes)"
+    for _al in "$LOG".attempt*; do
+      [ -e "$_al" ] && echo "earlier: $_al ($(wc -c < "$_al" 2>/dev/null | tr -d ' ') bytes)"
+    done
+    echo "Read the FULL log before acting. Everything below is a lead to REPRODUCE, never a finding to"
+    echo "accept: a run that was killed never reached the stage where it judges its own findings."
+    echo "---- last $SALVAGE_TAIL_LINES lines of $LOG, ANSI stripped ----"
+    tail -n "$SALVAGE_TAIL_LINES" "$LOG" 2>/dev/null | sed -e "s/${_esc}\[[0-9;]*m//g"
+  } > "$OUT.salvage.txt" 2>/dev/null || return 0
+  echo "run-codex: EVIDENCE PRESERVED at $OUT.salvage.txt -- read it before relaunching this track." >&2
+}
+
 # `set -m` puts Codex in its own process group, which means it does NOT die with the launcher.
 # Without this trap, interrupting the launcher orphans a running Codex process.
 C_PID=""; TMP_OUT=""
@@ -480,6 +641,8 @@ C_PID=""; TMP_OUT=""
 on_signal() {
   local sig="$1"
   [ -n "$C_PID" ] && kill -0 "$C_PID" 2>/dev/null && kill_group "$C_PID"
+  # A fleet reap looks exactly like this from in here, and it is the shape that cost round 1.
+  _salvage "the launcher was terminated by SIG$sig before codex wrote its verdict"
   [ -n "$TMP_OUT" ] && rm -f "$TMP_OUT"
   echo "run-codex: terminated by SIG$sig" >&2
   trap - "$sig"
@@ -509,6 +672,13 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
   # Same directory as $OUT so the promotion is a true same-filesystem rename, never a
   # cross-device copy that is observable while partial.
   TMP_OUT="$(mktemp "$OUT_DIR/.run-codex-out.XXXXXX")" || { echo "run-codex: mktemp failed in $OUT_DIR" >&2; exit 2; }
+  # A retry used to truncate the log, so attempt 2 destroyed the only record of why attempt 1 failed
+  # -- the same evidence _salvage exists to keep, thrown away by the recovery path itself. Roll it
+  # instead. The artifact lock covers <log-file>; these siblings are fresh paths nobody else holds,
+  # and they are cleared at the start of the next RUN, not of the next attempt.
+  if [ "$attempt" -gt 1 ] && [ -s "$LOG" ]; then
+    mv -f "$LOG" "$LOG.attempt$((attempt - 1))" 2>/dev/null || true
+  fi
   : > "$LOG"
 
   codex exec -s "$SANDBOX" -C "$WORKDIR" --skip-git-repo-check -o "$TMP_OUT" "$@" - < "$PROMPT" > "$LOG" 2>&1 &
@@ -546,6 +716,10 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
   # Success requires BOTH a clean exit and a non-empty regular file.
   if [ "$RC" -eq 0 ] && [ -f "$TMP_OUT" ] && [ -s "$TMP_OUT" ]; then
     if mv -f "$TMP_OUT" "$OUT"; then
+      # An earlier attempt in THIS run may have left a partial answer beside the verdict path.
+      # A promoted verdict makes it a dead lead, and a dead lead sitting next to a real verdict is
+      # exactly the confusion the per-run clearing at the top exists to prevent.
+      rm -f "$OUT.partial.json" 2>/dev/null || true
       echo "[watchdog] verdict written on attempt $attempt"
       # Report the tier the run ACTUALLY used, read from codex's own banner, never inferred
       # from the flags we passed. The preflight refuses an unknown -p, but an explicit
@@ -604,9 +778,14 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
     exit 2
   fi
 
+  # An attempt that ANSWERED and then failed holds the single most useful thing a lost round can
+  # leave behind. The temp file is dropped on the next line, so it is copied out FIRST: by the time
+  # the loop gives up, there is nothing left for _salvage to find.
+  [ -s "$TMP_OUT" ] && cp -f "$TMP_OUT" "$OUT.partial.json" 2>/dev/null
   rm -f "$TMP_OUT"
 
   if non_retryable; then
+    _salvage "a non-retryable error ended attempt $attempt"
     echo "[watchdog] non-retryable error on attempt $attempt; not retrying" >&2
     grep -m1 '"message"\|^error:\|Failed to read output schema file' "$LOG" >&2
     exit 3
@@ -620,11 +799,13 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
 done
 
 if [ "$WRITE_MODE" -eq 1 ]; then
+  _salvage "a mutating run failed and is never retried"
   echo "run-codex: MUTATING RUN FAILED. Worktree left AS-IS for inspection, not retried." >&2
   echo "run-codex: START_SHA=$START_SHA -- diff it against HEAD to see what landed." >&2
   git -C "$WORKDIR" --no-pager log --oneline "$START_SHA"..HEAD >&2 2>/dev/null
   git -C "$WORKDIR" status --porcelain >&2 2>/dev/null
   exit 1
 fi
+_salvage "all $ATTEMPTS attempts ended without a usable verdict"
 echo "[watchdog] $ATTEMPTS attempts exhausted, no verdict" >&2
 exit 1

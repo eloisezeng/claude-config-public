@@ -1,6 +1,6 @@
 ---
 name: control-a-settle-detector-on-captured-output
-description: A "has it finished" predicate must be controlled against the tool's REAL captured output AND require a derived expected set to be PRESENT — a settled `gh pr checks` drops the pending clause, and its rollup also lags, so "nothing is pending" is satisfied by a list that has not been populated yet
+description: A "has it finished" predicate must be controlled against the tool's REAL captured output AND require a derived expected set to be PRESENT — and that set may only name jobs the EVENT can actually register (file `on:`, job `if:`, the head's copy of a shared workflow), or the gate is unsatisfiable and the PR is unmergeable forever
 metadata:
   type: feedback
 scope: global
@@ -36,9 +36,10 @@ reported `SETTLED after 630s` on that one row — and the run it was watching ha
 
 The missing half is **presence**: a settle detector must require the set of checks it EXPECTS to be
 there, not merely that nothing visible is pending. Derive that set (for GitHub Actions: parse the
-workflow's job names at the sha under test, UNIONed with the base ref — a `pull_request` run
-executes the workflow from the MERGE ref, so a job only the base defines still runs), and refuse an
-empty derived set as a parser failure rather than reading it as a pass. Working implementation:
+workflow's job names at the sha under test, plus the base ref's copy of any workflow FILE the head
+does not have at all — a `pull_request` run executes the MERGE ref; per-file, not per-job, for the
+reason in the 2026-09-08 section below), and refuse an empty derived set as a parser failure rather
+than reading it as a pass. Working implementation:
 `~/.claude/bin/ci-green.sh` + `ci-derive.py`.
 
 **One NAME can carry several check-runs, and keying by name fails open a third time.** Measured
@@ -95,6 +96,45 @@ commit produced it. Capturing real bytes buys you the states you happened to obs
 space — when a predicate reads two fields, control it on them disagreeing even if you have never
 seen that.
 
+**The expected set may only name jobs the EVENT can actually register — the fifth fail-CLOSED, and
+the first one a PR could not fix by any commit.**
+Measured 2026-09-08 on `your-org/your-other-project` PR #419, which cut CI spend by moving the
+19-leg chromium sweep behind `if: github.event_name == 'schedule' || github.event_name ==
+'workflow_dispatch'`, deleting the `repo layout` job and moving the your-module job into its own file.
+The deriver read the workflow's jobs and demanded all of them, so the required set carried
+`e2e (chromium layout) 1/19` … `19/19` plus `repo layout` on every pull request — names no pull
+request can produce.
+Two separate causes, and both are the same mistake at different scopes:
+
+- **A job-level `if:` is the file-level `on:` block one level down.** A job the event cannot satisfy
+  registers no check-run, so requiring it is permanently NOT-GREEN. Read only EVENT conditions and
+  fail closed in both directions: an `if:` naming no event context (`always()`, `success()`, a
+  `needs.*` result) decides nothing about registration and the job stays REQUIRED; a plain
+  disjunction of `github.event_name == '<literal>'` is evaluated; anything else touching that context
+  is REFUSED BY NAME, because guessing "it runs" rebuilds the permanent red and guessing "it is
+  skipped" is a fail-open hole. A *step's* `if:` is indented deeper and is not the job's — anchor the
+  match exactly rather than searching the job body.
+- **For a shared workflow file the HEAD's copy wins.** The base-union rule above is true of a
+  workflow FILE the head does not have (the merge ref still contains it, so its jobs still run) and
+  FALSE of a job the head deleted from a file both sides have (the merge ref carries the head's edit
+  of that file). Reading both copies of the same file is what demanded `repo layout` from a PR that
+  had deleted it. The residual hole — a job the base ADDED while the PR was open — is fail-open in
+  the recoverable direction: that job still registers and still has to be green.
+
+The asymmetry that decides every one of these calls: an unsatisfiable required set is WORSE than a
+narrow fail-open hole, because a job that did register is still checked for greenness by the rows
+loop, while a job that never registers can never be made green by any commit.
+
+Two things this cost that are worth carrying:
+the pre-existing test pinning the base-union rule went red on the correct fix, and its comment — "a
+job only the base defines still runs" — was true of the FILE case and false of its own fixture, which
+both shapes separately, prove the rewritten assertion reddens under the old code, and add the
+base-only-FILE case the old test had meant to protect.
+And the mutant harness itself was fail-open reporting: a mutation whose anchor had gone stale wrote
+no copy, so running the missing file exited non-zero and printed `CAUGHT` — a mutant that was never
+built reads exactly like one the suite killed. Check the build's own exit status and fail loudly,
+and control that check with a deliberately stale anchor.
+
 **How to apply.** Prefer a structural terminal condition over string-matching a summary line
 (the exit status or a state enum over prose), read the per-commit API rather than a PR rollup,
 require presence as well as non-pendingness, and never collapse rows by a key the API does not
@@ -106,3 +146,12 @@ build the predicate to fail closed. Related: [[absence-needs-a-probe-that-could-
 [[a-guard-must-be-satisfiable-not-just-failable]] · [[verify-claims-against-artifacts]] · [[watch-the-run-you-triggered]].
 
 The ready-made detector is `~/.claude/bin/ci-green.sh <sha> [base-ref]`, tested by `~/dotfiles/claude/bin/ci-green.test.sh`. Its two predecessors both failed on real captured output: `*", 0 pending,"*` never fired because `gh pr checks` drops the pending clause entirely once nothing is pending, and `*"0 pending"*` matched inside `20 pending` and called a running build SETTLED.
+
+**Calling the correct tool does not inherit its correctness.** A poll loop wrapping `ci-green.sh`
+tested `case "$v" in *GREEN*) ... ;; *NOT-GREEN*)` — and since the failing verdict `NOT-GREEN`
+*contains* the succeeding token `GREEN`, the first arm won and it announced a green while all four
+jobs were `in_progress` (measured 2026-09-07, immediately after a merge). The tool's verdict line
+was right; the wrapper destroyed it. So: when two verdict tokens are substrings of each other, match
+the negative first AND anchor (`grep -q '^VERDICT: GREEN'`), and control the wrapper the same way
+you controlled the tool — here, running it against one sha that was genuinely green and one that was
+still running proved each matched exactly one arm.

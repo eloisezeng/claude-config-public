@@ -1,0 +1,54 @@
+name: your-module
+
+# your-module/provider-data is a standalone package with its own Vitest and TypeScript configs. Its
+# checks used to be a job in ci.yml, which meant they ran on every pull request in the repo.
+#
+# Measured 2026-09-08: 51 of the last 756 commits on main touched that package — 6.7%. The other
+# 93% paid a checkout, a Node install, a root `npm ci` and a full billed minute to re-prove
+# unchanged code. This runs it when it can actually break instead.
+#
+# The path list is the package PLUS the root lockfile, because provider-data has no node_modules
+# of its own: `npm --prefix` runs it out of the root install, so a root dependency change can
+# break it without touching a single file under your-module/.
+#
+# A path filter is safe HERE and nowhere else in this repo: a job a path filter skips reports no
+# status at all, and a REQUIRED status check that never reports leaves a pull request unmergeable
+# forever. This check is not required in the "Protect main" ruleset. `test + typecheck`,
+# `deploy freeze check` and `e2e (chromium layout)` are — never path-filter those.
+on:
+  push:
+    branches: [main]
+    # Written out twice on purpose: GitHub Actions does NOT expand YAML anchors/aliases in a
+    # workflow file, so a `&paths`/`*paths` pair here parses as an empty filter and the job
+    # silently stops running. If you edit one list, edit the other.
+    paths:
+      - 'your-module/provider-data/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/your-module.yml'
+  pull_request:
+    paths:
+      - 'your-module/provider-data/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/your-module.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: your-module-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  your-module-provider-data:
+    name: your-module provider data
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm --prefix your-module/provider-data test
+      - run: npm --prefix your-module/provider-data run typecheck

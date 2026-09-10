@@ -85,10 +85,50 @@ PRIMARY="${1:-$HOME/.claude}"
 MIRROR="${2:-}"
 
 # Files/dirs to link from the repo into the primary config dir.
-ITEMS=(CLAUDE.md AGENTS.md bin skills/email-drafter skills/codex-converge skills/codex-opinion skills/no-mistakes skills/scientific-figures)
+#
+# The skills half is DERIVED from the repo's own `skills/` directory rather than
+# typed out, because a hand-typed list only holds what somebody remembered to
+# type: on 2026-09-08 three skills were vendored straight into ~/.claude/skills
+# as real directories, reached no commit, and nothing noticed for a day.
+# Deriving fixes ADDITIONS. It does not fix SUBTRACTIONS -- a skill the glob
+# fails to match leaves no diff line to point at -- so tests/skills-backed.test.sh
+# asserts the derived set against the directory in BOTH directions, and asserts
+# that every entry here is a live symlink rather than a copy.
+ITEMS=(CLAUDE.md AGENTS.md bin statusline-command.sh)
+for _skill in "$REPO_DIR"/skills/*/; do
+  [ -d "$_skill" ] || continue          # no match -> the literal glob, skip it
+  ITEMS+=("skills/$(basename "$_skill")")
+done
+unset _skill
+if [ "${#ITEMS[@]}" -le 4 ]; then
+  printf 'install: derived NO skills from %s/skills -- refusing rather than installing a config with none.\n' "$REPO_DIR" >&2
+  exit 1
+fi
+# Output styles link per FILE, never as a directory. settings.json names one by
+# name (`outputStyle`), so an unlinked style is a config that points at nothing
+# on a fresh machine -- the same defect class as the unlinked skills. Claude Code
+# also writes styles of its own into ~/.claude/output-styles (`/output-style:new`),
+# and linking the directory would hide every one of them behind the repo's copy.
+for _style in "$REPO_DIR"/output-styles/*.md; do
+  [ -f "$_style" ] || continue          # no match -> the literal glob, skip it
+  ITEMS+=("output-styles/$(basename "$_style")")
+done
+unset _style
+
+ITEMS+=(hooks/notify.sh hooks/turn-start.sh hooks/context-mode-cache-heal.mjs hooks/claude-config-sync-daemon.sh)
 # `bin` holds the fleet tooling (`fleet` and the helpers it execs). It is linked rather
 # than copied because `~/.local/bin/fleet` is itself a symlink into it, so an edit made
 # through either path lands in the repo and is version-controlled like everything else.
+#
+# The four `hooks/` entries are the scripts settings.linux.json names by absolute
+# path ($HOME/.claude/hooks/...). They are linked FILE BY FILE, not as the whole
+# `hooks` directory: $PRIMARY/hooks also holds runtime artifacts (the sync
+# daemon's .log and .pid), and linking the directory would write those into the
+# repo for the auto-sync watcher to commit. Until 2026-09-06 these four lived
+# ONLY in ~/.claude/hooks on the one Linux box and were in no commit, so a fresh
+# checkout installed a settings file whose Notification and Stop hooks pointed at
+# files that did not exist -- and a missing hook script fails silently, which is
+# indistinguishable from having nothing to notify about.
 
 # settings.json is per-OS: hooks reference OS-specific tools (osascript on
 # macOS, notify.sh on Linux), so a single shared file can't serve both. Each OS
@@ -588,9 +628,9 @@ fi
 WATCH_ITEMS=(
   CLAUDE.md AGENTS.md README.md LICENSE .gitignore
   settings.json settings.linux.json settings.windows.json
-  install.sh sync.sh sync.ps1 watch.ps1 sync-memories.sh
+  install.sh sync.sh sync.ps1 watch.ps1 sync-memories.sh statusline-command.sh
   inject-global-memory.sh inject-global-memory.mjs inject-ops-lanes.sh
-  bin docs hooks memories plugins skills tests
+  bin docs hooks memories output-styles plugins skills tests
 )
 
 # --- macOS: auto-sync agent (launchd) ---

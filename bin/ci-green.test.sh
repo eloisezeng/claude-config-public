@@ -46,6 +46,23 @@ case_run() {
   fi
 }
 
+# case_absent <name> <expected-exit> <substring-that-must-appear> <substring-that-must-NOT-appear> <dir>
+# Some properties are only pinned in the negative: "this job is no longer required" is invisible to a
+# presence-only assertion, because a run can be green for a dozen other reasons.
+case_absent() {
+  local name="$1" want_rc="$2" want_txt="$3" forbid_txt="$4" dir="$5"
+  local out rc
+  out=$(python3 "$DERIVE" deadbeefdeadbeefdeadbeefdeadbeefdeadbeef "$dir" 2>&1); rc=$?
+  if [ "$rc" -eq "$want_rc" ] && printf '%s' "$out" | grep -qF "$want_txt" \
+     && ! printf '%s' "$out" | grep -qF "$forbid_txt"; then
+    PASS=$((PASS+1)); printf 'ok    %s\n' "$name"
+  else
+    FAIL=$((FAIL+1))
+    printf 'FAIL  %s (rc=%s want %s; wanted %s; forbade %s)\n' "$name" "$rc" "$want_rc" "$want_txt" "$forbid_txt"
+    printf '%s\n' "$out" | sed 's/^/        /'
+  fi
+}
+
 mk() { local d="$T/$1"; mkdir -p "$d"; cp "$REAL/head.yml" "$REAL/base.yml" "$d/"; cp "$REAL/runs.tsv" "$d/"; echo "$d"; }
 
 # 1. SATISFIABILITY. The real captured green commit must PASS. A guard that can only fail is a bug.
@@ -100,15 +117,27 @@ case_run "no check-runs at all -> NOT-GREEN" 1 "no check-runs at all" "$d"
 d=$(mk noyml); printf 'name: CI\non:\n  push:\n' > "$d/head.yml"; cp "$d/head.yml" "$d/base.yml"
 case_run "workflow parses to zero jobs -> NOT-GREEN" 1 "EMPTY required-job set" "$d"
 
-# 8. UNION WITH THE BASE REF. A pull_request run executes the workflow from the merge ref, so a job
-#    only the base defines still runs -- deriving from the head alone would never require it.
-d=$(mk baseonly); python3 - "$d" <<'PY'
+# 8. THE HEAD'S COPY OF A SHARED WORKFLOW WINS. The caller writes every workflow twice, `head.<file>`
+#    and `base.<file>`, because a pull_request run executes the MERGE ref -- so a workflow FILE that
+#    only the base has still runs, which is case 8b. Reading BOTH copies of the SAME file is a
+#    different thing, and it is wrong in the one direction nothing can recover from: the merge ref
+#    carries the head's EDIT of that file, so a PR that DELETES a job leaves the base's copy still
+#    naming it and the required set demands a check-run that can never appear -- an unmergeable PR
+#    with nothing wrong and no commit able to fix it. Measured 2026-09-08 on
+#    your-org/your-other-project PR #419, which deleted the `repo layout` job and read
+#    `NOT-GREEN -- workflow jobs never registered: ['repo layout']` forever.
+#    This case pins BOTH halves: the run is green AND the deleted job is gone from the required set --
+#    a presence-only assertion cannot see the difference, since a green run is green for many reasons.
+#    Under the pre-2026-09-08 deriver, which globbed both sides flat, this same fixture printed
+#    `VERDICT: NOT-GREEN -- workflow jobs never registered: ['analyzer — pytest']` (rc 1), so the
+#    assertion below genuinely reddens on the old code rather than passing either way.
+d=$(mk head_deletes_job); python3 - "$d" <<'PY'
 import sys,os,re
 d=sys.argv[1]
 head=open(os.path.join(d,"head.yml")).read()
 # Drop the analyzer job from the HEAD side only; base.yml keeps it. Cut from the job key to the
 # NEXT job key at the same indent (or EOF) -- analyzer happens to be last today, and a slice that
-# assumed an ordering would silently leave the job in place and let a head-only mutant survive.
+# assumed an ordering would silently leave the job in place and let a base-wins mutant survive.
 i=head.index("\n  analyzer:")
 m=re.search(r"\n  [A-Za-z0-9_-]+:", head[i+1:])
 j=(i+1+m.start()) if m else len(head)
@@ -119,16 +148,42 @@ p=os.path.join(d,"runs.tsv")
 rows=[l for l in open(p) if "analyzer" not in l]
 open(p,"w").write("".join(rows))
 PY
-case_run "job defined only on base, never ran -> NOT-GREEN" 1 "analyzer" "$d"
+case_absent "a job the HEAD deleted from a shared workflow is NOT required -> GREEN" 0 \
+  "VERDICT: GREEN" "analyzer" "$d"
 
-# 9. ...and the same pair with that job present is GREEN, so case 8 fails for the right reason.
-d2=$(mk baseonly_ok); cp "$T/baseonly/head.yml" "$d2/head.yml"
-case_run "job defined only on base, ran green -> GREEN" 0 "VERDICT: GREEN" "$d2"
+# 8b. ...and the property case 8 replaced is still pinned, in the shape where it is actually TRUE: a
+#     workflow FILE the head does not have at all. The merge ref still contains that file, so its
+#     jobs still run and are still required. Head-wins must be per-FILE, never "ignore the base".
+mk_extra() { # <dirname> -- the real pair plus a base-only workflow file
+  local d; d=$(mk "$1")
+  cat > "$d/base.extra.yml" <<'YML'
+name: extra
+on:
+  pull_request:
+jobs:
+  audit:
+    name: audit - licences
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+YML
+  printf '%s' "$d"
+}
+d=$(mk_extra base_only_file)
+case_run "job from a base-ONLY workflow file, never ran -> NOT-GREEN" 1 "audit - licences" "$d"
+
+# 9. ...and the same pair with that job green is GREEN, so 8b fails on presence and not because the
+#    extra file broke the parse.
+d=$(mk_extra base_only_file_ok)
+printf 'audit - licences\tcompleted\tsuccess\n' >> "$d/runs.tsv"
+case_run "job from a base-ONLY workflow file, ran green -> GREEN" 0 "VERDICT: GREEN" "$d"
 
 # 10. The expected set is the job's `name:`, not its yaml key, and the workflow's top-level `on:`
-#     keys are not jobs. Both are read off the real fixture's own printed expectation.
-exp=$(python3 "$DERIVE" deadbeef "$REAL" | head -1)
-if printf '%s' "$exp" | grep -qF "web — typecheck" \
+#     keys are not jobs. Both are read off the real fixture's own printed expectation. The line is
+#     LOCATED by its label rather than taken as line 1: the header gained an `event=` line, and a
+#     positional read would have silently graded the wrong line.
+exp=$(python3 "$DERIVE" deadbeef "$REAL" | grep -m1 "expected_jobs=")
+if [ -n "$exp" ] && printf '%s' "$exp" | grep -qF "web — typecheck" \
    && ! printf '%s' "$exp" | grep -qE "'(web|analyzer|deploy|push|pull_request|workflow_dispatch)'"; then
   PASS=$((PASS+1)); echo "ok    expected set uses job name:, and on: keys are not jobs"
 else
@@ -316,6 +371,206 @@ PY
 case_run "completed with an EMPTY conclusion -> NOT-GREEN (fail closed)" 1 "not successful" "$d"
 
 
+# 22-26. JOB-LEVEL `if:`. It asks the same question as the file-level `on:` block one level down, and
+#     a wrong answer costs the same: a job the event cannot satisfy never registers a check-run, so
+#     requiring it reports NOT-GREEN forever. Measured 2026-09-08 on your-org/your-other-project, the
+#     19-leg chromium sweep moved behind `if: github.event_name == 'schedule' || ... 'workflow_dispatch'`
+#     and the required set went on demanding `e2e (chromium layout) 1/19` ... `19/19` on every pull
+#     request -- 19 names no pull request could ever produce.
+#     Five cases, because the rule has to hold in every direction it can be wrong in.
+mk_if() { # <dirname> <the job's if: line, or "" for none>
+  local d="$T/$1"; mkdir -p "$d"
+  {
+    printf 'name: ci\non:\n  pull_request:\njobs:\n  nightly:\n    name: nightly sweep\n'
+    [ -n "$2" ] && printf '    if: %s\n' "$2"
+    printf '    steps:\n      - run: true\n  quick:\n    name: quick check\n    steps:\n      - run: true\n'
+  } > "$d/head.yml"
+  cp "$d/head.yml" "$d/base.yml"
+  printf 'quick check\tcompleted\tsuccess\n' > "$d/runs.tsv"
+  printf '%s' "$d"
+}
+
+# 22. the real shape: an event the pull_request run cannot satisfy -> that job is NOT required.
+d=$(mk_if if_off_event "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'")
+case_absent "job gated to another event -> not required, GREEN" 0 "VERDICT: GREEN" "never registered" "$d"
+
+# 23. the CONTROL for 22 -- the same fixture with no `if:` at all must go back to NOT-GREEN, naming
+#     that job. Without this, 22 could be passing because the job was dropped for some other reason.
+d=$(mk_if if_absent "")
+case_run "same fixture with NO if: -> NOT-GREEN, naming that job" 1 "'nightly sweep'" "$d"
+
+# 24. FAIL CLOSED on a condition that names the event context but cannot be read. Guessing "it runs"
+#     rebuilds the permanent NOT-GREEN this exists to fix; guessing "it is skipped" is a fail-OPEN
+#     hole in the required set. Refusing BY NAME is the only answer that is wrong in neither
+#     direction, and it names the job so the refusal is actionable.
+#
+#     This case USED to use `github.event_name == 'schedule' && success()`, and that fixture stopped
+#     being unreadable on 2026-09-09 when the parser learned to drop a status function from a
+#     conjunction -- so it moved to 24b below, where it is now pinned as a READ, and the unreadable
+#     case is carried by a `needs.*` term, which is not a status function and is still refused.
+d=$(mk_if if_unreadable "github.event_name == 'schedule' && needs.build.result == 'failure'")
+case_run "an unreadable event condition -> NOT-GREEN, refusing by name" 1 "could not read job condition" "$d"
+
+# 24b. A STATUS FUNCTION conjoined onto a readable event term does not make the condition
+#      unreadable: a status function is about job OUTCOMES, never about which event fired, so the
+#      event half decides registration on its own. `== 'schedule' && success()` cannot run on a
+#      pull_request whatever success() says, so that job is NOT required and the verdict is GREEN.
+d=$(mk_if if_status_fn_conjunct "github.event_name == 'schedule' && success()")
+case_absent "a status fn conjoined onto an off-event term -> not required, GREEN" 0 "VERDICT: GREEN" "never registered" "$d"
+
+# 24c. The shape 24b exists for, and the direction that matters: a FAIL-CLOSED GATE job. GitHub
+#      inserts an implicit success() only into a condition naming no status function, so a gate that
+#      must still report when a needed job FAILED has to carry `always()`, and an event restriction
+#      has to be conjoined onto it -- `always() && github.event_name != 'push'` is the only way to
+#      write "fail-closed gate, off on push". On a pull_request that job RUNS, so it stays required
+#      and its absence from runs.tsv must read NOT-GREEN by name. Refusing this shape (the behaviour
+#      before 2026-09-09) made every pull request in a repo that uses it permanently unreadable.
+d=$(mk_if if_always_and_event "always() && github.event_name != 'push'")
+case_run "a fail-closed gate gated off push -> still required on a pull_request" 1 "'nightly sweep'" "$d"
+
+# 24d. ...and the OTHER direction of 24c, which is the whole point of the conjunct: `always()` must
+#      not swallow the event term. A tautology here would put the job back in the required set on
+#      every event, which is the fail-closed-forever bug wearing the opposite sign.
+d=$(mk_if if_always_or_event "always() || github.event_name != 'push'")
+case_run "a status fn DISJOINED with an event term is still refused" 1 "could not read job condition" "$d"
+
+# 25. ...and the other direction: an `if:` that does not gate on the event at all (`always()`,
+#     `success()`, a `needs.*` result) decides nothing about registration, so the job stays REQUIRED.
+#     A rule that treated any `if:` as "might not run" would silently shrink the required set.
+d=$(mk_if if_not_event_gated "always()")
+case_run "an if: that names no event context -> still required" 1 "'nightly sweep'" "$d"
+
+# 26. A STEP's `if:` is not the JOB's. It sits two indents deeper, and reading it as a job condition
+#     would drop a job that always runs -- the same fail-open hole as 25, reached by a parser slip.
+d=$(mk_if if_on_a_step "")
+python3 - "$d" <<'PY'
+import sys, os
+p = os.path.join(sys.argv[1], "head.yml")
+t = open(p).read()
+old = "  nightly:\n    name: nightly sweep\n    steps:\n      - run: true\n"
+new = "  nightly:\n    name: nightly sweep\n    steps:\n      - run: true\n        if: github.event_name == 'schedule'\n"
+assert old in t, "fixture shape changed -- the step-level if: would not be inserted"
+open(p, "w").write(t.replace(old, new, 1))
+PY
+cp "$d/head.yml" "$d/base.yml"
+case_run "a STEP-level event condition does not gate the JOB -> still required" 1 "'nightly sweep'" "$d"
+
+# 26a-26g. The OTHER decidable shape: `if: github.event_name != '<lit>'`. A job carrying it is the
+#     mirror image of case 22 -- it runs on every event EXCEPT the named ones -- and reading it as
+#     unreadable is not a safe default here: measured 2026-09-09 on your-org/your-other-project,
+#     `ci.yml`'s `test` job moving behind `if: github.event_name != 'push'` made this predicate
+#     answer `VERDICT: NOT-GREEN -- could not read job condition(s) ["test: if: github.event_name !=
+#     'push'"]` on every pull request, i.e. a permanently unreadable merge gate. Both directions and
+#     every refusal are pinned, because the shape is only safe if the operator and the joiner agree.
+mk_if_push() { # <dirname> <the job's if: line> -- same fixture on a PUSH-only trigger, so event=push
+  local d="$T/$1"; mkdir -p "$d"
+  {
+    printf 'name: ci\non:\n  push:\njobs:\n  nightly:\n    name: nightly sweep\n'
+    printf '    if: %s\n' "$2"
+    printf '    steps:\n      - run: true\n  quick:\n    name: quick check\n    steps:\n      - run: true\n'
+  } > "$d/head.yml"
+  cp "$d/head.yml" "$d/base.yml"
+  printf 'quick check\tcompleted\tsuccess\n' > "$d/runs.tsv"
+  printf '%s' "$d"
+}
+
+# 26a. the ADMITTING direction: on a pull_request, `!= 'push'` is true, so the job stays REQUIRED --
+#      and it must be required by DECISION, not refused, so the refusal text is forbidden here.
+d=$(mk_if if_ne_admits "github.event_name != 'push'")
+case_absent "an != condition the event satisfies -> still required, no refusal" 1 "'nightly sweep'" \
+  "could not read job condition" "$d"
+
+# 26b. ...and the EXCLUDING direction, which is L1's exact shape: the same condition on a push build
+#      excludes the job, so it is not required and the run reads GREEN off the jobs that did run.
+d=$(mk_if_push if_ne_excludes "github.event_name != 'push'")
+case_absent "an != condition the event fails -> not required, GREEN" 0 "VERDICT: GREEN" "never registered" "$d"
+
+# 26c. a CONJUNCTION of != terms, excluding direction.
+d=$(mk_if_push if_ne_and_excludes "github.event_name != 'push' && github.event_name != 'schedule'")
+case_absent "a conjunction of != terms, one of them the event -> not required, GREEN" 0 \
+  "VERDICT: GREEN" "never registered" "$d"
+
+# 26d. ...and the same conjunction where the event is NONE of the named ones -> still required.
+d=$(mk_if if_ne_and_admits "github.event_name != 'push' && github.event_name != 'schedule'")
+case_absent "a conjunction of != terms, none of them the event -> still required" 1 "'nightly sweep'" \
+  "could not read job condition" "$d"
+
+# 26e. MIXED OPERATORS are refused. `a == 'push' || a != 'schedule'` is not one of the two shapes, and
+#      evaluating it as if it were either one gives a different answer than GitHub would.
+d=$(mk_if if_mixed_ops "github.event_name == 'push' || github.event_name != 'schedule'")
+case_run "a mixed ==/!= condition -> NOT-GREEN, refusing by name" 1 "could not read job condition" "$d"
+
+# 26f. An operator paired with the WRONG joiner is refused rather than evaluated: `== && ==` is
+#      unsatisfiable and `!= || !=` is a tautology, so either is a typo, not an intent to honour.
+d=$(mk_if if_ne_or "github.event_name != 'push' || github.event_name != 'schedule'")
+case_run "!= terms joined by || (a tautology) -> NOT-GREEN, refusing by name" 1 \
+  "could not read job condition" "$d"
+
+# 26g. MIXED JOINERS are refused even when every term is an event term and every operator agrees --
+#      the answer would depend on && binding tighter than ||, which is precedence this predicate has
+#      no business adjudicating. Without the refusal this reads FALSE for `push` and silently drops a
+#      job that does run: the fail-OPEN direction.
+d=$(mk_if_push if_mixed_joiners "github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' || github.event_name != 'push'")
+case_run "!= terms with mixed &&/|| joiners -> NOT-GREEN, refusing by name" 1 \
+  "could not read job condition" "$d"
+
+# 27-33. FILE-LEVEL `paths:`. The third level of the same question, and the most expensive one to get
+#     wrong: a workflow its filter excludes does not run AT ALL, so EVERY job it declares is missing,
+#     not just one. Measured 2026-09-08 on your-org/your-other-project, `your-module.yml` moved behind
+#     `paths: ['your-module/provider-data/**', ...]` and this predicate went on demanding its jobs on
+#     every pull request -- a gate no commit touching other paths could ever satisfy.
+mk_paths() { # <dirname> <the `paths:`/`paths-ignore:` block for extra.yml, or "">
+  local d="$T/$1"; mkdir -p "$d"
+  printf 'name: ci\non:\n  pull_request:\njobs:\n  quick:\n    name: quick check\n    steps:\n      - run: true\n' > "$d/ci.yml"
+  { printf 'name: extra\non:\n  pull_request:\n'
+    printf '%s' "$2"
+    printf 'jobs:\n  provider:\n    name: provider data\n    steps:\n      - run: true\n'
+  } > "$d/extra.yml"
+  printf 'quick check\tcompleted\tsuccess\n' > "$d/runs.tsv"
+  printf '%s' "$d"
+}
+YOUR-MODULE_PATHS=$'    paths:\n      - \'your-module/provider-data/**\'\n      - \'package.json\'\n'
+
+# 27. the real shape: the pull request touches none of the filtered paths, so that workflow never
+#     ran and its jobs are NOT required.
+d=$(mk_paths paths_miss "$YOUR-MODULE_PATHS"); printf 'app/page.tsx\nsrc/worker/index.ts\n' > "$d/changed.txt"
+case_absent "path filter excludes the workflow -> not required, GREEN" 0 "VERDICT: GREEN" "never registered" "$d"
+
+# 28. the CONTROL for 27 -- one changed file inside the filter and the same jobs are required again.
+#     Without this, 27 could be passing because the file was dropped for any other reason.
+d=$(mk_paths paths_hit "$YOUR-MODULE_PATHS"); printf 'your-module/provider-data/deliverables/providers.csv\n' > "$d/changed.txt"
+case_run "path filter matches a changed file -> that job IS required" 1 "'provider data'" "$d"
+
+# 29. ABSENT is not EMPTY. With no changed-file set at all the filter cannot be evaluated, and both
+#     guesses are wrong: "it ran" rebuilds the permanent NOT-GREEN, "it did not" is a fail-OPEN hole.
+d=$(mk_paths paths_unknown "$YOUR-MODULE_PATHS")
+case_run "a path filter with NO changed-file set -> NOT-GREEN, refusing by name" 1 "could not read the file-level path filter" "$d"
+
+# 30. ...and an EMPTY changed set is a real answer, not the same thing: nothing can match, so the
+#     workflow did not run. This is the pair that pins ABSENT != EMPTY in both directions.
+d=$(mk_paths paths_empty "$YOUR-MODULE_PATHS"); : > "$d/changed.txt"
+case_absent "an EMPTY changed set -> the filtered workflow did not run, GREEN" 0 "VERDICT: GREEN" "never registered" "$d"
+
+# 31. A pattern dialect this does not translate (negation) is refused BY NAME rather than
+#     approximated -- an approximate filter is a required set wrong by an unknown amount.
+d=$(mk_paths paths_negated $'    paths:\n      - \'!docs/**\'\n'); printf 'app/page.tsx\n' > "$d/changed.txt"
+case_run "an untranslatable pattern -> NOT-GREEN, refusing by name" 1 "could not read the file-level path filter" "$d"
+
+# 32. `paths-ignore` is the other polarity and must not be read as `paths`: a pull request touching
+#     ONLY ignored files does not run the workflow; one touching anything else does.
+d=$(mk_paths ignore_all $'    paths-ignore:\n      - \'docs/**\'\n'); printf 'docs/a.md\ndocs/b/c.md\n' > "$d/changed.txt"
+case_absent "paths-ignore covering every changed file -> not required, GREEN" 0 "VERDICT: GREEN" "never registered" "$d"
+d=$(mk_paths ignore_some $'    paths-ignore:\n      - \'docs/**\'\n'); printf 'docs/a.md\napp/page.tsx\n' > "$d/changed.txt"
+case_run "paths-ignore with one non-ignored file -> that job IS required" 1 "'provider data'" "$d"
+
+# 33. `*` stops at a slash and `**` crosses it. A translator that treats them alike matches
+#     `lander/templates/x.ts` against `lander/*.ts` and silently keeps a workflow that never ran.
+d=$(mk_paths star_depth $'    paths:\n      - \'lander/*.ts\'\n'); printf 'lander/templates/registry.ts\n' > "$d/changed.txt"
+case_absent "a single * does not cross a slash -> not required, GREEN" 0 "VERDICT: GREEN" "never registered" "$d"
+d=$(mk_paths star_flat $'    paths:\n      - \'lander/*.ts\'\n'); printf 'lander/shelf.ts\n' > "$d/changed.txt"
+case_run "the same pattern DOES match a file at its own depth -> required" 1 "'provider data'" "$d"
+
+
 echo "----"
 echo "$PASS passed, $FAIL failed  (derive under test: $DERIVE)"
 SUITE_RC=0; [ "$FAIL" -eq 0 ] || SUITE_RC=1
@@ -335,6 +590,14 @@ old,new=sys.argv[3],sys.argv[4]
 assert old in src, "mutation anchor not found: "+old
 open(sys.argv[2],"w").write(src.replace(old,new,1))
 PY
+    local mrc=$?
+    # A stale anchor must not read as a CAUGHT mutant: the build fails, no copy is written, and
+    # running a missing file exits 2 -- which is non-zero, i.e. indistinguishable from a mutant the
+    # suite killed. That is fail-OPEN reporting on the very harness that measures the suite.
+    if [ "$mrc" -ne 0 ] || [ ! -f "$f" ]; then
+      echo "FAIL  mutant '$name' could not be BUILT -- its anchor is stale, so it proves nothing"
+      SUITE_RC=1; return
+    fi
     local out rc
     out=$("$0" "$f" 2>&1); rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -352,7 +615,36 @@ PY
   mutate require-completed-status 'if st == "completed" or cc:' 'if st == "completed" and True:'
   mutate allow-empty-expected 'if not expected: why.append' 'if False: why.append'
   mutate dedupe-by-name 'rows.append((p[0], p[1], p[2] if len(p) > 2 else "", p[3] if len(p) > 3 else ""))' 'rows[:] = [r for r in rows if r[0] != p[0]] + [(p[0], p[1], p[2] if len(p) > 2 else "", p[3] if len(p) > 3 else "")]'
-  mutate head-only-derivation 'for f in sorted(glob.glob(os.path.join(D, "*.yml"))):' 'for f in [os.path.join(D, "head.yml")]:'
+  # Side selection: reading only the head loses a base-ONLY workflow file (case 8b), and letting the
+  # BASE copy win re-requires a job the head deleted (case 8) -- the unsatisfiable direction.
+  mutate head-only-derivation 'glob.glob(os.path.join(D, "*.yml"))' 'glob.glob(os.path.join(D, "head*.yml"))'
+  mutate base-copy-wins 'if name not in by_name or side == "head": by_name[name] = f' 'if name not in by_name or side == "base": by_name[name] = f'
+  # The job-level `if:` rule, one mutant per direction: ignore the condition (case 22 goes red), and
+  # silently drop a condition that cannot be read instead of refusing (case 24 goes red).
+  mutate ignore-job-if 'cond = job_if(m.group(2))' 'cond = None'
+  mutate drop-unreadable-if 'unreadable_if.add(f"{m.group(1)}: if: {cond}")' 'pass'
+  # The `!=` shape, one mutant per branch it added: refuse to read it at all (case 26b goes red --
+  # this is the pre-2026-09-09 behaviour, the permanently unreadable merge gate), invert its polarity
+  # (26a and 26b both flip), accept a mixed ==/!= by guessing an operator (26e), and accept mixed
+  # joiners by dropping the precedence refusal (26g).
+  mutate ne-not-read "EVENT_TERM = re.compile(r\"^github\\.event_name\\s*(==|!=)\\s*'([A-Za-z_]+)'\$\")" "EVENT_TERM = re.compile(r\"^github\\.event_name\\s*(==)\\s*'([A-Za-z_]+)'\$\")"
+  mutate ne-polarity-flipped 'if op == "!=" and joiner != "||": return event not in events' 'if op == "!=" and joiner != "||": return event in events'
+  mutate guess-a-mixed-operator 'if len(ops) != 1: return None' 'if len(ops) != 1: ops = {"=="}'
+  mutate accept-mixed-joiners 'if "||" in e and "&&" in e: return None' 'if False: return None'
+  # ...and treating a non-event `if:` as a possible skip, which shrinks the required set (case 25).
+  mutate any-if-is-a-skip 'if not any(t in e for t in CONTEXT_TOKENS): return True' 'if not any(t in e for t in CONTEXT_TOKENS): return False'
+  # The file-level path filter, one mutant per direction it can be wrong in: ignore the filter
+  # (case 27 goes red -- the your-module shape comes straight back), drop an unreadable filter instead
+  # of refusing (cases 29 and 31 go red -- the fail-OPEN hole), treat an ABSENT changed set as an
+  # empty one (case 29 again -- "not determined" quietly becoming a verdict), invert the polarity of
+  # paths-ignore (case 32), and let a single `*` cross a slash (case 33).
+  mutate ignore-path-filter 'pf = path_filter(yml, event)' 'pf = None'
+  mutate drop-unreadable-path-filter 'if unreadable_paths: why.append' 'if False: why.append'
+  mutate absent-changed-set-is-empty 'if os.path.exists(cpath):' 'if True:
+    changed = []
+if os.path.exists(cpath):'
+  mutate flip-paths-ignore 'return any(not hit(f) for f in changed)' 'return any(hit(f) for f in changed)'
+  mutate star-crosses-slash 'else: out.append("[^/]*"); i += 1' 'else: out.append(".*"); i += 1'
   # The two ways expansion goes wrong, one mutant each: expand to a single leg (loses the presence
   # check on the others), and drop an unresolvable template instead of refusing (fail-open hole).
   mutate expand-only-first-leg 'names = [pat.sub(v, n) for n in names for v in mtx[k]]' 'names = [pat.sub(mtx[k][0], n) for n in names]'

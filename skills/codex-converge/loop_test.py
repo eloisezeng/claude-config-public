@@ -657,9 +657,35 @@ class TestScheduler(unittest.TestCase):
         j = s.jobs()
         self.assertGreaterEqual(j['b']['start'], j['a']['end'], j)
         self.assertGreaterEqual(j['b']['queued'], hold_s, j)
-        # metric identity: the ledgered queue wait IS the request→start interval
+        # Metric identity: the ledgered queue wait is the MEASURED part of the request→start
+        # interval. The two are deliberately not equal -- loop.py stamps t_req, then does
+        # makedirs + a locked ledger_append before starting the monotonic queue timer, and takes
+        # the tree snapshot after acquire() returns but before stamping t. Both excluded segments
+        # are I/O, so their cost is the MACHINE's, and pinning the gap at an absolute tolerance
+        # measured the machine rather than the code (a fixed delta=0.05 here failed under this
+        # suite's own mutate.py load, where the un-instrumented setup cost 0.22 s).
+        #
+        # Job 'a' ran the identical uncontended code path seconds earlier, so it is the
+        # calibration phase this test already has: its own request→start gap IS that setup cost
+        # with no queue in it. Bound b's excess against a's, never against a constant.
         st = wait_event(s.arc, lambda ev: ev.get('ev') == 'start' and ev.get('name') == 'b')
-        self.assertAlmostEqual(st['queued_s'], st['t'] - st['t_req'], delta=0.05)
+        sa = wait_event(s.arc, lambda ev: ev.get('ev') == 'start' and ev.get('name') == 'a')
+        span_b = st['t'] - st['t_req']
+        # Containment is an INVARIANT, not a measurement: the monotonic wait is bracketed by the
+        # two wall stamps, so it can never exceed them. This is the direction that catches the
+        # wall/monotonic mix-up (which reads as ~1.79e9) and any mutant that inflates queued_s.
+        self.assertLessEqual(st['queued_s'], span_b + 1e-6,
+                             f'measured wait {st["queued_s"]} exceeds the span that brackets it '
+                             f'{span_b} (wall/monotonic mix-up?)')
+        overhead_a = (sa['t'] - sa['t_req']) - sa['queued_s']
+        overhead_b = span_b - st['queued_s']
+        # 4x a's overhead, floored by the spawn calibration so a fast machine's near-zero reading
+        # cannot make the bound impossibly tight. A mutant that clamps queued_s to 0 leaves the
+        # whole hold_s in overhead_b and still fails this.
+        budget = max(4.0 * overhead_a, deadline(0.5, 0.05))
+        self.assertLessEqual(overhead_b, budget,
+                             f'un-instrumented setup {overhead_b:.3f}s exceeds {budget:.3f}s '
+                             f'(calibration: a={overhead_a:.3f}s, spawn={SPAWN[0]:.3f}s)')
         return j
 
     def _overlapped(self, s, kind_a, kind_b, **extra):
@@ -1320,6 +1346,43 @@ class TestProfileAttribution(unittest.TestCase):
         self.assertNotIn('lensB', r2)
         self.assertNotIn('suite1', r2)
         self.assertIn('lens2', r2)
+
+    def test_a_capture_of_a_ledgered_jobs_stdout_is_not_a_stray(self):
+        """A caller's redirect of the scheduler's own stdout is that job's output, not a second run.
+
+        `rows_from_dir` recognised only `.run.log` and `.launcher.log`, so
+        `run-codex.sh ... > money-r1.wrap.log 2>&1` read as an unscheduled job: L7 accused three
+        LEDGERED runs, and each one's span was billed again in the totals-by-kind table. (`busy`
+        unions its intervals, so that half absorbed the duplicate and hid it — which is why the
+        assertion below is on the per-kind table and the artifact list, not on `busy`.)
+
+        The fix reads the `loop.py: [<job>]` line the launcher itself prints. The two negative
+        cases are the point: an unknown job id, and a log with no job line at all, must STILL
+        trigger L7 — otherwise the attribution would have swallowed the lever it exists to keep.
+        """
+        def arc_with(first_line):
+            s = sbx(self)
+            base = time.time() - 20000
+            job = loop.record_job(s.arc, 'A', 1, 'review', 'lens1', base, base + 100, 0, cpu='none')
+            p = os.path.join(s.arc, 'money-r1.wrap.log')
+            with open(p, 'w') as fh:
+                fh.write(first_line.format(job=job) + '\n[watchdog] verdict written on attempt 1\nEXIT=0\n')
+            os.utime(p, (time.time() + 100, time.time() + 100))
+            r = s.run('profile', '--arc', s.arc)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r.stdout.split('== whole arc')[-1]
+
+        own = arc_with('loop.py: [{job}] review/none queued 0.0s → running: run-codex.sh')
+        self.assertIn('[quiet    ] L7', own)
+        self.assertNotIn('money-r1.wrap.log', own, 'the capture is the ledgered job, not an artifact of its own')
+        self.assertNotIn('other', own.split('== totals by kind ==')[1].split('== timeline ==')[0],
+                         'and its span is not billed a second time under a kind of its own')
+
+        for label, line in (('an unknown job id', 'loop.py: [B.r9.ghost.1.2] review/none queued 0.0s → running: x'),
+                            ('no job line at all', '[watchdog] tier actually used: model=gpt-5.6-sol')):
+            out = arc_with(line)
+            self.assertIn('[TRIGGERED] L7', out, f'{label}: still a stray')
+            self.assertIn('money-r1.wrap.log', out, f'{label}: still reported as its own artifact')
 
     def test_close_round_gate_and_disposition(self):
         s = sbx(self)
@@ -2253,6 +2316,13 @@ class TestCloseRoundIsATransaction(unittest.TestCase):
         wait_path(os.path.join(m, 'impl.pid'), procs=(pw,))
         with open(os.path.join(m, 'impl.pid')) as fh:
             kid = int(fh.read().strip())
+        # impl.pid proves the CHILD is alive; it does not prove the SCHEDULER has ledgered the
+        # child's process group yet. loop.py writes that `child` event just after Popen returns,
+        # and a SIGKILL landing in between leaves close-round with a start and no pgid -- which is
+        # the 'never a child / unverifiable' branch, a different refusal than the one under test.
+        # Under load the parent is descheduled in exactly that window, so wait for the event that
+        # makes this test's premise true rather than assuming the ordering holds.
+        wait_event(s.arc, lambda ev: ev.get('ev') == 'child' and ev.get('name') == 'impl')
         os.kill(pw.pid, signal.SIGKILL)
         pw.wait(timeout=deadline(600.0, 30.0))
         self.assertTrue(loop.pid_alive(kid), 'the child died with its scheduler — test proves nothing')
@@ -2707,6 +2777,213 @@ class TestARefusalIsTerminal(unittest.TestCase):
         self.assertAlmostEqual(a[0]['queued'], b[0]['queued'])
         self.assertEqual(loop.round_window(a, 'A', 1), loop.round_window(b, 'A', 1))
         self.assertNotEqual(a[0]['note'], b[0]['note'], 'the two shapes must still be distinguishable')
+
+
+class TestCadence(unittest.TestCase):
+    """The repeat gate: what a cheap check owes once its RATE, not its cost, is the bill.
+
+    The preflight asks its question about a KIND, at round 1. That is structurally blind to a check
+    that is individually cheap and run twenty-five times -- every instance passes the per-instance
+    question while the aggregate is the whole expense. These tests pin the gate that asks about the
+    rate, and (just as importantly) pin the two ways it stays OUT OF THE WAY, because a gate that
+    fires on work the skill itself asks for teaches people to route around it: it is silent for the
+    first two runs, and it never sees a SCOPED run at all -- only the whole-project repeat, which is
+    what the bill was actually made of.
+    """
+
+    KIND = 'tsc'   # in CADENCE_KINDS and free of vitest's verdict machinery, which is not the subject here
+
+    def _run(self, s, repo, name):
+        return s.run('run', '--arc', s.arc, '--track', 'A', '--round', '1', '--kind', self.KIND,
+                     '--name', name, '--tree', repo,
+                     '--checkpoint', 'unit-test fixture: the command is `true`', '--', 'true')
+
+    def _queued(self, s, name):
+        return [ev for ev in loop.ledger_read(s.arc)
+                if ev.get('ev') == 'queued' and ev.get('name') == name]
+
+    # ------------------------------------------------- the gate holds off, then refuses, then passes
+    def test_the_third_run_of_a_repeating_kind_owes_a_cadence_answer(self):
+        s = sbx(self)
+        repo, _ = s.git_repo()
+        for i in (1, 2):
+            r = self._run(s, repo, f'j{i}')
+            self.assertNotEqual(r.returncode, loop.RC_GATE,
+                                f'run {i} is inside the free window and must not be gated: {r.stdout + r.stderr}')
+            self.assertEqual(len(self._queued(s, f'j{i}')), 1, 'a free-window run must reach the ledger')
+
+        r = self._run(s, repo, 'j3')
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, loop.RC_GATE, out)
+        self.assertIn('CADENCE REFUSED', out)
+        self.assertEqual(self._queued(s, 'j3'), [],
+                         'a refused launch must not write a queued event -- it would count itself '
+                         'toward the next refusal and inflate the very bill it is being refused over')
+
+        p = s.run('cadence', '--arc', s.arc, '--kind', self.KIND, '--remaining', '22',
+                  '--each', 'about 7 minutes of wall-clock on this box',
+                  '--schedule', 'batch it: one run per surface group, and the full run at the arc tip')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+        r = self._run(s, repo, 'j4')
+        self.assertNotEqual(r.returncode, loop.RC_GATE,
+                            f'the cadence is on record and the gate must pass: {r.stdout + r.stderr}')
+        self.assertEqual(len(self._queued(s, 'j4')), 1)
+
+    def test_the_refusal_prices_the_bill_from_the_ledgers_own_spans(self):
+        """A bare count can only be believed. The refusal has to hand over a number, measured."""
+        s = sbx(self)
+        repo, _ = s.git_repo()
+        self._run(s, repo, 'j1')
+        self._run(s, repo, 'j2')
+        r = self._run(s, repo, 'j3')
+        out = r.stdout + r.stderr
+        self.assertIn('measured so far: 2 whole-project run(s)', out, out)
+        self.assertIn('median', out)
+        # and it must name the route for a rate that is not ours to lower
+        self.assertIn('--fixed-by', out)
+
+    def test_a_kind_outside_the_repeating_set_is_never_cadence_gated(self):
+        """The control. Without it this class would pass on a gate that refused everything."""
+        for kind in ('review', 'write', 'mutant', 'other'):
+            ok, msg = loop.cadence_decision(kind, 99, False)
+            self.assertTrue(ok, f'{kind} was cadence-gated: {msg}')
+        ok, _ = loop.cadence_decision('vitest', 99, False)
+        self.assertFalse(ok, 'vitest at 99 prior runs must be gated, or the test above proves nothing')
+
+    def test_cadence_decision_sweep(self):
+        free = loop.CADENCE_FREE_RUNS
+        for prior in range(free):
+            self.assertTrue(loop.cadence_decision('vitest', prior, False)[0],
+                            f'run {prior + 1} is inside the free window')
+        self.assertFalse(loop.cadence_decision('vitest', free, False)[0],
+                         'the first run PAST the free window owes an answer')
+        self.assertTrue(loop.cadence_decision('vitest', free, True)[0], 'answered: it passes')
+        self.assertTrue(loop.cadence_decision('vitest', free + 40, True)[0], 'and keeps passing')
+
+    # ------------------------------------------------------------- what is not a cadence answer
+    def test_a_per_instance_speedup_is_not_a_schedule_change(self):
+        """Making each run marginally cheaper preserves the defect at a discount."""
+        for bad in ('make each run a bit faster',
+                    'optimise the slowest test file',
+                    'use a faster machine',
+                    'reduce the per-run overhead'):
+            self.assertIsNone(loop.CADENCE_SCHEDULE_RE.search(bad), f'{bad!r} was accepted as a schedule change')
+        for good in ('batch the suite per surface group',
+                     'run it in the background while the next test is authored',
+                     'cap it at one full run per arc',
+                     'drop the e2e leg on commits that touch no app file',
+                     'only at the tip of the arc'):
+            self.assertIsNotNone(loop.CADENCE_SCHEDULE_RE.search(good), f'{good!r} was refused as a schedule change')
+
+    def test_the_cli_refuses_a_per_instance_speedup_and_takes_a_schedule(self):
+        s = sbx(self)
+        bad = s.run('cadence', '--arc', s.arc, '--kind', 'vitest', '--remaining', '12',
+                    '--each', 'roughly seven minutes per full run',
+                    '--schedule', 'make each individual run somewhat quicker')
+        self.assertNotEqual(bad.returncode, 0, bad.stdout + bad.stderr)
+        self.assertIn('does not change the SCHEDULE', bad.stdout + bad.stderr)
+        self.assertIsNone(loop.cadence_of(loop.ledger_read(s.arc), 'vitest'),
+                          'a refused cadence must not reach the ledger')
+
+        ok = s.run('cadence', '--arc', s.arc, '--kind', 'vitest', '--remaining', '12',
+                   '--each', 'roughly seven minutes per full run',
+                   '--schedule', 'batch: one run per surface group, full suite at the tip')
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        self.assertIsNotNone(loop.cadence_of(loop.ledger_read(s.arc), 'vitest'))
+
+    def test_a_rate_fixed_by_a_project_rule_is_recorded_not_overridden(self):
+        """Where a project rule fixes the rate, the cadence is not mine to lower -- say so."""
+        s = sbx(self)
+        r = s.run('cadence', '--arc', s.arc, '--kind', 'vitest', '--remaining', '12',
+                  '--each', 'roughly seven minutes per full run',
+                  '--fixed-by', "CLAUDE.md: npm test must be green before every commit")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('somewhere else', r.stdout, 'the record must say the saving has to move')
+        rec = loop.cadence_of(loop.ledger_read(s.arc), 'vitest')
+        self.assertIsNotNone(rec)
+        self.assertIsNone(rec.get('schedule'))
+
+        for args in (('--schedule', 'batch them', '--fixed-by', 'some rule'), ()):
+            bad = s.run('cadence', '--arc', s.arc, '--kind', 'vitest', '--remaining', '1',
+                        '--each', 'roughly seven minutes per full run', *args)
+            self.assertNotEqual(bad.returncode, 0, f'{args} was accepted: {bad.stdout + bad.stderr}')
+            self.assertIn('not both and not neither', bad.stdout + bad.stderr)
+
+    def test_a_filled_in_blank_is_not_a_cost(self):
+        s = sbx(self)
+        for bad in ('tbd', 'n/a', 'same'):
+            r = s.run('cadence', '--arc', s.arc, '--kind', 'vitest', '--remaining', '9',
+                      '--each', bad, '--schedule', 'batch per surface group')
+            self.assertNotEqual(r.returncode, 0, f'--each {bad!r} was accepted')
+
+    # -------------------------------------------------------------------- the bill, and the count
+    def test_a_run_refused_at_the_lock_does_not_count_toward_the_rate(self):
+        """Same stillborn rule as paid_review_jobs: a job that never ran is not evidence of a rate."""
+        q = dict(ev='queued', job='j1', kind='vitest', cpu='heavy')
+        self.assertEqual(loop.runs_of([q, dict(ev='refused', job='j1')], 'vitest'), 0)
+        self.assertEqual(loop.runs_of([q, dict(ev='start', job='j1'), dict(ev='refused', job='j1')], 'vitest'), 1,
+                         'a run that STARTED and later failed did happen')
+        self.assertEqual(loop.runs_of([dict(ev='queued', job='t', kind='tsc', cpu='heavy'),
+                                       dict(ev='start', job='t')], 'vitest'),
+                         0, 'the count is PER KIND -- a tsc run says nothing about the suite rate')
+        self.assertEqual(loop.runs_of([dict(ev='queued', job='u', kind='vitest'), dict(ev='start', job='u')],
+                                      'vitest'), 1,
+                         'an event with no cpu recorded counts -- an unreadable class fails towards '
+                         'gating, the same direction cpu_class itself fails in')
+
+    def test_a_scoped_run_is_never_counted_and_never_refused(self):
+        """The exemption, both directions, end to end -- the half whose absence broke a live spec.
+
+        Running the changed test files after each edit is the pattern this skill ASKS for. A gate
+        that refuses the third of those has not found a wrong cadence; it has found the correct one
+        and priced it as waste. So a scoped run must neither push the arc toward a refusal nor be
+        refused by one, and the two are separate failures: counting it wrongly gates the NEXT wide
+        run, refusing it wrongly gates the cheap run itself.
+        """
+        s = sbx(self)
+        env = dict(VITEST_STUB_OUT=HAPPY, CI='1')
+
+        def vitest(name, *argv):
+            return s.run('run', '--arc', s.arc, '--track', 'A', '--round', '1', '--kind', 'vitest',
+                         '--name', name, '--checkpoint', 'unit-test fixture: the whole suite, deliberately',
+                         '--', 'vitest', *argv, env=env)
+
+        for i in (1, 2):
+            r = vitest(f'wide{i}', 'run')
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+        for i in (1, 2, 3, 4):
+            r = vitest(f'scoped{i}', 'run', 'a.test.ts')
+            self.assertNotEqual(r.returncode, loop.RC_GATE,
+                                f'scoped run {i} was cadence-refused: {r.stdout + r.stderr}')
+
+        events = loop.ledger_read(s.arc)
+        self.assertEqual(loop.runs_of(events, 'vitest'), 2,
+                         'four scoped runs went through and NONE of them may count toward the rate')
+        r = vitest('wide3', 'run')
+        self.assertEqual(r.returncode, loop.RC_GATE,
+                         f'the third WHOLE-PROJECT run still owes a cadence answer: {r.stdout + r.stderr}')
+        self.assertIn('2 whole-project run(s)', r.stdout + r.stderr,
+                      'the bill must price the wide runs only, or the author argues with the wrong number')
+
+    def test_the_bill_under_reports_rather_than_guesses(self):
+        """An unmeasured run contributes nothing, which can only make the gate more permissive."""
+        ev = [dict(ev='queued', job='a', kind='vitest', cpu='heavy'), dict(ev='end', job='a', span_s=10.0),
+              dict(ev='queued', job='b', kind='vitest', cpu='heavy'), dict(ev='end', job='b', span_s=30.0),
+              dict(ev='queued', job='c', kind='vitest', cpu='heavy')]   # still open: no span
+        self.assertEqual(loop.cadence_bill(ev, 'vitest'), (2, 20.0, 40.0))
+        self.assertEqual(loop.cadence_bill(ev, 'tsc'), (0, 0.0, 0.0), 'per kind, and honest about zero')
+        odd = ev[:2] + [dict(ev='queued', job='d', kind='vitest', cpu='heavy'), dict(ev='end', job='d', span_s=8.0),
+                        dict(ev='queued', job='e', kind='vitest', cpu='heavy'), dict(ev='end', job='e', span_s=90.0)]
+        self.assertEqual(loop.cadence_bill(odd, 'vitest')[1], 10.0, 'odd n takes the middle span, not the mean')
+
+    def test_the_bill_reads_spans_only_through_this_kinds_jobs(self):
+        """The `end` event carries no kind, so a bill that matched on `end` alone would bill the arc."""
+        ev = [dict(ev='queued', job='v', kind='vitest', cpu='heavy'), dict(ev='end', job='v', span_s=5.0),
+              dict(ev='queued', job='r', kind='review', cpu='none'), dict(ev='end', job='r', span_s=900.0)]
+        self.assertEqual(loop.cadence_bill(ev, 'vitest'), (1, 5.0, 5.0),
+                         "the review's 900 s must not appear in the suite's bill")
 
 
 if __name__ == '__main__':

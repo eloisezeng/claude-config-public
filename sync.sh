@@ -214,6 +214,24 @@ for state in rebase-merge rebase-apply MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD; 
   fi
 done
 
+# 0.5 Refresh the plugin manifests from this machine's live plugin state, so the
+#     repo's record of "which plugins does this setup use" cannot go stale. The
+#     manifests are NORMALIZED (see bin/refresh-plugin-manifests.mjs) precisely so
+#     that both machines regenerate byte-identical content and this step is a
+#     no-op unless a plugin was actually added or removed.
+#
+#     A failure here must NOT stop the sync: the cluster node has no plugin
+#     directory at all, and the generator correctly refuses to write from
+#     nothing. Log it and carry on -- the manifests then keep whatever the
+#     machine that DOES have plugins last wrote, which is the correct answer.
+if command -v node >/dev/null 2>&1; then
+  if err="$(node "$REPO/bin/refresh-plugin-manifests.mjs" 2>&1)"; then
+    [ -n "$err" ] && log "$err"
+  else
+    log "plugin manifest refresh skipped: $err"
+  fi
+fi
+
 # 1. Commit local changes, if any. Cluster nodes have no git identity configured
 #    (and config edits are off-limits), which attributes auto-commits to the
 #    hostname — fall back to the real identity per-command, only when unset.
