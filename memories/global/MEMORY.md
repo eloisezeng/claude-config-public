@@ -6,7 +6,7 @@
      session); their bodies still live in this directory. -->
 
 - [background-fleet-memory-budget](background-fleet-memory-budget.md) — a bg fleet costs ~1 GB/session idle and grows with CONTEXT not count; daemon is already PPID 1; recover crash-killed sessions via reapedMidWorkAt
-- [a-deleted-bg-job-survives-in-its-transcript](a-deleted-bg-job-survives-in-its-transcript.md) — deleting a bg job kills the process and removes job dir, tmp and worktree, but the transcript + rewind snapshots survive: rebuild, replay the writes, `claude --bg --resume` from the ORIGINAL cwd on `opus[1m]`; the 8-hex id is kept ONLY when the daemon fully released it, else a NEW id and the phantom `running pid=None` record must be retired by hand; one launch per line (a leaked `cd` boots a seat in the wrong worktree)
+- [a-deleted-bg-job-survives-in-its-transcript](a-deleted-bg-job-survives-in-its-transcript.md) — deleting a bg job kills the process and removes job dir, tmp and the worktree it entered (branch usually kept; snapshot refs first), but the transcript + rewind snapshots survive: rebuild, replay the writes, `claude --bg --resume` from the ORIGINAL cwd on `opus[1m]`; the 8-hex id is kept ONLY when the daemon fully released it, else a NEW id and the phantom `running pid=None` record must be retired by hand; one launch per line (a leaked `cd` boots a seat in the wrong worktree)
 - [gui-launched-tools-get-no-shell](gui-launched-tools-get-no-shell.md) — a VS Code profile/LaunchAgent/.app runs with NO shell: PATH is launchd's bare 4 dirs, the tab closes before the error shows; resolve binaries absolutely and never exit silently
 - [claude-agents-is-the-fleet-write-surface](claude-agents-is-the-fleet-write-surface.md) — `claude agents` IS the write surface for running sessions: arrow to one, SPACE to reply; it gates on folder trust so never launch it from $HOME
 - [background-subagent-parallel-workflow](background-subagent-parallel-workflow.md) — fire off messages; have the heavier ones answered by background subagents in parallel
@@ -16,7 +16,7 @@
 - [check-memory-before-asking-user](check-memory-before-asking-user.md) — search existing memory before asking the user to re-supply context
 - [claude1-second-profile](claude1-second-profile.md) — how the `claude1` command launches a second Claude Code profile separate from default `claude`
 - [cloud-synced-edits-bypass-dev-server-watcher](cloud-synced-edits-bypass-dev-server-watcher.md) — in a OneDrive/Dropbox folder the dev server misses sync-delivered edits and serves a stale bundle; restart it
-- [codify-as-rules-not-skills](codify-as-rules-not-skills.md) — prefer always-on instructions over invoke-when-remembered skills; test against a no-guidance control first
+- [codify-as-rules-not-skills](codify-as-rules-not-skills.md) — the TRIGGER decides, not the format: no nameable recurring moment, no skill (64 of 83 never fire); control DISCIPLINE skills only
 - [dev-pipeline-plan-subagent-converge](dev-pipeline-plan-subagent-converge.md) — default pipeline: brainstorm/spec → writing-plans → subagent impl → Claude↔Codex converge
 - [feedback-privacy-business-material](feedback-privacy-business-material.md) — be privacy-conscious with business material; confirm before any outward-facing publish
 - [zsh-agent-shell-quoting-gotchas](zsh-agent-shell-quoting-gotchas.md) — zsh does NOT word-split unquoted expansions (a multi-line $FILES is ONE arg, so `vitest run $FILES` exits 0 having run nothing); BSD grep has no `\|`; grep needs `-a` on NUL-bearing files; strip ANSI before grepping
@@ -29,7 +29,7 @@
 - [lavish-artifact-prefs](lavish-artifact-prefs.md) — how to build lavish-axi review artifacts — interactive radios, working submit, notifications
 - [lavish-axi-fork](lavish-axi-fork.md) — lavish-axi must be the user's fork (~/code/lavish-axi-fork, npm-linked), not upstream
 - [lavish-axi-threading-and-collapsibles](lavish-axi-threading-and-collapsibles.md) — `stream --reply-to` for threads; no `<details>`; RESTART the server for fork build changes
-- [lavish-no-redisplay-answered-questions](lavish-no-redisplay-answered-questions.md) — in lavish surfaces, never re-display a question the user already answered
+- [ask-each-question-once-in-final-form](ask-each-question-once-in-final-form.md) — ask each question once, final form: hold fact-dependent questions until the fact lands; never re-show an answered one
 - [mark-fixture-data](mark-fixture-data.md) — mark placeholder/stub data shaped like real data with a FIXTURE marker
 - [mermaid-id-collision-lavish](mermaid-id-collision-lavish.md) — v11 startOnLoad same-ms SVG ids collide in multi-diagram artifacts; render each with unique ids
 - [playwright-forcedcolors-fixture-noops](playwright-forcedcolors-fixture-noops.md) — `test.use({ forcedColors })` silently no-ops; use page.emulateMedia, assert the mode is ON as line one
@@ -43,7 +43,8 @@
 - [namespace-run-artifacts-per-arc](namespace-run-artifacts-per-arc.md) — parallel arcs share one scratchpad; generic run-log names clobber silently and the round then proves nothing
 - [mocks-blind-to-the-mechanism-they-replace](mocks-blind-to-the-mechanism-they-replace.md) — a mock can't see behaviour the mocked thing implements (redirects, retries); enforce at a choke point
 - [context-mode-webfetch-blocks-artifact-reads](context-mode-webfetch-blocks-artifact-reads.md) — its interceptor can't read claude.ai artifacts; verify base via git-object provenance, then force-publish
-- [max-20x-subscription-context-discipline](max-20x-subscription-context-discipline.md) — Fable is the accepted default; window size/session length are the burn lever — obey context-watchdog nudges
+- [max-20x-subscription-context-discipline](max-20x-subscription-context-discipline.md) — on Max 20×, window size/session length are the burn lever — obey context-watchdog nudges
+- [continued-sessions-default-to-opus](continued-sessions-default-to-opus.md) — every handoff/revival/re-dispatch runs on claude-opus-5[1m] (her 09-11 word); read the tier off the child's respawnFlags
 - [macos-find-is-bfs-no-relative-newermt](macos-find-is-bfs-no-relative-newermt.md) — bfs `find`: `-newermt "-20 minutes"` silently ERRORs, use `-mtime -20m`; test absence-probes against known presence
 - [hf-personal-repos-have-no-collaborators](hf-personal-repos-have-no-collaborators.md) — a personal-namespace repo can't grant write; probe `user-access-request/pending`, never `preupload`
 - [config-sync-commits-onto-detached-head](config-sync-commits-onto-detached-head.md) — an interrupted rebase makes the config auto-sync commit git conflict MARKERS as content into the always-loaded CLAUDE.md/MEMORY.md; resolve as a union, never `rebase --abort`
@@ -101,3 +102,5 @@
 - normalise-a-ci-measurement-against-an-in-job-control — a hosted runner varies ~1.5x on untouched work, wider than most effects: divide every CI duration by a control step from the SAME job, compare medians with the N stated, and still quote the raw seconds because those are what is billed
 - [a-git-pathspec-resolves-against-cwd](a-git-pathspec-resolves-against-cwd.md) — `git ls-tree`/`grep`/`log -- <path>` resolve the path against the CURRENT dir, so from a subdirectory they match nothing and exit 0; a guard deriving a set that way goes permanently fail-closed. Pass `--full-tree`.
 - [Pausing a service is not pausing the mechanism](pausing-a-service-is-not-pausing-the-mechanism.md) — grep the SCRIPT PATH across launchd/cron/hooks; a SessionStart hook pushed 6 commits through a "paused" window
+- [claude-rm-refuses-while-any-job-record-is-rejected](claude-rm-refuses-while-any-job-record-is-rejected.md) — `claude rm` with --discard-unpushed/--force-remove-worktree fails closed while ANY job record is loader-rejected; diff state.json folders vs `claude agents --json --all`, park, rm, restore; wid = sha256(path)[:32]
+- a-two-root-machine-needs-the-root-named — two config roots = two agents pages; name WHICH root before any destructive session sweep, and read `No job matching` as a root mismatch

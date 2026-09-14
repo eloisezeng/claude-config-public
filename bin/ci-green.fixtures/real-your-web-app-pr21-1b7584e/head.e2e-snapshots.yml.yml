@@ -1,0 +1,76 @@
+name: e2e snapshots (linux)
+
+# Generates the Linux screenshot baselines the e2e job compares against.
+#
+# The pictures in e2e/mobile-baseline.spec.ts-snapshots/ can only be taken on
+# the platform that will later be asked to match them: a Mac cannot produce a
+# Linux runner's font rasterisation, and pretending otherwise is how a baseline
+# ends up with its tolerance widened until it stops catching regressions.
+# So they are taken here, uploaded, and committed by hand.
+#
+# Run it when a deliberate UI change makes the committed pictures stale:
+#
+#     gh workflow run "e2e snapshots (linux)"
+#     gh run download <run-id> --name e2e-linux-snapshots --dir /tmp/snaps
+#     cp /tmp/snaps/*-linux.png e2e/mobile-baseline.spec.ts-snapshots/
+#
+# Then commit them and let the e2e job confirm they match on a second run —
+# uploading and trusting is not the same as verifying.
+#
+# This is for pictures that are STALE. A picture that is MISSING needs nothing
+# from here: Playwright's default is to write a baseline it cannot find and fail
+# the test, and the e2e job uploads this directory when it fails, so the run
+# that goes red for a missing picture is also the run that hands you the picture.
+# Which is just as well, because GitHub only dispatches workflows that are
+# already on the default branch — so on the pull request that first added this
+# file, this workflow could not have been run at all.
+#
+# Never on a schedule and never on push: a baseline that regenerates itself
+# accepts whatever the UI currently looks like, which is the one thing a
+# baseline exists not to do.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshots:
+    runs-on: ubuntu-latest
+    # One spec, run to regenerate its images. Bounded for the same reason as the
+    # suite itself: GitHub's default ceiling is six billed hours.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx playwright install --with-deps chromium
+
+      # --update-snapshots rewrites the pictures for THIS platform only; the
+      # committed -darwin.png files are not touched, because Playwright keys
+      # each file by the platform that took it.
+      #
+      # The spec is named explicitly: it is the only one that takes pictures,
+      # and running the whole suite here would spend the time without changing
+      # the artifact. `tsc -b` first, because the suite runs from the compiled
+      # workspaces exactly as `npm run e2e` does.
+      - run: npx tsc -b
+      - run: npx playwright test mobile-baseline --update-snapshots
+
+      # Uploaded rather than committed: a workflow that can push to the branch
+      # it is testing is a workflow that can green itself. A person looks at
+      # these pictures before they become the thing every future run is
+      # measured against.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-linux-snapshots
+          path: e2e/mobile-baseline.spec.ts-snapshots/*-linux.png
+          retention-days: 14
+          if-no-files-found: error

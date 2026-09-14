@@ -1,0 +1,3 @@
+README.md
+scripts/sync-main.sh
+scripts/test-sync-main.sh

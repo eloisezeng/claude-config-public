@@ -1,0 +1,199 @@
+name: check
+
+# Runs on the pull request's own merge commit, not on main after the fact, so a
+# green tick beside a PR is about the code that PR would actually merge.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push to a branch makes the previous run's answer stale, so cancel it
+# rather than paying for a verdict nobody will read.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+# The job only reads the tree and reports a status; it writes nothing back.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # GitHub's default is six hours. This job takes a few minutes, so a run
+    # still going after fifteen is wedged rather than slow, and every minute
+    # after that is billed for a verdict that is never coming.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history, not the single-commit shallow clone this action
+          # defaults to. shared/src/census.test.ts checks that every commit
+          # cited in .arc/CENSUS.md actually exists in the repository, and with
+          # one commit present none of them resolve — 21 false failures that say
+          # nothing about the change under test.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the `engines.node` floor in package.json.
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # One command, the same one used locally: `tsc -b && eslint . && vitest run`.
+      # Defining the gate once means CI and a developer's machine cannot drift
+      # into checking different things.
+      - run: npm run check
+
+  # Requiring a branch to be up to date before it merges is a setting GitHub
+  # already owns, under branch protection and again under rulesets. Both answer
+  # 403 on this repository — "Upgrade to GitHub Pro or make this repository
+  # public" — and neither paying nor publishing is a price worth this. So the
+  # rule is enforced here instead, where it costs seconds.
+  #
+  # On a pull request the checked-out commit is GitHub's merge ref: a merge of
+  # the branch into the base AS RECORDED ON THE PULL REQUEST. When main has not
+  # moved since, today's main is a parent of that commit and therefore an
+  # ancestor. When main HAS moved, it is neither, and every other tick on this
+  # pull request is a verdict about a tree that no longer exists. That is not a
+  # hypothetical: it is what put a red main into this repository on 2026-09-07.
+  #
+  # What it does not do, and what GitHub's version would: re-evaluate at the
+  # moment of the merge. This answers for the moment the run started. Whoever
+  # merges still has to confirm the pull request's base is main's current head —
+  # one field in the same API response that reports mergeability.
+  current:
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Ancestry is the whole question, so the whole history is the input.
+          fetch-depth: 0
+
+      - name: main must be an ancestor of this branch
+        run: |
+          git fetch --no-tags --quiet origin main
+          main=$(git rev-parse --short origin/main)
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "Up to date with main ($main)."
+            exit 0
+          fi
+          behind=$(git rev-list --count HEAD..origin/main)
+          echo "::error::This branch is $behind commit(s) behind main ($main), so every check on this pull request tested a tree that no longer exists. Update the branch — the button is on the pull request — and let the checks run again."
+          exit 1
+
+  # The Playwright suite. It runs on ubuntu-latest, at 1x private-repo minutes,
+  # rather than on macos-latest at 10x.
+  #
+  # The reason it could not run on Linux was the committed screenshots, which
+  # were generated on macOS and which a Linux runner reproduces at different
+  # pixel values. That turned out to be one spec out of twenty, and Playwright
+  # already names a screenshot after the platform that took it, so the darwin
+  # and linux baselines sit side by side in the same directory and neither
+  # machine is asked to match the other's pixels. The linux ones are generated
+  # by .github/workflows/e2e-snapshots.yml and committed; re-run it whenever a
+  # deliberate UI change makes them stale.
+  #
+  # Runs as its own job rather than inside `check`, so a failure says which of
+  # the two gates failed without opening the log, and so both start at once.
+  e2e:
+    # Pull requests only, where `check` runs on both.
+    #
+    # Both triggers fire for every change that lands: once on the pull
+    # request's merge commit, and again on main when that same commit is
+    # pushed. For the cheap gate that second run is worth its seconds — it is
+    # the only thing watching main directly. This one is the most expensive job
+    # in the repository, and running it twice per change buys a verdict on a
+    # tree that was green minutes earlier.
+    #
+    # What that gives up, and it is not hypothetical: two pull requests that
+    # pass separately and conflict once merged. `check` still runs on main and
+    # would catch such a conflict in the types, the lint or the unit tests, but
+    # a conflict visible ONLY through a browser reaches main unnoticed.
+    #
+    # That happened the first time it could. #15/#16/#17 regenerated the word
+    # packs; #14 put this suite in CI. Neither pull request could see the other,
+    # and the merge left twelve visual baselines stale on a green main. Worse,
+    # the run on #14 tested that branch against its ORIGINAL base rather than
+    # main as it stood at merge time — GitHub's merge ref is computed from the
+    # base recorded on the pull request, so a base that moves under a long-lived
+    # branch is not re-tested unless the branch is updated.
+    #
+    # Two ways to close it. Running this job on push to main as well would cost
+    # an extra ~20 minute Linux run per merge, unconditionally. Requiring a
+    # branch to be current before it merges costs a run only when main actually
+    # moves under an open pull request, so that is the one taken — as the
+    # `current` job below, because GitHub's own version of it needs a paid plan.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # The whole point of a browser suite is that it waits on real clocks, so it
+    # is exactly the job that can hang instead of failing — and at six hours,
+    # GitHub's default, one wedged run costs more billed minutes than a month of
+    # honest ones. Locally the suite is 6.9 minutes; this leaves generous room
+    # for a slower hosted runner while keeping the worst case bounded.
+    timeout-minutes: 30
+    steps:
+      # Shallow is fine here: the history check that needs full depth
+      # (shared/src/census.test.ts) belongs to `check`, not to this suite.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # The browser download is the slowest step in the job and changes only
+      # when Playwright does, so key the cache on the resolved version rather
+      # than on the lockfile as a whole.
+      - id: pw
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+
+      # The config names no `projects`, so the suite runs on chromium alone —
+      # downloading the other two engines would triple this step for nothing.
+      # On a cache hit the browser is already there and only the system
+      # libraries it links against still need installing.
+      - if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+      - if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      # The same command used locally, for the same reason `check` reuses its
+      # one: two definitions of "the tests" drift, and they drift on a
+      # developer's machine first, where nobody is watching.
+      - run: npm run e2e
+
+      # A failed visual comparison is unreadable without the images, and a
+      # failed journey is unreadable without the trace. Both are written under
+      # test-results/; the server logs the metric assertions read live beside
+      # them. Only on failure — a green run's artifacts are never opened.
+      #
+      # The snapshot directory is here for a different reason. Playwright's
+      # default for a baseline that does not exist yet is to WRITE it and fail
+      # the test (`updateSnapshots: 'missing'`), so a run that is red only
+      # because a picture was missing has already produced the picture it
+      # wanted. Uploading that directory turns the red run into the thing that
+      # fixes it: download, commit the new `-linux.png` files, done. That is how
+      # the Linux baselines were bootstrapped in the first place, and it is the
+      # same path a new manifest row takes afterwards.
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-artifacts
+          path: |
+            test-results/
+            e2e/.artifacts/
+            e2e/mobile-baseline.spec.ts-snapshots/
+          retention-days: 7
+          if-no-files-found: ignore

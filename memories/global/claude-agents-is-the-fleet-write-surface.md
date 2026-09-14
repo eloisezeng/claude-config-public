@@ -15,6 +15,11 @@ driving the TUI under a real pty on 2026-08-21:
   pre-existing 631k-token session, woke it from state `done`, and it acted on the message. A reply
   resumes a finished session as readily as it nudges a running one.
 - **enter** opens the session; **esc** backs out sending nothing; **ctrl+s** switches views; **?** lists shortcuts.
+- **ctrl+x** acts only on a confirm (measured on v2.1.268, 2026-09-10): the row reads `ctrl+x again to delete` and the footer `ctrl+x to confirm` for about 0.8 s, and a second ctrl+x inside that window acts. On a row whose session still has a process (an idle `bg-spare` counts), the confirmed press only STOPS it — `~/.claude/daemon.log` gains `bg settled <id> (killed)` and the row stays — and a second confirmed round deletes the row. A real delete writes nothing to `daemon.log`, so verify it by the id vanishing from `claude agents --json --all`. On a group header the footer offers `delete all` instead; never press it there.
+- When the worktree the session entered has a branch with commits on no remote, the confirmed press does NOT delete: the row reads `not deleted · N unpushed commits on “<branch>” — ctrl+x again discards them`, the third press re-arms the row to `ctrl+x again to delete`, and the FOURTH deletes the row, the worktree and that branch. The count is by commit id, so a squash-merged branch whose content is already in main still trips it (measured: 14 commits whose final tree matched a main commit). Before discarding, prove the content is in main (`git cherry origin/main <branch>` all `-`, or the tip's tree among `git log origin/main --format=%T`) and push a tag at the tip.
+- Snapshot `git for-each-ref refs/heads` before any delete and `update-ref` back whatever vanished: a delete with no warning can take the branch too (measured 2026-09-10: tip already on an origin tag, the row, worktree and `worktree-fix-truth-gate-comment` all went; two branches named `chore/…` and `ci/…` stayed when their worktrees were removed; cause unmeasured).
+- The name column is as wide as the longest name on screen plus a two-space gap, so it narrows as rows go. A driver matching a fixed-width slice stops finding rows once the longest name is deleted; match the exact name followed by the gap.
+- The view lists sessions from every project, whichever trusted repo it is launched from (measured: your-university_scheduler rows listed when launched from your-web-app-2026).
 
 The visible prompt reads *"describe a task for a new session"*, which makes the view look
 write-only-for-new-work. That prompt is the composer for a NEW session; replying to an existing one is
@@ -25,6 +30,11 @@ running session — probe the shortcuts.
 reads *"describe a task for a new session"*. Typing there and pressing enter **spawns a new session**
 — it is not a reply, and it looks exactly like "writing to my sessions doesn't work". You must select
 a row first. Check this before diagnosing anything deeper.
+
+**Finished rows no longer drop off by themselves.** On v2.1.268 (2026-09-10) the view groups rows as
+Needs input / Working / Completed, and `done` rows with no process stay under Completed until deleted
+with ctrl+x. The 2026-08-25 measurement below, where writing a terminal state cleared rows, predates
+that grouping; re-measure before relying on it.
 
 **A listed row is not necessarily reachable.** A row appears when it has a LIVE PID **or** a
 non-terminal `state`; `claude agents --json` prints `pid` only for the former. So the list has two

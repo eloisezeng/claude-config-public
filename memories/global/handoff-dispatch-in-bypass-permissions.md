@@ -22,7 +22,7 @@ Give a seat that should still gate something `auto`, and one that should prompt 
 `handoff.sh` does not validate the value — a typo passes straight through and `claude --bg` rejects it at launch, which reads as a turn-1 death rather than as a bad flag ([[handoff-successor-model-safeguard-failure]]).
 
 **The default is a CONSTANT, deliberately not an env var.**
-A bg seat exports `CLAUDE_HANDOFF_MODEL` into every seat it dispatches, which is exactly how the Fable model default became dead code inside the fleet ([[continued-sessions-default-to-fable]]).
+A bg seat exports `CLAUDE_HANDOFF_MODEL` into every seat it dispatches, which is how a seat launched on one tier hands that tier to every seat it dispatches ([[continued-sessions-default-to-opus]]).
 A constant cannot be defeated that way — so do not "helpfully" re-add an env override.
 
 **Why bypass is safe to hand an unattended seat on this machine** (measured 2026-08-28):

@@ -163,11 +163,11 @@ The rule that does bind: no usage-based overage without explicit per-action perm
 ```
 SKILL=~/dotfiles/claude/skills/codex-converge
 ARC="$CLAUDE_JOB_DIR/tmp"   # one directory per arc holds the ledger; TRACK is the lens, ROUND the panel number
-"$SKILL/run-codex.sh" --policy-version 2026-09-02-scheduler-v1 --arc "$ARC" --track "$TRACK" --round "$ROUND" "$ARC/$TRACK-r$ROUND.prompt.txt" "$ARC/$TRACK-r$ROUND.verdict.json" "$ARC/$TRACK-r$ROUND.run.log" "$WORKTREE" \
+"$SKILL/run-codex.sh" --policy-version 2026-09-11-reachability-gate-v1 --arc "$ARC" --track "$TRACK" --round "$ROUND" "$ARC/$TRACK-r$ROUND.prompt.txt" "$ARC/$TRACK-r$ROUND.verdict.json" "$ARC/$TRACK-r$ROUND.run.log" "$WORKTREE" \
   -p sol --output-schema "$SKILL/review-output.schema.json"
 ```
 
-Its contract is `run-codex.sh --policy-version 2026-09-02-scheduler-v1 [--write] (--arc DIR --track T --round N [--name NAME] | --one-off) <prompt-file> <out-file> <log-file> <workdir> [codex-args...]`.
+Its contract is `run-codex.sh --policy-version 2026-09-11-reachability-gate-v1 [--write] (--arc DIR --track T --round N [--name NAME] | --one-off) <prompt-file> <out-file> <log-file> <workdir> [codex-args...]`.
 Attribution is mandatory: an unattributed launch exits 2 before touching codex, because it would be unscheduled and unprofiled.
 
 **Give every run its own `<out-file>` and `<log-file>`, derived from the arc, track and round — never a fixed `/tmp/cc-verdict.json`.**
@@ -213,7 +213,7 @@ Pass the vendored schema so the CLI enforces the shape, instead of the prompt me
 ```
 SKILL=~/dotfiles/claude/skills/codex-converge
 ARC="$CLAUDE_JOB_DIR/tmp"   # one directory per arc holds the ledger; TRACK is the lens, ROUND the panel number
-"$SKILL/run-codex.sh" --policy-version 2026-09-02-scheduler-v1 --arc "$ARC" --track "$TRACK" --round "$ROUND" "$ARC/$TRACK-r$ROUND.prompt.txt" "$ARC/$TRACK-r$ROUND.verdict.json" "$ARC/$TRACK-r$ROUND.run.log" "$WORKTREE" \
+"$SKILL/run-codex.sh" --policy-version 2026-09-11-reachability-gate-v1 --arc "$ARC" --track "$TRACK" --round "$ROUND" "$ARC/$TRACK-r$ROUND.prompt.txt" "$ARC/$TRACK-r$ROUND.verdict.json" "$ARC/$TRACK-r$ROUND.run.log" "$WORKTREE" \
   -p sol --output-schema "$SKILL/review-output.schema.json"
 ```
 
@@ -279,9 +279,35 @@ It cannot take `-C <worktree>`, so it would review the wrong checkout — the ex
    For an audit, the "brainstorm" is the discovery sweep: fan out Claude subagents per subsystem AND a Codex full-codebase pass, then consolidate + dedupe findings.
    When a design/UX decision needs the human, present a Lavish mockup (`visualize-in-browser` / `brainstorm-in-lavish` prefs), let the user pick, and fold the chosen option into the spec — this is the right place for the one human check-in in an otherwise hands-off run.
 
-2. **Claude writes the spec.**
+2. **Claude writes the spec — and answers the REACHABILITY GATE inside it.**
    A written design/spec doc (for a fix-set: the consolidated, deduped, severity-ranked findings + the intended fixes and any design decisions).
    Fold in every mockup/brainstorm critique so nothing is lost.
+
+   Every spec answers these five questions in writing, each with a measured number and the query
+   that produced it. A spec that does not is not ready to review, exactly as at the necessity gate
+   in step 4.
+
+   1. **For each value the change DECIDES on: which step fills it, and what share of live items
+      carry it today.** A writer that exists is not a writer that runs. A 0% share is a finding —
+      the check refuses everything — and a share far below what the design assumes is the same
+      finding at lower volume. This share is also the fixture's contract in step 6: a test that
+      hand-writes the unlocking value exercises the case production does not have.
+   2. **Restart, retry, and half-landed-deploy behaviour.**
+   3. **The largest real input**, read from the live system rather than imagined.
+   4. **Every other page, email, report, digest or step that reads the same value** and must change
+      with it. This is the question people skip, because its answer has no diff.
+   5. **The LIVE values of every setting the change depends on** — not the code defaults, which
+      describe a new deployment and not the running one.
+
+   *Why this gate exists (measured, 2026-08-12→09-11):* across 178 merges to one repo, 72 repaired
+   something already shipped. Of the 40 most recent, fully classified, the earliest point at which
+   each was catchable was **live measurement for 14 and design review for 13 — and code review for
+   0 of the 40**. No amount of additional reviewing of the diff reaches any of them, because every
+   one is a fact about the running system that the diff does not contain. The five questions are one
+   per measured class: value-production-rarely-writes 6, lifecycle/timing 8, production-scale 6,
+   change-not-carried-to-every-reader 3, settings-default-vs-live 1. The origin case ran six review
+   rounds without any round asking who fills the value its new check decided on; live, 0 of 271
+   stored records carried it, so the check refused 100% of purchases.
 
 3. **Codex ↔ Claude converge on the spec.**
    Give Codex the spec (`-p terra`); ask it to find gaps, errors, missing cases, and disagreements, under the enforced schema.
@@ -369,7 +395,7 @@ Codex is allowed to implement plan tasks. **The one rule that cannot bend: whoev
 **Run it with the launcher's `--write` mode**, which is the only supported way to get a mutating run:
 
 ```
-"$SKILL/run-codex.sh" --policy-version 2026-09-02-scheduler-v1 --write --arc "$ARC" --track "$TRACK" --round "$ROUND" /tmp/task.txt /tmp/task-out.json /tmp/task.log "$WORKTREE" \
+"$SKILL/run-codex.sh" --policy-version 2026-09-11-reachability-gate-v1 --write --arc "$ARC" --track "$TRACK" --round "$ROUND" /tmp/task.txt /tmp/task-out.json /tmp/task.log "$WORKTREE" \
   -p terra
 ```
 

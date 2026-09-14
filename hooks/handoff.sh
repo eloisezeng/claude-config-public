@@ -2841,8 +2841,8 @@ dispatch() {
     esac
     OBJ="$1"; shift
   fi
-  # the user 2026-08-21: a CONTINUED session defaults to Fable, so the fleet does
-  # not silently run a whole shift on the expensive tier. `${VAR-default}`,
+  # the user 2026-09-11: "in the future default to opus", retiring her 2026-08-21
+  # Fable default. settings.json exports the same tier, so the two agree. `${VAR-default}`,
   # not `:-`, so CLAUDE_HANDOFF_MODEL="" still means "inherit whatever
   # `claude --bg` picks"; an explicit --model always wins over both.
   # the user 2026-08-28: "whenever handing off to new sessions, use auto mode,
@@ -2855,9 +2855,9 @@ dispatch() {
   # given `--permission-mode auto`; one that should prompt like a human session,
   # `--permission-mode manual`. Deliberately NOT an env-var default: a bg seat
   # exports CLAUDE_HANDOFF_MODEL into every seat it dispatches, which is exactly
-  # how the Fable default above became dead code inside the fleet — a constant
+  # how the old Fable model default became dead code inside the fleet — a constant
   # cannot be defeated that way.
-  CWD="$PWD"; MODEL="${CLAUDE_HANDOFF_MODEL-claude-fable-5[1m]}"; PMODE="bypassPermissions"; FORCE=0; DRY=0; NOWATCH=0; NORETIRE=0
+  CWD="$PWD"; MODEL="${CLAUDE_HANDOFF_MODEL-claude-opus-5[1m]}"; PMODE="bypassPermissions"; FORCE=0; DRY=0; NOWATCH=0; NORETIRE=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --cwd) need_val "$1" $# "${2:-}"; CWD="$2"; shift 2 ;;

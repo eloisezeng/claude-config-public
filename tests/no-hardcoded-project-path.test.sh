@@ -91,7 +91,7 @@ SELF_PATH="$LIVE_SELF${CANON_SELF:+:$CANON_SELF}"
 # counted the other way gives a different number and neither reading is wrong.
 # `[[surprising-result-check-metric-identity]]`
 allow_list() { cat <<'EOF'
-bin/sanitize-to-public.test.sh	5	d9993690abb0,e7f40aa0b435,f3ad0efd9b59,ff30a10b8b74	the literal IS the input under test — this file asserts that the sanitizer rewrites a project name on publish, so removing it deletes the coverage
+bin/sanitize-to-public.test.sh	6	4489c6fd0134,d9993690abb0,e7f40aa0b435,f3ad0efd9b59,ff30a10b8b74	the literal IS the input under test — this file asserts that the sanitizer rewrites a project name on publish, so removing it deletes the coverage
 tests/settings-portable-paths.test.sh	5	622719b7a59c,bb0fbb9f471e,d5fc56b69b2d	synthetic homes and the mirror's install path are the inputs under test — this file exists to prove hook commands stay portable across install locations
 bin/install-lavish-fork.sh	1	9ddad9dbe005	lavish-axi is a global TOOL, not a project; its fork path is specified in CLAUDE.md and LAVISH_FORK_DIR already overrides it
 install.sh	3	18641e1365d1,37be033df8f7,a28d385d10ee	the matches are synthetic fixtures inside install.sh's own self-test -- directories it creates and deletes in a temp home, naming no project on any machine
@@ -254,8 +254,8 @@ fi
 # tree-derived check it means the same thing in the published mirror.
 # `[[a-surviving-mutant-may-mean-the-property-is-unobservable]]`
 EXPECTED_ALLOW=5        # entries
-EXPECTED_HITS=17        # the sum of their ceilings
-EXPECTED_TOKENS=14      # the number of distinct token digests they list between them
+EXPECTED_HITS=18        # the sum of their ceilings
+EXPECTED_TOKENS=15      # the number of distinct token digests they list between them
 n_allow="$(allow_list | grep -c .)"
 n_hits="$(allow_list | cut -f2 | paste -sd+ - | bc)"
 n_tokens="$(allow_list | cut -f3 | tr ',' '\n' | grep -c .)"

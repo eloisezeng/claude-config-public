@@ -22,4 +22,4 @@ A never-merge job has no deploy to watch and no freeze to read, and a successor 
 Say: do not merge, do not mark ready, green checks are not authorisation, and there is no freeze to read because you are not deploying.
 
 Measured 2026-08-28 dispatching round 14 of a review-convergence loop whose user instruction was "NEVER merge, PR #39 stays DRAFT": the child's `respawnFlags` carried the merge mandate verbatim.
-Read `respawnFlags` from the successor's `state.json` after every dispatch — it is the same read that tells you which tier it actually got ([[continued-sessions-default-to-fable]]), and it is where a contradicting instruction becomes visible.
+Read `respawnFlags` from the successor's `state.json` after every dispatch — it is the same read that tells you which tier it actually got ([[continued-sessions-default-to-opus]]), and it is where a contradicting instruction becomes visible.

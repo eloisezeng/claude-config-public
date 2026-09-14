@@ -1,5 +1,4 @@
 {
-  "outputStyle": "tolerable",
   "env": {
     "CLAUDE_HANDOFF_MODEL": "claude-opus-5[1m]"
   },
@@ -42,6 +41,14 @@
           {
             "type": "command",
             "command": "bash \"$HOME/dotfiles/claude/inject-ops-lanes.sh\""
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$HOME/dotfiles/claude/hooks/compaction-recovery.mjs\""
           }
         ]
       }
@@ -120,7 +127,6 @@
     "security-guidance@claude-plugins-official": true,
     "typescript-lsp@claude-plugins-official": true,
     "pr-review-toolkit@claude-plugins-official": true,
-    "sonarqube@claude-plugins-official": true,
     "hookify@claude-plugins-official": true,
     "mattpocock-skills@mattpocock": true
   },
@@ -150,6 +156,7 @@
       }
     }
   },
+  "outputStyle": "tolerable",
   "effortLevel": "xhigh",
   "modelSettings": {
     "claude-opus-5": {

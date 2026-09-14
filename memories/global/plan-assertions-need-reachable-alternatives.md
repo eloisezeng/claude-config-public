@@ -32,3 +32,15 @@ The general rule is that a fixture must VARY the dimension the property is about
 - **The dimension is sometimes PROVENANCE, not magnitude.** When the code chooses between two candidate SOURCES for a value — this frame's reading vs. the previous frame's stored one, the request's header vs. the session's, the override vs. the default — a fixture that gives both sources the same value makes "which one did it read?" unobservable, and the test pins only that *something* was read. Give every candidate source a DIFFERENT value, and where the answer must survive a later change, a third value at the end so the wrong two both fail. Measured 2026-09-01 on a video-seek handle: four tests pinned how a pending seek is priced, but each gave the seek's own issue-time snapshot the same rate, rolling flag and clock as the previous frame's, so three mutations swapping one source for the other all SURVIVED. Rewritten to issue at 0.5x, store 2x, and end at 0.5x again, they killed every one.
 - Assert an exact expected value, not an inequality — `share[0] < 0.1 < share[1]` survived a wrong weighting that an exact `0.8` would have caught.
 - When a test's docstring claims a distinction ("absent must not collapse with zero"), check the fixture actually contains both cases distinguishably; see [[a-surviving-mutant-may-mean-the-property-is-unobservable]].
+
+## The live distribution decides which cases a fixture must contain
+
+A fixture built from the case the author had in mind tests the case the author had in mind.
+Once the share of live items carrying a value is MEASURED (question 1 of [[answer-five-written-questions-before-implementing]]), that measurement is the fixture's contract: the test must contain the case that is common live, and it may not hand-write the rare value that unlocks the behaviour under test.
+
+**Why:** 2026-09-11, your-other-project. A short `.org`/`.net` purchase check required a stored company match; live, 0 of 271 stored checks carried one, so the check refused every purchase. Its tests hand-inserted that match into the fixture at three separate call sites — the helper's own comment called it "the only state that lets a gated name buy" — so the suite exercised the 0%-of-live case and never the 100% one. Across the 40 classified post-merge repairs of the preceding month, 4 were exactly this shape and 23 were confirmed not to be.
+
+**How to apply:**
+- Hand-writing a stored value into a fixture is allowed only when the test also drives the real WRITER of that value somewhere, or when a sibling test covers the absent case as the default.
+- State the measured share in the test name or a comment next to the fixture ("0 of 271 live checks carry this"), so the next reader sees the distribution rather than re-deriving it.
+- The common case is usually the ABSENT one, which is why it gets skipped: nobody writes a fixture to express that a field is missing.

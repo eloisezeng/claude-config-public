@@ -1,9 +1,9 @@
 #!/bin/bash
 # run-codex.sh — the watchdogged Codex launcher for codex-converge.
 #
-#   run-codex.sh --policy-version 2026-09-02-scheduler-v1 [--write] --arc DIR --track T --round N [--name NAME] \
+#   run-codex.sh --policy-version 2026-09-11-reachability-gate-v1 [--write] --arc DIR --track T --round N [--name NAME] \
 #                <prompt-file> <out-file> <log-file> <workdir> [codex-args...]
-#   run-codex.sh --policy-version 2026-09-02-scheduler-v1 [--write] --one-off <prompt-file> <out-file> <log-file> <workdir> [codex-args...]
+#   run-codex.sh --policy-version 2026-09-11-reachability-gate-v1 [--write] --one-off <prompt-file> <out-file> <log-file> <workdir> [codex-args...]
 #
 # Every launch is ATTRIBUTED (arc → track → round) and runs through loop.py: it takes the
 # worktree's read (or, with --write, exclusive) lock, refuses through the round gate until the
@@ -13,7 +13,7 @@
 # opt-out for a single call outside any arc: unscheduled, unprofiled, no gate.  --scheduled is
 # the inner marker loop.py passes back; callers never pass it.
 #
-#   run-codex.sh --policy-version 2026-09-02-scheduler-v1 prompt.txt "$ARC/$T-r$N.verdict.json" "$ARC/$T-r$N.run.log" "$WT" \
+#   run-codex.sh --policy-version 2026-09-11-reachability-gate-v1 prompt.txt "$ARC/$T-r$N.verdict.json" "$ARC/$T-r$N.run.log" "$WT" \
 #     -p sol --output-schema "$HOME/dotfiles/claude/skills/codex-converge/review-output.schema.json"
 #
 # Supplies exactly one -s (never pass your own), plus -C <workdir>, -o <tmp> and stdin-piping;
@@ -54,7 +54,7 @@ set -u
 set -m   # each background job becomes its own process-group leader, so we can kill the tree
 
 WRITE_MODE=0
-POLICY_VERSION="2026-09-02-scheduler-v1"
+POLICY_VERSION="2026-09-11-reachability-gate-v1"
 ACK_POLICY_VERSION=""
 ARC=""; TRACK=""; ROUND=""; NAME=""; ONE_OFF=0; SCHEDULED=0
 # Every long option takes BOTH `--flag value` and `--flag=value`.  The `=` form used to fall through

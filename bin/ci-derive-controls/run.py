@@ -167,7 +167,7 @@ d = fresh("G")
 os.remove(os.path.join(d, "changed.txt"))
 rc, out = run(d)
 check("G: with NO changed-file set, a path-filtered workflow is refused BY NAME, not assumed",
-      "could not read the file-level path filter" in out and "head.your-module.yml.yml" in out
+      "could not read the file-level path filter" in out and "'your-module.yml (no changed-file set)'" in out
       and "no changed-file set" in out and rc == 1, f"rc={rc}")
 
 # --- H: ...and the other direction, so G cannot pass by the filter being unreadable in general: with

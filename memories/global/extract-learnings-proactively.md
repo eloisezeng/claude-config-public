@@ -14,4 +14,4 @@ When the user gives a run of corrections or feature nudges, don't just fix each 
 
 **How to apply:** treat a cluster of similar complaints as a signal to codify a rule, not N one-off fixes. Prefer `CLAUDE.md` (loaded every session, overrides defaults) for project rules and a terse memory for cross-cutting style. If any fix she requested is ambiguous, ask rather than guess. Pairs with [[check-memory-before-asking-user]] and [[dev-pipeline-plan-subagent-converge]].
 
-**Codify as an always-on rule, not a skill, when it should apply every time** — see [[codify-as-rules-not-skills]]. Most of the user's historical TO-DO corrections were product-expectation gaps (missing features), not verification skips, so the fix was an always-on CLAUDE.md section, not an enforcement skill.
+**Route it by its TRIGGER: name the recurring moment it must fire at, or it is an always-on rule and not a skill** — see [[codify-as-rules-not-skills]]. Most of the user's historical TO-DO corrections were product-expectation gaps (missing features), not verification skips, so the fix was an always-on CLAUDE.md section, not an enforcement skill.

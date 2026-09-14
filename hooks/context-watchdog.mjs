@@ -251,7 +251,19 @@ function main() {
     const stateFile = join(stateDir, `${hook.session_id || 'unknown'}.band`);
     let lastBand = -1;
     try { lastBand = parseInt(readFileSync(stateFile, 'utf8'), 10); } catch { /* first sighting */ }
-    if (band <= lastBand) return;
+    // The high-water mark must RESET when the window is reclaimed, or this hook goes silent for
+    // the rest of any session that auto-compacts. Measured 2026-09-14 on a transcript with 232
+    // compactions: the median window before a compaction is 166K and the median window of the
+    // first request after it is 117K, so the post-compaction cycle climbs back through bands it
+    // has already recorded and never exceeds the pre-compaction peak. Under a plain `band <=
+    // lastBand` throttle that is permanent silence after the FIRST compaction -- on exactly the
+    // sessions nearest the cliff, which is the only situation this hook exists for.
+    //
+    // A DOWNWARD crossing of a full 25K band is the reclaim signal, and it needs no extra I/O:
+    // compaction and /clear both produce it, and ordinary turn-to-turn jitter does not, because
+    // jitter is far smaller than a band. Treat it as a new cycle -- record the new floor and
+    // speak, so each cycle gets its own WARN/URGENT advice.
+    if (band === lastBand) return;
     try { mkdirSync(stateDir, { recursive: true }); writeFileSync(stateFile, String(band)); } catch { return; }
     const urgency = ho
       ? HANDED_OFF_ADVICE

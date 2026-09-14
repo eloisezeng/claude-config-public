@@ -495,16 +495,27 @@ d=$(mk_if if_ne_and_admits "github.event_name != 'push' && github.event_name != 
 case_absent "a conjunction of != terms, none of them the event -> still required" 1 "'nightly sweep'" \
   "could not read job condition" "$d"
 
-# 26e. MIXED OPERATORS are refused. `a == 'push' || a != 'schedule'` is not one of the two shapes, and
-#      evaluating it as if it were either one gives a different answer than GitHub would.
+# 26e. MIXED OPERATORS are EVALUATED, in both directions. Until 2026-09-10 these were refused, because
+#      the parser knew exactly two shapes and reading `a == 'push' || a != 'schedule'` as either one
+#      gave a different answer than GitHub's. The evaluator now computes GitHub's answer itself, and a
+#      refusal of a decidable condition is the permanent NOT-GREEN this file exists to prevent -- the
+#      your-web-app `current` job (cases 34-44) is a mixed shape across two contexts, and could not be
+#      supported while this one was refused. On a pull_request: false || true -> the job RUNS.
 d=$(mk_if if_mixed_ops "github.event_name == 'push' || github.event_name != 'schedule'")
-case_run "a mixed ==/!= condition -> NOT-GREEN, refusing by name" 1 "could not read job condition" "$d"
+case_absent "a mixed ==/!= condition the event satisfies -> required by decision, no refusal" 1 \
+  "'nightly sweep'" "could not read job condition" "$d"
+#      ...and the excluding direction on a push: false || false -> the job does not run.
+d=$(mk_if_push if_mixed_ops_push "github.event_name == 'schedule' || github.event_name != 'push'")
+case_absent "a mixed ==/!= condition the event fails -> not required, GREEN" 0 "VERDICT: GREEN" \
+  "never registered" "$d"
 
-# 26f. An operator paired with the WRONG joiner is refused rather than evaluated: `== && ==` is
-#      unsatisfiable and `!= || !=` is a tautology, so either is a typo, not an intent to honour.
-d=$(mk_if if_ne_or "github.event_name != 'push' || github.event_name != 'schedule'")
-case_run "!= terms joined by || (a tautology) -> NOT-GREEN, refusing by name" 1 \
-  "could not read job condition" "$d"
+# 26f. `!= || !=` is a tautology, and GitHub runs a job carrying one on EVERY event -- including the
+#      push this fixture fires, where the `&&` its author may have meant would not. Whether it is a
+#      typo is not this predicate's question; whether the job registers is, and it does. So it is
+#      REQUIRED on the push (read as the `&&` shape, it would wrongly be dropped: the fail-OPEN side).
+d=$(mk_if_push if_ne_or "github.event_name != 'push' || github.event_name != 'schedule'")
+case_absent "!= terms joined by || (a tautology) -> required on a push, no refusal" 1 \
+  "'nightly sweep'" "could not read job condition" "$d"
 
 # 26g. MIXED JOINERS are refused even when every term is an event term and every operator agrees --
 #      the answer would depend on && binding tighter than ||, which is precedence this predicate has
@@ -570,6 +581,118 @@ case_absent "a single * does not cross a slash -> not required, GREEN" 0 "VERDIC
 d=$(mk_paths star_flat $'    paths:\n      - \'lander/*.ts\'\n'); printf 'lander/shelf.ts\n' > "$d/changed.txt"
 case_run "the same pattern DOES match a file at its own depth -> required" 1 "'provider data'" "$d"
 
+# 34-44. BRANCH conditions, on a REAL capture: your-org/your-web-app-2026 PR #21, head 1b7584ee, base
+#        main at 6e9b5c5e (also the merge-base). Its check.yml `current` job carries
+#          if: github.event_name == 'pull_request' && github.base_ref == 'main'
+#        and on 2026-09-10 `ci-green.sh 1b7584e main` refused it ("could not read job condition(s)")
+#        and printed `workflows=['head.check.yml.yml']`. GitHub RAN `current` on that sha -- runs.tsv
+#        holds its green check-run -- so refusing is the permanent NOT-GREEN, and reading it as skipped
+#        would stop requiring a job that registers. runs.tsv is that sha's check-runs as captured (`e2e`
+#        still in_progress); base_ref.txt and remotes.txt are what ci-green.sh writes for its [base-ref]
+#        argument. Every case below changes ONE thing in that capture.
+PR21="$FIXTURES/real-your-web-app-pr21-1b7584e"
+PR21_IF="    if: github.event_name == 'pull_request' && github.base_ref == 'main'"
+mk_pr21() { # <dirname> <base_ref.txt content, or - for "no [base-ref] argument given">
+  local d="$T/$1"; mkdir -p "$d"
+  cp "$PR21"/*.yml "$PR21/changed.txt" "$PR21/runs.tsv" "$d/"
+  printf 'origin\n' > "$d/remotes.txt"
+  [ "$2" = "-" ] || printf '%s' "$2" > "$d/base_ref.txt"
+  printf '%s' "$d"
+}
+# pr21_line <dir> <exact line> <replacement, or "" to delete> -- in BOTH check.yml copies. A line that
+# is not there FAILS the run: a silent no-op would test the unmodified capture under a new name.
+pr21_line() {
+  local f
+  for f in "$1/head.check.yml.yml" "$1/base.check.yml.yml"; do
+    python3 - "$f" "$2" "$3" <<'PY' || { FAIL=$((FAIL+1)); echo "FAIL  fixture line not found in $f: $2"; }
+import sys
+p, old, new = sys.argv[1:4]
+t = open(p).read()
+if old + "\n" not in t: sys.exit(1)
+open(p, "w").write(t.replace(old + "\n", new + "\n" if new else "", 1))
+PY
+  done
+}
+pr21_e2e_green() { awk -F'\t' -v OFS='\t' '$1=="e2e"{$2="completed";$3="success"} 1' "$1/runs.tsv" > "$1/runs.new" && mv "$1/runs.new" "$1/runs.tsv"; }
+pr21_drop() { awk -F'\t' -v n="$2" '$1!=n' "$1/runs.tsv" > "$1/runs.new" && mv "$1/runs.new" "$1/runs.tsv"; }
+MAIN=$'main\nrefs/heads/main\n'
+
+# 34. Base main, exactly as captured: current is EXPECTED, nothing is refused, the workflow is named by
+#     its own file name, and the only thing between this sha and GREEN is the job that was still running.
+d=$(mk_pr21 pr21_main "$MAIN")
+case_absent "PR #21, base main: current is expected, no refusal" 1 \
+  "expected_jobs=['check', 'current', 'e2e']" "could not read job condition" "$d"
+case_run "PR #21: the workflow is labelled check.yml, not the stored copy's name" 1 "workflows=['check.yml']" "$d"
+case_run "PR #21, base main, as captured: NOT-GREEN only for the running e2e" 1 \
+  "VERDICT: NOT-GREEN -- still running: e2e (in_progress)" "$d"
+# 35. ...it can reach GREEN once e2e finishes (a gate that can only fail is unusable)...
+d=$(mk_pr21 pr21_main_green "$MAIN"); pr21_e2e_green "$d"
+case_absent "PR #21, base main, e2e finished: GREEN" 0 "VERDICT: GREEN" "could not read job condition" "$d"
+# 36. ...and that GREEN includes current: with its check-run removed, it is named as missing.
+d=$(mk_pr21 pr21_main_nocurrent "$MAIN"); pr21_e2e_green "$d"; pr21_drop "$d" current
+case_run "PR #21, base main, current never registered -> NOT-GREEN naming it" 1 "never registered: ['current']" "$d"
+# 37. A different base: current cannot run, so its absence is not a failure, and it is listed as removed.
+d=$(mk_pr21 pr21_develop $'develop\nrefs/heads/develop\n'); pr21_e2e_green "$d"; pr21_drop "$d" current
+case_absent "PR #21 condition, base develop: current not required, GREEN" 0 "VERDICT: GREEN" "never registered" "$d"
+case_run "PR #21 condition, base develop: current is listed as not required" 0 \
+  "current (if: github.event_name == 'pull_request' && github.base_ref == 'main')" "$d"
+# 37b. A remote-tracking argument (`ci-green.sh <sha> origin/main`) is the branch after its remote.
+d=$(mk_pr21 pr21_origin_main $'origin/main\nrefs/remotes/origin/main\n'); pr21_e2e_green "$d"; pr21_drop "$d" current
+case_run "base-ref origin/main reads as branch main -> current required" 1 "never registered: ['current']" "$d"
+# 38. A push: neither current nor e2e can run, and no [base-ref] argument is needed to say so, because
+#     `github.event_name == 'pull_request'` is already false.
+d=$(mk_pr21 pr21_push -); pr21_line "$d" "  pull_request:" ""; pr21_e2e_green "$d"
+case_absent "PR #21 workflows on a push: current and e2e not required, GREEN" 0 "VERDICT: GREEN" \
+  "could not read job condition" "$d"
+case_run "PR #21 workflows on a push: current is listed as not required" 0 \
+  'not required on `push`: ["current (if: github.event_name ==' "$d"
+# 38b. GitHub leaves github.base_ref EMPTY on a push, so even a bare base_ref test is decided there.
+d=$(mk_pr21 pr21_push_baseref -); pr21_line "$d" "  pull_request:" ""; pr21_e2e_green "$d"
+pr21_line "$d" "$PR21_IF" "    if: github.base_ref == 'main'"
+case_absent "github.base_ref on a push is empty, decided with no [base-ref] argument -> GREEN" 0 \
+  "VERDICT: GREEN" "could not read job condition" "$d"
+# 39. An operand this tool does not evaluate is refused BY NAME, never guessed.
+d=$(mk_pr21 pr21_ref_name "$MAIN")
+pr21_line "$d" "$PR21_IF" "    if: github.event_name == 'pull_request' && github.ref_name == 'main'"
+case_run "an unknown operand (github.ref_name) -> NOT-GREEN, refusing by name" 1 \
+  '`github.ref_name` is not a context this tool evaluates' "$d"
+# 39b. ...even beside a term that would decide the answer: `true || <unknown>` is not read as true.
+d=$(mk_pr21 pr21_actor "$MAIN"); pr21_e2e_green "$d"
+pr21_line "$d" "$PR21_IF" "    if: github.event_name == 'pull_request' || github.actor == 'dependabot[bot]'"
+case_run "an unknown operand beside a deciding term -> still refused by name" 1 \
+  '`github.actor` is not a context this tool evaluates' "$d"
+# 40. No [base-ref] argument on a pull_request: refused, and the refusal names github.base_ref. The
+#     origin/main default ci-green.sh uses for the diff must NOT stand in for it.
+d=$(mk_pr21 pr21_no_base -)
+case_run "PR #21 condition with NO [base-ref] argument -> NOT-GREEN, naming github.base_ref" 1 \
+  '`github.base_ref`, and no [base-ref] argument was given' "$d"
+# 40b. An argument that is not a branch -- a sha, which git gives no full ref name -- is not a base branch.
+d=$(mk_pr21 pr21_sha_base $'6e9b5c5\n\n')
+case_run "a [base-ref] that is a sha, not a branch -> NOT-GREEN, refusing by name" 1 \
+  "the [base-ref] argument '6e9b5c5' is not a branch here" "$d"
+# 41. Mixed joiners inside PARENTHESES are evaluated (26g keeps the unparenthesized refusal).
+d=$(mk_pr21 pr21_parens "$MAIN"); pr21_e2e_green "$d"; pr21_drop "$d" current
+pr21_line "$d" "$PR21_IF" "    if: (github.event_name == 'push' || github.event_name == 'pull_request') && github.base_ref == 'main'"
+case_run "mixed joiners in parentheses are evaluated -> current required" 1 "never registered: ['current']" "$d"
+# 42. GitHub compares strings ignoring case, so 'MAIN' is main.
+d=$(mk_pr21 pr21_case "$MAIN"); pr21_e2e_green "$d"; pr21_drop "$d" current
+pr21_line "$d" "$PR21_IF" "    if: github.event_name == 'Pull_Request' && github.base_ref == 'MAIN'"
+case_run "string comparison ignores case, as GitHub's does -> current required" 1 "never registered: ['current']" "$d"
+# 43. github.ref on a pull_request is refs/pull/<number>/merge: a branch ref can never equal it (decided),
+#     while a pull ref depends on a number this tool is not given (refused).
+d=$(mk_pr21 pr21_ref_heads -); pr21_e2e_green "$d"; pr21_drop "$d" current
+pr21_line "$d" "$PR21_IF" "    if: github.ref == 'refs/heads/main'"
+case_absent "github.ref == refs/heads/main cannot hold on a pull_request -> not required, GREEN" 0 \
+  "VERDICT: GREEN" "could not read job condition" "$d"
+d=$(mk_pr21 pr21_ref_pull -)
+pr21_line "$d" "$PR21_IF" "    if: github.ref == 'refs/pull/21/merge'"
+case_run "github.ref naming a pull ref depends on the PR number -> refused by name" 1 \
+  "refs/pull/<number>/merge, and the number is not given" "$d"
+# 44. A value that is not known can still be irrelevant: `false && <base_ref not given>` is false.
+d=$(mk_pr21 pr21_false_and_unknown -); pr21_e2e_green "$d"; pr21_drop "$d" current
+pr21_line "$d" "$PR21_IF" "    if: github.event_name == 'push' && github.base_ref == 'main'"
+case_absent "false && <base_ref not given> is false whatever it holds -> not required, GREEN" 0 \
+  "VERDICT: GREEN" "could not read job condition" "$d"
 
 echo "----"
 echo "$PASS passed, $FAIL failed  (derive under test: $DERIVE)"
@@ -622,15 +745,34 @@ PY
   # The job-level `if:` rule, one mutant per direction: ignore the condition (case 22 goes red), and
   # silently drop a condition that cannot be read instead of refusing (case 24 goes red).
   mutate ignore-job-if 'cond = job_if(m.group(2))' 'cond = None'
-  mutate drop-unreadable-if 'unreadable_if.add(f"{m.group(1)}: if: {cond}")' 'pass'
-  # The `!=` shape, one mutant per branch it added: refuse to read it at all (case 26b goes red --
-  # this is the pre-2026-09-09 behaviour, the permanently unreadable merge gate), invert its polarity
-  # (26a and 26b both flip), accept a mixed ==/!= by guessing an operator (26e), and accept mixed
-  # joiners by dropping the precedence refusal (26g).
-  mutate ne-not-read "EVENT_TERM = re.compile(r\"^github\\.event_name\\s*(==|!=)\\s*'([A-Za-z_]+)'\$\")" "EVENT_TERM = re.compile(r\"^github\\.event_name\\s*(==)\\s*'([A-Za-z_]+)'\$\")"
-  mutate ne-polarity-flipped 'if op == "!=" and joiner != "||": return event not in events' 'if op == "!=" and joiner != "||": return event in events'
-  mutate guess-a-mixed-operator 'if len(ops) != 1: return None' 'if len(ops) != 1: ops = {"=="}'
-  mutate accept-mixed-joiners 'if "||" in e and "&&" in e: return None' 'if False: return None'
+  mutate drop-unreadable-if 'unreadable_if.add(f"{m.group(1)}: if: {cond} -- {runs.why}")' 'pass'
+  # The condition evaluator, one mutant per way it can answer wrongly. `!=` unreadable (26b -- the
+  # pre-2026-09-09 permanently unreadable merge gate), `!=` polarity inverted (26a, 26b), mixed joiners
+  # accepted without parentheses (26g), a status function accepted inside `||` (23b, the tautology).
+  mutate ne-not-read '(?P<op>==|!=)' '(?P<op>==)'
+  mutate ne-polarity-flipped 'return equal if op == "==" else not equal' 'return equal if op == "==" else equal'
+  mutate accept-mixed-joiners 'if joiner not in (None, j[0]):' 'if False:'
+  mutate status-fn-inside-or 'if any(k[0] == "status" for k in kids):' 'if False:'
+  # The three-valued logic: an unknown value read as true inside `&&` (40 -- the missing base-ref
+  # becomes a confident answer), and a known false no longer deciding `&&` (44 -- a refusal where
+  # GitHub's answer does not depend on the unknown).
+  mutate and-undecided-is-true 'return _undecided(vals) if any(isinstance(v, Undecided) for v in vals) else True' 'return True'
+  mutate and-ignores-a-false 'if any(v is False for v in vals): return False' 'if False: return False'
+  # Operand values. A missing [base-ref] read as "" (40), a context the tool does not know read as ""
+  # (39), comparison made case-sensitive (42), a pull ref DECIDED unequal instead of refused (43), a sha
+  # argument read as a branch name (40b), and a remote-tracking argument not stripped of its remote (37b).
+  mutate missing-base-ref-is-empty 'base = base_branch(None, "", [])' 'base = ""'
+  mutate unknown-operand-is-empty '    return None
+
+def _parse(e):' '    return ""
+
+def _parse(e):'
+  mutate case-sensitive-compare 'equal = val.lower() == lit.lower()' 'equal = val == lit'
+  mutate pull-ref-decided 'if val.pattern.fullmatch(lit): return Undecided(val.why)' 'if False: return Undecided(val.why)'
+  mutate sha-arg-is-a-branch '    return Undecided(f"the [base-ref] argument' '    return arg; return Undecided(f"the [base-ref] argument'
+  mutate remote-not-stripped 'if rest.startswith(r + "/"): return rest[len(r) + 1:]' 'if rest.startswith(r + "/"): return rest'
+  # The label: print the stored copy's name again (34).
+  mutate label-not-stripped 'return name[:-len(".yml")] + (" (base only)" if side == "base" else "")' 'return os.path.basename(path)'
   # ...and treating a non-event `if:` as a possible skip, which shrinks the required set (case 25).
   mutate any-if-is-a-skip 'if not any(t in e for t in CONTEXT_TOKENS): return True' 'if not any(t in e for t in CONTEXT_TOKENS): return False'
   # The file-level path filter, one mutant per direction it can be wrong in: ignore the filter

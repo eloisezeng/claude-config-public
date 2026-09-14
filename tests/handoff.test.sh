@@ -775,14 +775,13 @@ args="$(cat "$SHIM_BG_ARGS")"
 assert_contains "$(printf -- '--model\nclaude-opus-5')" "$args" AB
 assert_contains "$(printf -- '--permission-mode\nacceptEdits')" "$args" AB
 
-# ---- AB2. with NO --model, the dispatch defaults to Fable ----------------
-# The user's standing word: a continued session runs on Fable unless its limit is
-# spent. The default lives in the launcher so it holds for every caller, not
-# only the ones who remember it.
+# ---- AB2. with NO --model, the dispatch defaults to Opus -----------------
+# The user 2026-09-11: "in the future default to opus". The default lives in the
+# launcher so it holds for every caller, not only the ones who remember it.
 rm -f "$REC" "$SHIM_BG_ARGS"; live_json "running"
 GO "defaulted" --force >/dev/null 2>&1
 args="$(cat "$SHIM_BG_ARGS")"
-assert_contains "$(printf -- '--model\nclaude-fable-5[1m]')" "$args" AB2
+assert_contains "$(printf -- '--model\nclaude-opus-5[1m]')" "$args" AB2
 
 # ---- AB3. CLAUDE_HANDOFF_MODEL="" opts back out to claude's own default --
 # The empty string is a real choice ("inherit"), which is why the default uses
@@ -794,10 +793,10 @@ assert_missing "--model" "$args" AB3
 
 # ---- AB4. an explicit --model still wins over the default ----------------
 rm -f "$REC" "$SHIM_BG_ARGS"; live_json "running"
-GO "override" --force --model 'opus[1m]' >/dev/null 2>&1
+GO "override" --force --model 'claude-fable-5[1m]' >/dev/null 2>&1
 args="$(cat "$SHIM_BG_ARGS")"
-assert_contains "$(printf -- '--model\nopus[1m]')" "$args" AB4
-assert_missing "claude-fable-5" "$args" AB4
+assert_contains "$(printf -- '--model\nclaude-fable-5[1m]')" "$args" AB4
+assert_missing "claude-opus-5" "$args" AB4
 
 # ---- AB5. with NO --permission-mode, the dispatch defaults to bypass -----
 # The user 2026-08-28: "whenever handing off to new sessions, use auto mode,

@@ -37,6 +37,18 @@ FULL=$(git rev-parse "$1")
 REPO="${REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}"
 BASE_REF="${2:-origin/main}"
 D=/tmp/.cig.$$; mkdir -p $D
+# The branch the pull request targets, for a job `if:` reading `github.base_ref`. Only an EXPLICIT
+# argument is written: the origin/main default above serves the diff, and letting a DEFAULT answer
+# `github.base_ref == 'main'` would decide whether a job is required from a guess. The file ABSENT
+# means "not given", and ci-derive.py then refuses any condition that needs it, by name. Line 2 is
+# git's full name for the argument, and it is only trusted when git SUCCEEDS: measured 2026-09-10,
+# `git rev-parse --symbolic-full-name` prints nothing for a sha, and for a name that does not resolve
+# it echoes the name back on stdout while exiting 128.
+if [ "$#" -ge 2 ]; then
+  BASE_FULL=$(git rev-parse --symbolic-full-name "$2" 2>/dev/null) || BASE_FULL=""
+  printf '%s\n%s\n' "$2" "${BASE_FULL%%$'\n'*}" > $D/base_ref.txt
+  git remote > $D/remotes.txt 2>/dev/null || true
+fi
 # The changed-file set, for the file-level `paths:` filters ci-derive.py reads. A workflow a filter
 # excludes does not run at all and registers no check-run, so requiring its jobs reports NOT-GREEN
 # forever -- see the long note in ci-derive.py. This file being ABSENT is not the same as being

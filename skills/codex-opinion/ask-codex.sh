@@ -85,7 +85,7 @@ if [ -f "${CODEX_HOME:-$HOME/.codex}/$TIER.config.toml" ]; then
 else
   TIER_ARGS=(-m "gpt-5.6-$TIER" -c model_reasoning_effort="high")
 fi
-"$RUNNER" --policy-version 2026-09-02-scheduler-v1 --one-off "$PROMPT" "$VERDICT" "$LOG" "$WORKDIR" "${TIER_ARGS[@]}"
+"$RUNNER" --policy-version 2026-09-11-reachability-gate-v1 --one-off "$PROMPT" "$VERDICT" "$LOG" "$WORKDIR" "${TIER_ARGS[@]}"
 rc=$?
 
 # The banner is the measurement; the flag above is only a request.

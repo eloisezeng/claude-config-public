@@ -164,6 +164,17 @@ def side_and_name(path):
     tag, _, rest = b.partition(".")
     return (tag, rest) if tag in ("head", "base") else ("head", b)
 
+def wf_label(path):
+    """The workflow's own file name, for printing. ci-green.sh stores each workflow as
+    `<side>.<file name>.yml` -- the trailing `.yml` is there so a `.yaml` workflow is still caught by
+    the `*.yml` glob above -- so printing the stored basename showed `head.check.yml.yml` for
+    `.github/workflows/check.yml` (measured 2026-09-10 on your-org/your-web-app-2026 PR #21). It was a
+    DISPLAY defect only: `by_name` keys both sides identically, so head-wins was never affected. A
+    basename outside that naming contract (a hand-built fixture's `head.yml`) is printed unchanged."""
+    side, name = side_and_name(path)
+    if not (name.endswith(".yml.yml") or name.endswith(".yaml.yml")): return os.path.basename(path)
+    return name[:-len(".yml")] + (" (base only)" if side == "base" else "")
+
 files = {f: open(f).read() for f in sorted(glob.glob(os.path.join(D, "*.yml")))}
 by_name = {}
 for f in files:
@@ -190,9 +201,9 @@ for f in selected:
     r = file_runs(files[f], event, changed)
     if r is None:
         why_ = "no changed-file set" if changed is None else "unreadable filter"
-        unreadable_paths.add(f"{os.path.basename(f)} ({why_})")
+        unreadable_paths.add(f"{wf_label(f)} ({why_})")
     elif r: admitted.append(f)
-    else: path_skipped.add(os.path.basename(f))
+    else: path_skipped.add(wf_label(f))
 selected = admitted
 
 # A job-level `if:` asks the SAME question as the file-level `on:` block, one level down, and a
@@ -202,27 +213,172 @@ selected = admitted
 # and the expected set went on demanding `e2e (chromium layout) 1/19` ... `19/19` on every pull
 # request, which no pull request could ever satisfy.
 #
-# This reads EVENT conditions only, and it is fail-closed in both directions:
+# This reads EVENT and BRANCH conditions, and it is fail-closed in both directions:
 #   - an `if:` naming no event/ref context at all (`always()`, `success()`,
 #     `needs.x.result == 'failure'`) does not gate on the event, so the job stays REQUIRED;
-#   - a plain disjunction of `github.event_name == '<literal>'` terms is evaluated against the event,
-#     and so is a plain conjunction of `github.event_name != '<literal>'` terms -- those two are the
-#     only shapes GitHub workflows here actually write, and they are the two that are decidable from
-#     the event name alone;
-#   - a STATUS FUNCTION conjoined onto either of those (`always() && github.event_name != 'push'`)
-#     reduces to the event half. This is not a convenience: a fail-closed gate job MUST carry
+#   - `==`/`!=` comparisons of `github.event_name`, `github.base_ref`, `github.ref` or
+#     `github.head_ref` against a single-quoted literal, joined by `&&`/`||` and grouped by
+#     parentheses, are EVALUATED as GitHub evaluates them -- strings compared ignoring case, which is
+#     what GitHub's expression syntax specifies. A two-shape reader (a disjunction of `==` event terms,
+#     a conjunction of `!=` ones) was not enough: measured 2026-09-10 on your-org/your-web-app-2026 PR
+#     #21, check.yml's `current` job carries `if: github.event_name == 'pull_request' &&
+#     github.base_ref == 'main'`, and this predicate answered "could not read job condition(s)" on
+#     every pull request in that repository, although the base branch is exactly what ci-green.sh's
+#     [base-ref] argument supplies;
+#   - a STATUS FUNCTION conjoined onto any of that (`always() && github.event_name != 'push'`)
+#     reduces to the rest. This is not a convenience: a fail-closed gate job MUST carry
 #     `always()`, because GitHub inserts an implicit `success()` only into a condition naming no
 #     status function, so a gate that has to run when a needed job FAILED cannot drop it -- and any
 #     event restriction therefore has to be conjoined onto it. Refusing the shape made the ONLY
 #     correct way to write "a fail-closed gate that is off on push" unreadable, which is the
 #     permanent NOT-GREEN this file exists to prevent, arriving by a third route (measured
 #     2026-09-09 on your-org/your-other-project #434);
-#   - anything else mentioning that context is REFUSED BY NAME below rather than guessed at, since
-#     guessing "it runs" reproduces the permanent NOT-GREEN this exists to fix, and guessing "it is
-#     skipped" is a fail-OPEN hole in the required set.
+#   - everything else is REFUSED BY NAME rather than guessed at: a context this does not evaluate
+#     (`github.ref_name`, `needs.*`), a function call, `&&` and `||` mixed at one level without
+#     parentheses, a status function inside `||`, and a KNOWN context whose value this run was not
+#     given -- `github.base_ref` with no [base-ref] argument, the pull request number inside
+#     `github.ref`, the head branch in `github.head_ref`. Guessing "it runs" reproduces the permanent
+#     NOT-GREEN this exists to fix, and guessing "it is skipped" is a fail-OPEN hole in the required
+#     set. A value that is not known can still be irrelevant: `false && <unknown>` is false whatever
+#     the unknown holds, so the evaluator is three-valued and refuses only when the answer depends on it.
 CONTEXT_TOKENS = ("github.event_name", "github.event", "github.ref", "github.head_ref", "github.base_ref")
-EVENT_TERM = re.compile(r"^github\.event_name\s*(==|!=)\s*'([A-Za-z_]+)'$")
 STATUS_FNS = ("always()", "success()", "!cancelled()", "!failure()")
+TOKEN = re.compile(
+    r"(?P<lp>\()|(?P<rp>\))|(?P<and>&&)|(?P<or>\|\|)|(?P<op>==|!=)"
+    r"|(?P<status>" + "|".join(re.escape(s) for s in STATUS_FNS) + r")"
+    r"|(?P<lit>'(?:[^']|'')*')|(?P<ident>[A-Za-z_][A-Za-z0-9_.-]*)")
+
+class Undecided:
+    """Why a job condition could not be decided -- and deliberately NOT a truth value. `admits` answers
+    True, False or one of these, and a caller that wrote `if runs:` would read a refusal as a verdict in
+    one direction or the other, so testing one for truth raises instead of quietly picking a side."""
+    __slots__ = ("why",)
+    def __init__(self, why): self.why = why
+    def __bool__(self): raise TypeError(f"an undecided job condition is not a verdict: {self.why}")
+
+class Partial:
+    """A context value known only up to a pattern. A literal the pattern cannot produce is decidably
+    unequal to it; a literal it CAN produce is Undecided, for `why`."""
+    __slots__ = ("pattern", "why")
+    def __init__(self, pattern, why): self.pattern, self.why = re.compile(pattern, re.I), why
+
+class _Unreadable(Exception): pass
+
+def base_branch(arg, full_name, remotes):
+    """What `github.base_ref` holds on a pull_request against the [base-ref] argument: the branch
+    name, or an Undecided saying why it is not known. `arg` is None when no argument was given;
+    `full_name` is git's `--symbolic-full-name` for it, EMPTY when it names no ref. Only a branch is
+    accepted -- measured: that git call prints NOTHING for a sha, and echoes an unknown name back
+    while failing, so reading the raw argument as a branch would let `ci-green.sh <sha> 6e9b5c5`
+    answer `github.base_ref == 'main'` with a confident False."""
+    if arg is None:
+        return Undecided("the condition reads `github.base_ref`, and no [base-ref] argument was given "
+                         "(ci-green.sh <sha> <base-ref>) -- the origin/main default serves the diff, "
+                         "never a condition")
+    if full_name.startswith("refs/heads/"): return full_name[len("refs/heads/"):]
+    if full_name.startswith("refs/remotes/"):
+        rest = full_name[len("refs/remotes/"):]
+        for r in sorted(remotes, key=len, reverse=True):
+            if rest.startswith(r + "/"): return rest[len(r) + 1:]
+    return Undecided(f"the [base-ref] argument {arg!r} is not a branch here, so `github.base_ref` is not known")
+
+def operand(name, event, base):
+    """The value of context `name` on `event` -- a str, a Partial or an Undecided -- or None for a
+    context this does not evaluate. GitHub fills `base_ref` and `head_ref` on pull_request events only
+    and leaves both EMPTY on a push, so those two are known outright there."""
+    pr = event == "pull_request"
+    if name == "github.event_name": return event
+    if name == "github.base_ref": return base if pr else ""
+    if name == "github.head_ref":
+        return Undecided("`github.head_ref` is the pull request's head branch, which this tool is not given") if pr else ""
+    if name == "github.ref":
+        if pr: return Partial(r"refs/pull/[0-9]+/merge", "`github.ref` on a pull_request is refs/pull/<number>/merge, and the number is not given")
+        return Partial(r"refs/(heads|tags)/.+", "`github.ref` on a push is the pushed branch or tag, which this tool is not given")
+    return None
+
+def _parse(e):
+    """-> ("cmp", context, op, literal) | ("status", fn) | ("and"|"or", [node, ...]); raises _Unreadable.
+    There is deliberately NO precedence: one level joins its terms with one kind of joiner."""
+    toks, i = [], 0
+    while i < len(e):
+        if e[i].isspace():
+            i += 1
+            continue
+        m = TOKEN.match(e, i)
+        if not m: raise _Unreadable(f"cannot read {e[i:]!r}")
+        toks.append((m.lastgroup, m.group()))
+        i = m.end()
+    pos = 0
+    def take(*kinds):
+        nonlocal pos
+        if pos < len(toks) and toks[pos][0] in kinds:
+            pos += 1
+            return toks[pos - 1]
+        return None
+    def group():
+        terms, joiner = [term()], None
+        while True:
+            j = take("and", "or")
+            if j is None: break
+            if joiner not in (None, j[0]):
+                raise _Unreadable("`&&` and `||` mixed without parentheses -- the answer would rest on precedence")
+            joiner = j[0]
+            terms.append(term())
+        return terms[0] if joiner is None else (joiner, terms)
+    def term():
+        if take("lp"):
+            node = group()
+            if not take("rp"): raise _Unreadable("unbalanced parentheses")
+            return node
+        st = take("status")
+        if st: return ("status", st[1])
+        a, op, b = take("ident", "lit"), take("op"), take("ident", "lit")
+        if not (a and op and b) or {a[0], b[0]} != {"ident", "lit"}:
+            raise _Unreadable("expected <context> ==|!= '<literal>'")
+        ctx, lit = (a[1], b[1]) if a[0] == "ident" else (b[1], a[1])
+        return ("cmp", ctx, op[1], lit[1:-1].replace("''", "'"))
+    node = group()
+    if pos != len(toks): raise _Unreadable(f"unexpected {toks[pos][1]!r}")
+    return node
+
+def _contexts(node):
+    if node[0] == "cmp": return {node[1]}
+    if node[0] == "status": return set()
+    return set().union(*(_contexts(k) for k in node[1]))
+
+def _undecided(vals):
+    return Undecided("; ".join(dict.fromkeys(v.why for v in vals if isinstance(v, Undecided))))
+
+def _and(vals):
+    if any(v is False for v in vals): return False
+    return _undecided(vals) if any(isinstance(v, Undecided) for v in vals) else True
+
+def _or(vals):
+    if any(v is True for v in vals): return True
+    return _undecided(vals) if any(isinstance(v, Undecided) for v in vals) else False
+
+def _evaluate(node, event, base):
+    kind = node[0]
+    if kind == "status": return True
+    if kind == "cmp":
+        _, name, op, lit = node
+        val = operand(name, event, base)
+        if isinstance(val, Undecided): return val
+        if isinstance(val, Partial):
+            if val.pattern.fullmatch(lit): return Undecided(val.why)
+            equal = False
+        else:
+            equal = val.lower() == lit.lower()
+        return equal if op == "==" else not equal
+    kids = node[1]
+    # A status function is about job OUTCOMES, never about which event fired, so it drops out of a
+    # conjunction. Inside `||` it is refused: `always() || <x>` would put the job in the required set
+    # on EVERY event, the fail-closed-forever bug wearing the opposite sign.
+    if kind == "and":
+        return _and([_evaluate(k, event, base) for k in kids if k[0] != "status"])
+    if any(k[0] == "status" for k in kids):
+        return Undecided("a status function joined by `||` is an outcome test, not an event test")
+    return _or([_evaluate(k, event, base) for k in kids])
 
 def job_if(body):
     """The JOB's own `if:` value, block scalars folded, or None. A step's `if:` is indented deeper
@@ -242,51 +398,40 @@ def job_if(body):
         return val
     return None
 
-def admits(if_expr, event):
-    """True/False when the condition is decidable for `event`; None when it cannot be read.
+def admits(if_expr, event, base):
+    """True when a job carrying `if_expr` registers a check-run on `event`, False when it cannot, and
+    an Undecided naming the reason when this cannot tell -- see the module comment for what is read.
+    `base` is what `github.base_ref` holds on a pull_request: a branch name, or an Undecided.
 
-    Exactly two shapes are decidable, and they are the two that appear in these workflows:
-    a pure DISJUNCTION of `github.event_name == '<lit>'` (the event must be one of them), and a pure
-    conjunction of `github.event_name != '<lit>'` (the event must be none of them). A status
-    function CONJOINED onto either (`always() && github.event_name != 'push'`) reduces to the event
-    half -- see the module comment; a status function is about job outcomes, never about the event. The operator and
-    the joiner have to agree -- `a == x && b == y` is unsatisfiable and `a != x || b != y` is a
-    tautology, so both are almost certainly a typo rather than an intent worth evaluating, and both
-    are refused. Anything else naming a context token is refused too: guessing "it runs" rebuilds the
-    permanent NOT-GREEN this exists to fix, and guessing "it is skipped" is a fail-OPEN hole in the
-    required set.
-    """
+    A context this does not evaluate refuses the WHOLE condition by name, even where short-circuiting
+    could have skipped it: an operand this tool does not know is a failure to read, never a silent
+    true or false."""
     if if_expr is None: return True
     e = if_expr.strip()
     m = re.match(r"^\$\{\{(.*)\}\}$", e, re.S)
     if m: e = m.group(1).strip()
     if not any(t in e for t in CONTEXT_TOKENS): return True
-    if "||" in e and "&&" in e: return None   # mixed joiners: precedence is not ours to adjudicate
-    # A status function does not gate on the EVENT -- this parser already answers True for a BARE
-    # `always()`/`success()` at the CONTEXT_TOKENS line above -- so drop such terms from a
-    # CONJUNCTION and decide on what is left. Only from a conjunction: `always() || <anything>` is a
-    # tautology and stays refused, for the same reason `a != x || b != y` is. The match is on the
-    # exact token, so `needs.x.result == 'failure' && github.event_name != 'push'` is still refused
-    # by name rather than guessed at.
-    if "&&" in e:
-        kept = [t for t in e.split("&&") if t.strip() not in STATUS_FNS]
-        if not kept: return True              # nothing but status functions: no event gating at all
-        e = " && ".join(t.strip() for t in kept)
-    ops, events = set(), set()
-    terms = re.split(r"\|\||&&", e)
-    for term in terms:
-        t = term.strip()
-        while t.startswith("(") and t.endswith(")"): t = t[1:-1].strip()
-        m = EVENT_TERM.match(t)
-        if not m: return None
-        ops.add(m.group(1))
-        events.add(m.group(2))
-    if len(ops) != 1: return None             # a mixed `==`/`!=` is not one of the two shapes
-    op = ops.pop()
-    joiner = "&&" if "&&" in e else ("||" if len(terms) > 1 else None)
-    if op == "==" and joiner != "&&": return event in events
-    if op == "!=" and joiner != "||": return event not in events
-    return None
+    try:
+        node = _parse(e)
+    except _Unreadable as x:
+        return Undecided(f"unreadable: {x}")
+    unknown = sorted(c for c in _contexts(node) if operand(c, event, base) is None)
+    if unknown:
+        return Undecided(f"{', '.join('`' + c + '`' for c in unknown)} is not a context this tool evaluates")
+    return _evaluate(node, event, base)
+
+# What `github.base_ref` holds, from ci-green.sh's EXPLICIT [base-ref] argument: `base_ref.txt` is the
+# argument on line 1 and git's full ref name for it on line 2 (empty when it names no ref), and
+# `remotes.txt` lists the remotes so `origin/main` reads as the branch `main`. ABSENT means the
+# argument was not given, which is never the same as `main` -- a condition that needs it is refused.
+bpath = os.path.join(D, "base_ref.txt")
+if os.path.exists(bpath):
+    blines = open(bpath).read().split("\n")
+    rpath = os.path.join(D, "remotes.txt")
+    remotes = [l.strip() for l in open(rpath) if l.strip()] if os.path.exists(rpath) else []
+    base = base_branch(blines[0], blines[1].strip() if len(blines) > 1 else "", remotes)
+else:
+    base = base_branch(None, "", [])
 
 expected, unresolved, unreadable_if, off_event = set(), set(), set(), set()
 for f in selected:
@@ -299,9 +444,9 @@ for f in selected:
         nm = re.search(r"^    name:\s*(.+?)\s*$", m.group(2), re.M)
         raw = nm.group(1) if nm else m.group(1)
         cond = job_if(m.group(2))
-        runs = admits(cond, event)
-        if runs is None:
-            unreadable_if.add(f"{m.group(1)}: if: {cond}")
+        runs = admits(cond, event, base)
+        if isinstance(runs, Undecided):
+            unreadable_if.add(f"{m.group(1)}: if: {cond} -- {runs.why}")
             continue
         if not runs:
             off_event.add(f"{m.group(1)} (if: {cond})")
@@ -322,7 +467,7 @@ for line in open(os.path.join(D, "runs.tsv")):
     if len(p) >= 2:
         rows.append((p[0], p[1], p[2] if len(p) > 2 else "", p[3] if len(p) > 3 else ""))
 names = {r[0] for r in rows}
-print(f"sha={sha[:7]} event={event} workflows={sorted(os.path.basename(f) for f in selected)}")
+print(f"sha={sha[:7]} event={event} workflows={sorted(wf_label(f) for f in selected)}")
 print(f"  expected_jobs={sorted(expected)}")
 # Print what was REMOVED from the required set, never only what survived: a set that silently shrank
 # has no diff line to point at, and every entry here is a job this predicate has stopped requiring.
@@ -341,7 +486,7 @@ why = []
 if not expected: why.append("derived an EMPTY required-job set (parser failure, not a pass)")
 if unresolved: why.append(f"could not resolve templated job name(s) {sorted(unresolved)} -- the required set is INCOMPLETE, which is a parser failure, not a pass")
 if unreadable_paths: why.append(f"could not read the file-level path filter of {sorted(unreadable_paths)} -- cannot tell whether `{event}` runs that workflow at all, which is a parser failure, not a pass")
-if unreadable_if: why.append(f"could not read job condition(s) {sorted(unreadable_if)} -- cannot tell whether `{event}` runs them, which is a parser failure, not a pass")
+if unreadable_if: why.append(f"could not read job condition(s) {sorted(unreadable_if)} -- cannot tell whether `{event}` runs them, which is a failure to decide, not a pass")
 missing = expected - names
 if missing: why.append(f"workflow jobs never registered: {sorted(missing)}")
 if not rows: why.append("no check-runs at all")
