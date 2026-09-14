@@ -74,6 +74,14 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$HOME/dotfiles/claude/hooks/ci-cost-reaudit-prompt.mjs\""
+          }
+        ]
       }
     ],
     "Notification": [
