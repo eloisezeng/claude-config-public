@@ -537,10 +537,50 @@ for item in "${ITEMS[@]}"; do
 done
 link "$REPO_DIR/$SETTINGS_SRC" "$PRIMARY/settings.json"
 
+# A MIRROR subdirectory that is itself a SYMLINK to the PRIMARY's counterpart
+# makes every per-leaf link under it self-referential: $MIRROR/hooks/notify.sh
+# and $PRIMARY/hooks/notify.sh resolve to ONE directory entry, which
+# link_refuses (correctly) will not write -- aborting the whole install. That is
+# the shape an older installer left behind when it linked WHOLE directories, so
+# it is hit on every re-run of an otherwise idempotent script: the mirror pass
+# dies part-way and the hook preflight and memory restore below never run.
+#
+# De-alias it. The symlink holds no content of its own, so replacing it with a
+# real directory loses nothing, and the per-leaf links then written into it
+# resolve to exactly the files the whole-directory link resolved to -- the shape
+# changes, what any reader sees does not.
+#
+# Deliberately narrow, because the destructive step here is an `rm`:
+#   * only a SUBDIRECTORY is ever de-aliased, never the mirror root itself
+#     (a top-level item's parent IS the root, so those are skipped);
+#   * only when the entry is a symlink AND `-ef`-identical to the primary's
+#     counterpart. A link pointing anywhere ELSE is an unexpected shape this
+#     function deliberately does not touch: removing a link whose target it
+#     cannot account for is a destructive guess, and the per-pair judgement in
+#     link_refuses is unchanged for it. That leaves such a mirror behaving
+#     exactly as it did before this function existed -- narrower than a repair,
+#     and the only honest remit for an `rm`.
+dealias_mirror_subdirs() { # <primary> <mirror> <item>...
+  local primary="$1" mirror="$2"; shift 2
+  local item sub seen=""
+  for item in "$@"; do
+    sub="${item%/*}"
+    [[ "$sub" == "$item" ]] && continue          # top-level item: parent is the mirror root
+    case " $seen " in *" $sub "*) continue ;; esac
+    seen="$seen $sub"
+    [[ -L "$mirror/$sub" ]] || continue
+    [[ -d "$primary/$sub" && "$mirror/$sub" -ef "$primary/$sub" ]] || continue
+    rm -f "$mirror/$sub"
+    mkdir -p "$mirror/$sub"
+    echo "  de-aliased $mirror/$sub (was a whole-directory link to $primary/$sub; per-leaf links go in it now)"
+  done
+}
+
 # Mirror BEFORE the hook preflight: preflight checks every present config dir's
 # active settings.json, so a fresh mirror dir must get its settings link first.
 if [[ -n "$MIRROR" ]]; then
   echo "Mirroring $MIRROR -> $PRIMARY"
+  dealias_mirror_subdirs "$PRIMARY" "$MIRROR" "${ITEMS[@]}"
   for item in "${ITEMS[@]}"; do
     link "$PRIMARY/$item" "$MIRROR/$item"
   done

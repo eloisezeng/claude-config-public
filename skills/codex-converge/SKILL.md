@@ -773,6 +773,12 @@ Launch panels and `--write` runs as tracked BACKGROUND jobs — a foreground she
 Never conclude from a status line: a run-level CI `conclusion: failure` whose job shows `runner_name: ""` means the tests never ran (an Actions outage), not a red build.
 And grep verdict files for the assertion text itself, not a generic word like "Tests" — a filtered grep once hid a present transcript and nearly caused the work to be re-run.
 
+**A compaction mid-loop is not a reason to re-read the arc.**
+This skill already keeps the loop's position on disk — the round scorecard, the `loop.py` ledger, the pinned range, and the verdict files — so after an auto-compaction the summary plus those artifacts ARE where the loop stands; resume at the next round step instead of re-reading the spec, the plan, or the diff to get back up to speed.
+If you genuinely need the next action, read ONE of them (one verdict file, one `git show` of the pinned range, one `loop.py` status line) and nothing more.
+Measured 2026-09-14 over 5,660 automatic boundaries: every compaction re-injects a median 85,542 tokens before the loop does anything — about half the post-compaction window, this SKILL.md being 20 KB of that — and buys back a median 54K tokens, 32 assistant turns and 8 tool calls for a median 144-second stall. Orientation reads spend that in a handful of calls, and one session compacted 232 times.
+`hooks/compaction-recovery.mjs` fires on SessionStart `source == compact` and escalates against a trailing 60-minute window: at the SECOND compaction recovery reads are FORBIDDEN and you checkpoint the round into the ledger and hand off, and the THIRD is an unconditional handoff — `[[trust-the-compact-summary-do-not-rebuild-the-window]]`.
+
 ## Finishing
 
 - Verify the real artifact, not just the code — for UI, check the running page as an end user would (`~/.claude` global verification prefs).

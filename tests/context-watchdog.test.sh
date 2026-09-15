@@ -17,6 +17,22 @@ export TMPDIR="$tmp"   # the PostToolUse band file lives under TMPDIR
 # and silence cases that are supposed to speak.
 export CLAUDE_HANDOFF_STATE_DIR="$tmp/session-state"
 
+# The bands are DERIVED from autoCompactWindow (hooks/lib/compaction-window.mjs), so
+# an unpinned suite would assert against whatever the user has configured today and would
+# redden the moment she changes it. Pin a fixture config root for every case, for the
+# same reason CLAUDE_HANDOFF_STATE_DIR above is pinned: a test that reads live
+# configuration is measuring the machine, not the code. 200000 is the value the band
+# literals in this file were computed from (WARN 120K, URGENT 150K).
+export CLAUDE_CONFIG_DIR="$tmp/config"
+mkdir -p "$CLAUDE_CONFIG_DIR"
+printf '{"autoCompactWindow": 200000}\n' > "$CLAUDE_CONFIG_DIR/settings.json"
+
+# Every mutant is written into $tmp and imports ./lib/compaction-window.mjs relative to
+# its own path, so that directory has to resolve beside it. The lib is never the thing
+# under mutation, so linking the real one is correct — mutating a copy of the HOOK is
+# what these cases are for.
+ln -s "$(dirname "$HOOK")/lib" "$tmp/lib"
+
 T="$tmp/transcript.jsonl"
 # $1 = window tokens, $2 = extra json fields on the entry (may be empty)
 write_transcript() {
@@ -57,21 +73,51 @@ URGENT_CMD='`~/dotfiles/claude/hooks/handoff.sh "<absolute-handoff-path>" -- "<o
 WARN_CMD='`~/dotfiles/claude/hooks/handoff.sh "<handoff-file>" -- "<objective>"`'
 
 # ---- A. URGENT names the launcher, with the exact invocation --------------
-# Since the 2026-08-31 lifecycle decision the urgent band's message is "sync
-# durable state and let auto-compact fire", with dispatch reserved for genuine
-# task boundaries — so the band must carry the ledger sync, must NOT order a
-# mid-task dispatch, and still carries the exact boundary-dispatch invocation.
+# The user's 2026-09-15 decision replaced the 2026-08-31 one. The urgent band no
+# longer says "let auto-compact fire and never dispatch"; it says sync durable
+# state and then CHOOSE, with a handoff preferable once the state is on disk.
+# Two assertions were retired with the claim they pinned — "do NOT dispatch a
+# successor merely because context is high" and "genuine task boundary" — and the
+# three below replace them, pinning the rule that took its place. The band must
+# still carry the ledger sync and the exact boundary-dispatch invocation.
 write_transcript 155000
 out="$(run UserPromptSubmit sA)"
 assert_contains "$URGENT_CMD" "$(printf '%s' "$out" | ctx)" A
 # the durable-state sync is the whole point of the band now
 assert_contains "~/.claude/ops" "$out" A
-assert_contains "do NOT dispatch a successor merely because context is high" "$out" A
-assert_contains "genuine task boundary" "$out" A
+# the handoff is a genuine alternative, not a discouraged one
+assert_contains "PREFERABLE to riding through the boundary" "$out" A
+# neither branch may be presented as the automatic one
+assert_contains "Do not treat either choice as the automatic one" "$out" A
+# one compaction is explicitly normal — the band must not read as an alarm
+assert_contains "ONE compaction is normal" "$out" A
+# the retired claim must not come back under any wording
+assert_missing "merely because context is high" "$out" A
 # the demoted behaviour must stay demoted: no autonomous mid-task dispatch order
 assert_missing "Hand off AUTONOMOUSLY" "$out" A
 # the no-blocking rule must survive the rewire
 assert_contains "NEVER stop work to wait" "$out" A
+
+# ---- A2. The bands track autoCompactWindow instead of a hard-coded 200K ----
+# The whole point of deriving them is that raising the setting moves the bands. A
+# control run under a 400K fixture must report the 334K trigger and must NOT fire
+# urgent at a window that is urgent under 200K — without this, the derivation could
+# be a no-op reading a constant and every other case here would still pass.
+cfg400="$tmp/config400"; mkdir -p "$cfg400"
+printf '{"autoCompactWindow": 400000}\n' > "$cfg400/settings.json"
+write_transcript 155000
+out400="$(CLAUDE_CONFIG_DIR="$cfg400" run UserPromptSubmit sA2)"
+assert_eq "$out400" "" A2-below-the-raised-warn-band
+write_transcript 305000
+out400="$(CLAUDE_CONFIG_DIR="$cfg400" run UserPromptSubmit sA2b)"
+assert_contains "Auto-compact fires near 334K" "$out400" A2-trigger-tracks-setting
+assert_contains "urgent threshold 300K" "$out400" A2-urgent-tracks-setting
+assert_missing "near 167K" "$out400" A2-no-stale-200K-trigger
+# and the same window under the 200K fixture must still read 167K, so the control
+# proves the setting is what moved and not the window size
+write_transcript 305000
+out200="$(run UserPromptSubmit sA2c)"
+assert_contains "Auto-compact fires near 167K" "$out200" A2-control-200K
 
 # ---- B. WARN nudges without claiming urgency ------------------------------
 write_transcript 125000
@@ -107,6 +153,49 @@ write_transcript 125000
 out="$(run PostToolUse sD2)"
 assert_contains "$WARN_CMD" "$(printf '%s' "$out" | ctx)" D2
 assert_missing "Auto-compact fires lossily" "$out" D2
+
+# ---- D3. a DOWNWARD band crossing speaks again (the post-compaction case) --
+# The PostToolUse throttle used to be a per-session HIGH-WATER mark
+# (`if (band <= lastBand) return;`), which made the hook mute for the rest of any
+# session that compacted: measured over 232 compactions in one session, the
+# window ran 166K before a boundary and 117K after, so the post-compaction band
+# never re-exceeds the pre-compaction peak and the warn/urgent advice was emitted
+# exactly once per session however many times the window refilled. A full 25K
+# band crossed DOWNWARD is the reclaim signal — it costs no extra I/O, it is
+# produced by compaction and /clear but never by turn-to-turn jitter — so it must
+# record the new floor and speak, giving each cycle its own advice.
+write_transcript 160000
+out="$(run PostToolUse sD3)"
+assert_contains "$URGENT_CMD" "$(printf '%s' "$out" | ctx)" D3
+# the compaction: 166K -> 117K in the measured session, here 160K -> 120K
+write_transcript 120000
+out="$(run PostToolUse sD3)"
+assert_contains "$WARN_CMD" "$(printf '%s' "$out" | ctx)" D3-after-compaction
+# ...but the new floor is recorded, so the same band stays throttled
+out="$(run PostToolUse sD3)"
+assert_eq "$out" "" D3-throttle-still-holds
+# and refilling past it speaks once more
+write_transcript 160000
+out="$(run PostToolUse sD3)"
+assert_contains "$URGENT_CMD" "$(printf '%s' "$out" | ctx)" D3-refill
+
+# ---- D4. mutant control: D3 is what kills the high-water throttle ----------
+# D3 passing is only evidence if it would FAIL on the code it replaced, so the
+# old comparison is restored on a COPY under $tmp and driven through the same
+# sequence. The tracked hook is never mutated: this repo auto-commits every
+# minute, so an armed fault here would be published.
+mut="$tmp/context-watchdog-highwater.mjs"
+sed 's/if (band === lastBand) return;/if (band <= lastBand) return;/' "$HOOK" > "$mut"
+grep -q 'if (band <= lastBand) return;' "$mut" || { echo "FAIL[D4]: the mutation did not apply -- this control proves nothing"; fail=1; }
+run_mut() { printf '{"hook_event_name":"PostToolUse","transcript_path":"%s","session_id":"%s"}' "$T" "$1" | node "$mut"; }
+write_transcript 160000
+out="$(run_mut mD4)"
+assert_contains "$URGENT_CMD" "$(printf '%s' "$out" | ctx)" D4-mutant-speaks-first
+# the same downward crossing D3 asserts on: the mutant is mute for good
+write_transcript 120000
+out="$(run_mut mD4)"
+assert_eq "$out" "" D4-mutant-goes-mute
+grep -q 'if (band === lastBand) return;' "$HOOK" || { echo "FAIL[D4]: the TRACKED hook was mutated"; fail=1; }
 
 # ---- E. a subagent's usage must not be read as this session's window ------
 # isSidechain entries describe the SUBAGENT's window; counting them would make

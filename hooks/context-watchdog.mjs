@@ -7,24 +7,36 @@
 // which records the EXACT context window sent on the last request (input +
 // cache_read + cache_creation) — no estimation.
 //
-// Lifecycle decision 2026-08-31 (your-other-project docs/notes/LIFECYCLE-
-// DECISION-context-vs-handoff-2026-08-31.md): auto-compact near 200K is the
-// EXPECTED pressure valve for mid-task context growth — measured ~2 min stall
-// and ~52K re-warm, about the cost of a fresh session's ~46–50K boot, with no
-// ownership transfer and no dispatch-defect surface. Threshold-triggered
-// successor dispatch is DEMOTED: handoff.sh stays the tool for deliberate
-// task-boundary and parallel dispatch only. What this hook nudges is
-// durable-state hygiene — everything this window knows must be on disk (the
-// lane ledger ~/.claude/ops/ and the lane's own file) before the boundary hits,
-// so the compaction summary is never the only carrier of an unresolved item.
+// the user's decision 2026-09-15, replacing the 2026-08-31 lifecycle decision: do NOT
+// assume compaction is preferable to a handoff. Compaction is the right move only
+// when it preserves valuable working context AND buys meaningful runway. Where the
+// state of the work is already durable on disk, or where compaction has started to
+// recur, a checkpointed handoff is preferable.
 //
-// Bands (absolute tokens, so behaviour is identical on 200K and 1M models):
-//   WARN   >= 120K  → at the next task boundary, sync durable state; hand a
-//                     genuinely SEPARATE next item to a fresh session, or keep
-//                     going and let auto-compact reclaim the window.
-//   URGENT >= 150K  → auto-compact (autoCompactWindow 200K) is imminent; write
-//                     all unresolved knowledge to durable state NOW, then keep
-//                     working — do not dispatch a successor mid-task.
+// The 2026-08-31 wording this replaces claimed a compaction cost a "~52K re-warm,
+// about a fresh boot's 46–50K", and told every session to NEVER dispatch merely
+// because context was high. Both halves were measured wrong on 2026-09-14 over 5,660
+// automatic boundaries in ~/.claude + ~/.claude1. The "~52K" was the summary's own
+// postTokens, not the post-compaction window; the real window after a boundary is a
+// median 107.7K, the re-injected floor a median 85.5K, the reclaimed runway a median
+// 54K, and the stall a median 144 s (239.7 h across the corpus). Half of every
+// post-compaction window is material re-injected before the session does anything.
+//
+// What this hook nudges is unchanged: durable-state hygiene. Everything this window
+// knows must be on disk (the lane ledger ~/.claude/ops/ and the lane's own file)
+// before the boundary hits, so the summary is never the only carrier of an
+// unresolved item. What changed is that once the state IS on disk, handing the
+// remainder to a fresh session is a legitimate — often preferable — choice.
+//
+// Bands are DERIVED from autoCompactWindow, never written down here; see
+// lib/compaction-window.mjs for the measured 83.5% trigger fraction and the proof
+// that the derivation reproduces the old hand-picked 120K/150K at a 200K setting.
+//   WARN   (72% of the trigger)  → at the next task boundary, sync durable state,
+//                     then choose: continue through one compaction, or hand a
+//                     separable next item to a fresh session.
+//   URGENT (90% of the trigger)  → the boundary is imminent; write all unresolved
+//                     knowledge to durable state NOW, then make that choice
+//                     deliberately rather than by default.
 // Resume case (UserPromptSubmit only): last activity > 60 min ago with a big
 // window → the whole cache must be re-written before any work happens; suggest
 // /clear + restate instead of continuing.
@@ -43,6 +55,7 @@
 import { readFileSync, openSync, readSync, closeSync, fstatSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
+import { bands } from './lib/compaction-window.mjs';
 
 // A seat that has ALREADY dispatched a successor must not be told to dispatch
 // another. hooks/handoff.sh writes this sentinel the moment a dispatch verifies,
@@ -72,19 +85,21 @@ function handedOff(sessionId) {
 // "the guarded output mentions handoff.sh nowhere" a checkable invariant, so the
 // test catches a re-introduced invocation however it is worded, instead of
 // matching one exact phrasing that the next edit walks around.
+const B = bands();
+
 const HANDED_OFF_ADVICE = 'This session has ALREADY handed its remaining work to a background successor (the handoff launcher recorded a verified dispatch), so do NOT write another handoff file and do NOT dispatch a second successor — a second one would duplicate work already in flight. Finish or checkpoint only what is already started, report where the work went and under which record, then end the turn. This window can be /cleared whenever.';
 
 // The two band texts, shared by UserPromptSubmit and PostToolUse so the two
 // events cannot drift apart. Each band cites ONE launcher form and not the
 // other's — the test's containment assertions key on exactly that.
-const URGENT_ADVICE = `Auto-compact fires near 200K — measured 2026-08-31: a ~2 min stall, then a ~52K re-warm, about the cost of a fresh session's boot, with no ownership transfer and no dispatch machinery. It is the EXPECTED path for mid-task context pressure: do NOT dispatch a successor merely because context is high. Instead, make this window disposable BEFORE the boundary: (1) write every unresolved item, decision, ownership change, and newly discovered piece of work this session knows about into durable state NOW — the lane ledger (~/.claude/ops/, see its README.md) and/or the lane's own handoff/progress file; nothing may exist only in this window; (2) checkpoint the current step into the artifact it belongs to; (3) then keep working and let auto-compact fire. Dispatch a fresh session ONLY at a genuine task boundary where the NEXT item is separate work — \`~/dotfiles/claude/hooks/handoff.sh "<absolute-handoff-path>" -- "<one-line objective>"\` — never mid-task under pressure. NEVER stop work to wait for the user's input.`;
-const WARN_ADVICE = `At the next natural task boundary: sync durable state (record anything unresolved that exists only in this window into the lane ledger ~/.claude/ops/ or the lane's own file), and hand a genuinely SEPARATE next item to a fresh session — \`~/dotfiles/claude/hooks/handoff.sh "<handoff-file>" -- "<objective>"\` (handoff-at-boundaries-saves-tokens). If the next work is a continuation of THIS task, keep going — auto-compact near 200K is a measured-safe backstop (~52K re-warm, ~2 min stall), cheaper than a mid-task handoff. Finish the current item first; do not drop work mid-step.`;
-
-const WARN = 120_000;
-// Auto-compact (autoCompactWindow 200K) can fire from ~166K (83% of the window).
-// URGENT sits BELOW that so the durable-state sync gets its chance strictly
-// before the boundary — the sync is only worth anything if it lands first.
-const URGENT = 150_000;
+const URGENT_ADVICE = `Auto-compact fires near ${B.triggerK} (autoCompactWindow ${B.configuredK}). Measured 2026-09-14 over 5,660 boundaries: a median 144-second stall, and it reclaims only a median 54K of runway because a median 85.5K floor is re-injected immediately. ONE compaction is normal and is not worth avoiding. What is not automatic is what happens next, so decide it deliberately now rather than by default: (1) write every unresolved item, decision, ownership change, and newly discovered piece of work this session knows about into durable state — the lane ledger (~/.claude/ops/, see its README.md) and/or the lane's own handoff/progress file; nothing may exist only in this window; (2) checkpoint the current step into the artifact it belongs to; (3) then choose. If the work's state is now fully on disk and the next item is separable, a checkpointed handoff to a fresh session is PREFERABLE to riding through the boundary — \`~/dotfiles/claude/hooks/handoff.sh "<absolute-handoff-path>" -- "<one-line objective>"\` — because the summary carries less than the disk does. If the live context genuinely still holds something the artifacts do not, continue and let the compaction fire. Do not treat either choice as the automatic one. NEVER stop work to wait for the user's input.`;
+const WARN_ADVICE = `At the next natural task boundary: sync durable state (record anything unresolved that exists only in this window into the lane ledger ~/.claude/ops/ or the lane's own file), then choose between continuing and handing off — \`~/dotfiles/claude/hooks/handoff.sh "<handoff-file>" -- "<objective>"\` (handoff-at-boundaries-saves-tokens). A single auto-compact near ${B.triggerK} is normal and costs a median 144-second stall for a median 54K of reclaimed runway; it is worth taking when the live context still holds something the artifacts do not. Where the state is already durable on disk, or where this window has already compacted once, hand the remainder to a fresh session instead. Finish the current item first; do not drop work mid-step.`;
+// Both bands are derived from the LIVE autoCompactWindow, so raising the setting
+// moves them with it. URGENT sits below the measured trigger so the durable-state
+// sync gets its chance strictly before the boundary — the sync is only worth
+// anything if it lands first.
+const WARN = B.warn;
+const URGENT = B.urgent;
 const RESUME_GAP_MS = 60 * 60 * 1000;
 const RESUME_MIN = 100_000;
 const BAND = 25_000;
@@ -162,7 +177,7 @@ function degradedOutput(hook, info, ho) {
   const event = hook.hook_event_name || '';
   const mib = (n) => `${(n / 1_048_576).toFixed(1)} MiB`;
   const what = `the last ${mib(info.bytes)} of a ${mib(info.size)} transcript contains no complete main-chain assistant usage record`;
-  const advice = ho ? HANDED_OFF_ADVICE : `This session's context window is UNKNOWN — read the bands (warn ${WARN / 1000}K, urgent ${URGENT / 1000}K) as UNREPORTED, never as "under threshold", and do not state or guess a token count. Two things produce this and they differ: a single main-chain record larger than the cap (the window is very large, and auto-compact near 200K may be close), or more than that much trailing subagent (isSidechain) output (which says nothing about this window). Judge the boundary yourself instead of waiting for a band that will not arrive: sync durable state now (record anything unresolved that exists only in this window into the lane ledger ~/.claude/ops/ or the lane's own file), then either keep working and let auto-compact reclaim the window, or — at a genuine task boundary where the next item is separate work — hand it to a fresh session with \`~/dotfiles/claude/hooks/handoff.sh "<handoff-file>" -- "<objective>"\`.`;
+  const advice = ho ? HANDED_OFF_ADVICE : `This session's context window is UNKNOWN — read the bands (warn ${WARN / 1000}K, urgent ${URGENT / 1000}K) as UNREPORTED, never as "under threshold", and do not state or guess a token count. Two things produce this and they differ: a single main-chain record larger than the cap (the window is very large, and auto-compact near ${B.triggerK} may be close), or more than that much trailing subagent (isSidechain) output (which says nothing about this window). Judge the boundary yourself instead of waiting for a band that will not arrive: sync durable state now (record anything unresolved that exists only in this window into the lane ledger ~/.claude/ops/ or the lane's own file), then choose deliberately — continue through one compaction if the live context still holds what the artifacts do not, or, once the state is on disk, hand the remainder to a fresh session with \`~/dotfiles/claude/hooks/handoff.sh "<handoff-file>" -- "<objective>"\`.`;
 
   if (event === 'UserPromptSubmit') {
     return {
@@ -227,8 +242,8 @@ function main() {
       };
     } else if (windowTokens >= URGENT) {
       out.systemMessage = ho
-        ? `context-watchdog: context at ~${k}K tokens — this session has already handed off; /clear this window when convenient (auto-compact near 200K is the backstop).`
-        : `context-watchdog: context at ~${k}K tokens — Claude will sync durable state and let auto-compact (near 200K) reclaim the window.`;
+        ? `context-watchdog: context at ~${k}K tokens — this session has already handed off; /clear this window when convenient (auto-compact near ${B.triggerK} is the backstop).`
+        : `context-watchdog: context at ~${k}K tokens — Claude will sync durable state, then choose between one compaction (near ${B.triggerK}) and a checkpointed handoff.`;
       out.hookSpecificOutput = {
         hookEventName: 'UserPromptSubmit',
         additionalContext: ho
@@ -276,8 +291,8 @@ function main() {
     };
     if (windowTokens >= URGENT) {
       out.systemMessage = ho
-        ? `context-watchdog: context at ~${k}K tokens — this session has already handed off; auto-compact near 200K is the backstop.`
-        : `context-watchdog: context at ~${k}K tokens — Claude will sync durable state and let auto-compact (near 200K) reclaim the window.`;
+        ? `context-watchdog: context at ~${k}K tokens — this session has already handed off; auto-compact near ${B.triggerK} is the backstop.`
+        : `context-watchdog: context at ~${k}K tokens — Claude will sync durable state, then choose between one compaction (near ${B.triggerK}) and a checkpointed handoff.`;
     }
   }
 

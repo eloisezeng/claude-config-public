@@ -7,14 +7,22 @@
 //
 //   * 232 compactions in ONE session.
 //   * Median window immediately BEFORE a compaction: 166K tokens. Median window of the first
-//     request AFTER it: 117K. A compaction therefore reclaims ~49K of a 200K ceiling.
-//   * The re-injection at the boundary is a FLOOR of ~137 KB of context-visible bytes
-//     (~34K tokens): invoked_skills 43.2 KB, instructions 31.3 KB, the compact summary
-//     30.0 KB, file attachments 10.9 KB, hook_additional_context 9.1 KB, the rest smaller.
-//     That floor is spent before the session does anything.
-//   * ~49K of headroom is about ten tool calls. In the 25 main-chain assistant records
-//     following each boundary there were 2,282 Bash calls, 278 Reads, 138 Edits and 82
-//     Writes; one source file was re-read 34 times across the session and one spec 32 times.
+//     request AFTER it: 117K.
+//
+// Re-measured 2026-09-14 across the whole corpus — 5,660 automatic boundaries in ~/.claude and
+// ~/.claude1, not one session — which corrected two figures the single-session pass got wrong:
+//
+//   * The re-injection FLOOR is a median 85,542 tokens (n=5,582; min 46,568, p10 61,417,
+//     p90 104,571), not the ~34K first reported. The old number was the cache_read component
+//     alone — the already-cached static prefix — and missed roughly 52K of cache_creation.
+//     Half of every post-compaction window is material re-injected before the session acts.
+//   * A cycle buys a median 54,058 tokens, 12 minutes, 32 assistant turns and EIGHT tool calls
+//     of runway. A third of all cycles get fewer than five tool calls. The stall is a median
+//     144 s, totalling 239.7 hours across the corpus.
+//   * The post-compaction landing point does NOT scale with the trigger point (Pearson
+//     r = -0.036). Two real ~1M-window sessions show a trigger six times higher producing a
+//     post-window 32% LOWER (75.6K vs 107.7K) at a LOWER stall (112 s vs 144 s). Runway is
+//     therefore the trigger minus a constant, which is why autoCompactWindow was raised.
 //
 // The floor is mostly harness-controlled (skills, CLAUDE.md, the summary itself). The
 // BEHAVIOUR is not: nothing anywhere in this configuration told a session what to do after a
@@ -28,6 +36,16 @@
 // inside a trailing 60-minute window, the failing session reached 9, and >=3-in-an-hour held
 // at 200 of its 232 boundaries. A session compacting once an hour is working; one compacting
 // three times an hour is rebuilding context it just discarded.
+//
+// ELOISE'S RULE (2026-09-15). Compaction is NOT assumed preferable to a handoff. The tiers
+// carry that rule, and they are deliberately simple:
+//   Tier 1 — one compaction is normal. Continue from the summary. Where the state of the work
+//            is ALREADY durable on disk, a checkpointed handoff is preferable even here.
+//   Tier 2 — a second automatic compaction inside 60 minutes means checkpoint and hand off.
+//   Tier 3 — unconditional handoff.
+// An earlier draft gated tier 2 on a projected tool-call count. The user declined it on
+// 2026-09-15: tasks vary too much in how many calls they need for a call count to measure
+// useful runway. The recurrence count is the whole predicate.
 //
 // Contract: prints NOTHING on startup/resume/clear, so a normal boot is untouched. Never
 // throws, never blocks, always exits 0 — a hook that breaks a session is worse than the bug.
@@ -119,21 +137,30 @@ function tierAdvice(n, complete) {
       system: null,
       text:
         `${PREAMBLE} ${NEVER} ${BOUNDED} ` +
-        'Your first act after this message should be the next step of the work itself, not an orientation pass.',
+        'Your first act after this message should be the next step of the work itself, not an orientation pass. ' +
+        'One compaction is normal and is not a failure. Before continuing, check ONE thing: if the state of this work ' +
+        'is already durable on disk — the lane file under ~/.claude/ops/, the handoff document, or the plan holds what ' +
+        'is done, what is next, and the exact paths and commands — then a checkpointed handoff to a fresh session is ' +
+        'PREFERABLE to continuing here, because the disk carries more than the summary does. Continue in this window ' +
+        'only where the live context still holds something those artifacts do not.',
     };
   }
   if (n === 2) {
     return {
       tier: 2,
       system:
-        'compaction-recovery: second compaction within the hour — recovery reads are off. Claude will act from the summary.',
+        'compaction-recovery: second compaction within the hour — recovery reads are off. Claude will checkpoint durable state and hand off.',
       text:
         `${PREAMBLE} CIRCUIT BREAKER, TIER 2: this window has compacted ${seen} times in the last hour, which means the ` +
-        'previous cycle spent its reclaimed context without finishing the work. Recovery reads are now FORBIDDEN — ' +
-        'take NO read whose purpose is to restore context. ' + NEVER + ' ' +
-        'Only a read the very next edit or command cannot be written without is permitted, and it must be a targeted ' +
-        'span, not a file. Act on the summary as it stands; if that is not enough to act, that is a reason to ask or ' +
-        'to checkpoint, never a reason to read more.',
+        'previous cycle spent its reclaimed context without finishing the work. One compaction is normal; a second ' +
+        'inside the hour is the signal to stop riding the window. CHECKPOINT AND HAND OFF. In this turn: (1) write the ' +
+        'durable state of the work — what is done, what is next, the exact paths and commands — into the artifact that ' +
+        'already owns it (the lane file under ~/.claude/ops/, the handoff document, or the plan), so nothing lives only ' +
+        'in this window; (2) finish or abandon the single action already in flight; (3) hand the remainder to a fresh ' +
+        'session with `~/dotfiles/claude/hooks/handoff.sh "<handoff-file>" -- "<objective>"`. ' +
+        'Recovery reads are now FORBIDDEN — take NO read whose purpose is to restore context. ' + NEVER + ' ' +
+        'Only a read the checkpoint itself cannot be written without is permitted, and it must be a targeted span, not ' +
+        'a file. Continuing here buys a median eight tool calls before the next boundary; the handoff buys a whole window.',
     };
   }
   return {
@@ -147,10 +174,11 @@ function tierAdvice(n, complete) {
       'start a new investigation, a new search sweep, or a new file. Instead, in this turn: (1) write the durable ' +
       'state of the work — what is done, what is next, the exact paths and commands — into the artifact that already ' +
       'owns it (the lane file under ~/.claude/ops/, the handoff document, or the plan), so nothing lives only in this ' +
-      'window; (2) finish or abandon the single action already in flight; (3) then either hand the remainder to a ' +
-      'fresh session at this boundary with `~/dotfiles/claude/hooks/handoff.sh "<handoff-file>" -- "<objective>"`, or ' +
-      'tell the user plainly that the task does not fit this window and name what you would need to narrow it. ' +
-      'Continuing to read here produces another compaction, not an answer.',
+      'window; (2) finish or abandon the single action already in flight; (3) hand the remainder to a fresh session at ' +
+      'this boundary with `~/dotfiles/claude/hooks/handoff.sh "<handoff-file>" -- "<objective>"`. The handoff is ' +
+      'UNCONDITIONAL at this tier — it is not one of two options and it is not a judgement call. Where the work cannot ' +
+      'be handed to anyone because it is not separable, say so plainly to the user and name what you would need to narrow ' +
+      'it, but do not simply continue. Continuing to read here produces another compaction, not an answer.',
   };
 }
 

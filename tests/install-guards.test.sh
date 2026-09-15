@@ -402,4 +402,52 @@ assert_absent "$tmp/g11/home/nope" G11-refused-before-any-write
 [ -f "$g11repo/CLAUDE.md" ] && [ ! -L "$g11repo/CLAUDE.md" ] \
   || { echo "FAIL[G11]: the repository's CLAUDE.md was replaced by a link to itself"; fail=1; }
 
+# ---- G12. a MIRROR subdirectory that ALIASES the primary's is de-aliased ----
+# An older installer linked WHOLE directories, so $MIRROR/hooks can be a symlink
+# to $PRIMARY/hooks. Every per-leaf item under it then names ONE directory entry;
+# link_refuses stops the run -- correctly, the link WOULD point at itself -- and
+# the mirror pass, the hook preflight and the memory restore below it never
+# complete. That is an idempotent installer that fails on every re-run, which is
+# how the host's own second profile came to be missing output-styles/.
+# The half worth asserting is not the shape but the RESOLUTION: after the
+# de-alias each leaf must still reach the same real file in the repo.
+mkdir -p "$tmp/g12/home"; seed_repo "$tmp/g12/home/dotfiles/claude"
+shim_bin "$tmp/g12/bin" Darwin
+g12repo="$tmp/g12/home/dotfiles/claude"
+g12p="$tmp/g12/home/.claude"; g12m="$tmp/g12/home/.claude1"
+mkdir -p "$g12p/hooks" "$g12m"
+ln -sfn "$g12p/hooks" "$g12m/hooks"
+run_install "$g12repo" "$tmp/g12/home" "$tmp/g12/bin" "$g12p" "$g12m"
+assert_eq "$rc" 0 G12-install-completes
+assert_missing "same directory entry" "$out" G12-no-self-link-refusal
+[ -d "$g12m/hooks" ] && [ ! -L "$g12m/hooks" ] \
+  || { echo "FAIL[G12]: the aliased mirror subdirectory was not de-aliased"; fail=1; }
+# -ef is same-device-and-inode THROUGH the links, so this asserts what the leaf
+# resolves to, not how it is spelled.
+[ "$g12m/hooks/notify.sh" -ef "$g12repo/hooks/notify.sh" ] \
+  || { echo "FAIL[G12]: mirror hook no longer resolves to the repo's real file"; fail=1; }
+# the mirror ROOT is never de-aliased, only a subdirectory of it
+[ -d "$g12m" ] && [ ! -L "$g12m" ] \
+  || { echo "FAIL[G12]: the mirror root itself was de-aliased"; fail=1; }
+# and the run is repeatable -- the defect was that it was not
+run_install "$g12repo" "$tmp/g12/home" "$tmp/g12/bin" "$g12p" "$g12m"
+assert_eq "$rc" 0 G12-second-run-still-succeeds
+
+# ---- G13. CONTROL: a mirror subdirectory linked ELSEWHERE is left alone ----
+# The de-alias step removes a link, so its remit is deliberately narrow: only an
+# alias of the primary's OWN counterpart. A link pointing somewhere else is a
+# shape it cannot account for, and removing it would be a destructive guess.
+# Without this control G12 would also pass for a function that unlinked every
+# mirror subdirectory it found.
+mkdir -p "$tmp/g13/home"; seed_repo "$tmp/g13/home/dotfiles/claude"
+shim_bin "$tmp/g13/bin" Darwin
+g13repo="$tmp/g13/home/dotfiles/claude"
+g13p="$tmp/g13/home/.claude"; g13m="$tmp/g13/home/.claude1"
+mkdir -p "$g13p/skills" "$g13m" "$tmp/g13/elsewhere/skills"
+ln -sfn "$tmp/g13/elsewhere/skills" "$g13m/skills"
+run_install "$g13repo" "$tmp/g13/home" "$tmp/g13/bin" "$g13p" "$g13m"
+[ -L "$g13m/skills" ] \
+  || { echo "FAIL[G13]: a mirror subdirectory linked elsewhere was removed"; fail=1; }
+assert_eq "$(readlink "$g13m/skills")" "$tmp/g13/elsewhere/skills" G13-target-unchanged
+
 [ "$fail" = 0 ] && echo "PASS: install-guards" || exit 1

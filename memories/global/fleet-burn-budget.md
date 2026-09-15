@@ -1,6 +1,6 @@
 ---
 name: fleet-burn-budget
-description: Fleet token-burn budget — cache-read is 97.5% of tokens; the 08-16 autoCompactWindow=200000 already cut per-request cost 68%, so the remaining lever is the BOOT READ SURFACE (handoff docs), not the context ceiling
+description: Fleet token-burn budget — cache-read is ~97% of tokens; capping the window in 08-16 cut per-request cost 68%, and the remaining lever is the BOOT READ SURFACE (handoff docs); the ceiling itself is now 400,000, raised 2026-09-15 to stop compaction thrashing
 metadata:
   type: feedback
   scope: global
@@ -10,7 +10,7 @@ Measured 2026-08-25 over the full corpus — 313 fleet sessions, 0.85 GB, 114,43
 **Cache-read is 97.5% of all tokens and 67% of cost** (output 15%, cache write 18%, uncached input ~0%).
 Cost per turn is linear in context, so cost per session is QUADRATIC in its length. That part is permanent.
 
-**`autoCompactWindow = 200000` (set 2026-08-16) already won the big fight — do not re-fight it.**
+**Capping the window at all won the big fight in 08-16 — the remaining lever is the boot read surface, not the ceiling.**
 Split the corpus at that date:
 
 | | seats | median ctx/request | p90 | cache-read per request | %>300k | %compacted |
