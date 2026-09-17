@@ -128,6 +128,146 @@ else
   ok "injected-entry counter matches the hook's output ($(( $2 - $1 )) of $2 reach context)"
 fi
 
+# --- 8. the index-hook BILL may not read zero when the loss is largest ------
+# The hook has two notice forms and only the long one used to carry "N chars
+# cut". The long one's length grows with the index PATH, so a clone under a long
+# root (a worktree path runs ~46 chars longer than the live checkout) fell back
+# to the short form, and hook_chars_lost() -- which parsed "chars cut" and
+# treated its absence as 0 -- reported 0 while 71 of 116 hooks were being cut, a
+# measured 7,958 chars. The metric read its BEST possible value at its worst
+# moment. Both halves are pinned here: the hook must name the count on the
+# fallback path, and the reader must FAIL rather than report 0 when it cannot
+# find one.
+cb2="$(mktemp -d)"
+trap 'rm -rf "$tmp" "$cb2"' EXIT
+mkdir -p "$cb2/memories/global"
+cp "$ROOT/CLAUDE.md" "$cb2/CLAUDE.md"
+cp "$ROOT/memories/global/"*.md "$cb2/memories/global/"
+# A SMALL reserve forces the fallback on every machine, so this case does not
+# depend on how long mktemp's directory happens to be -- a positive control that
+# only fires on one machine is not a control. (reserve=1000 was tried first and
+# is the WRONG direction: the long notice then fits, the short path never runs,
+# and the "names its count" assertion below passes on the long form. The mutant
+# control after it is what caught that.)
+sed 's/^  reserve=200$/  reserve=120/' "$ROOT/inject-global-memory.sh" \
+  > "$cb2/inject-global-memory.sh"
+
+notice="$(CLAUDE_GLOBAL_MEMORY_DIR="$cb2/memories/global" bash "$cb2/inject-global-memory.sh" | tail -1)"
+case "$notice" in
+  *"hooks abbreviated to"*) ok "short-notice fixture: the hook did abbreviate" ;;
+  *) bad "short-notice fixture abbreviated NOTHING -- this case proves nothing: $notice" ;;
+esac
+case "$notice" in
+  *"for the full line"*) bad "the LONG notice fired -- this case is not exercising the fallback: $notice" ;;
+  *"chars cut"*) ok "the SHORT notice names the count it discarded" ;;
+  *) bad "the short notice names no 'chars cut' figure: $notice" ;;
+esac
+lost="$("$CB" --check --root="$cb2" 2>&1 | sed -n 's/.*abbreviated away: \([0-9,]*\) chars.*/\1/p' | tr -d ,)"
+if [ -n "$lost" ] && [ "$lost" -gt 0 ]; then
+  ok "the bill reports the loss ($lost chars) on the short-notice path"
+else
+  bad "the bill read '${lost:-empty}' while the hook was abbreviating -- fail-open"
+fi
+
+# Mutant control, PARTIAL on purpose: strip only the count from the fallback,
+# leaving the "hooks abbreviated to" phrase. A fully broken hook would fail for
+# any number of reasons; this one is the exact shape the old code shipped, and
+# the reader must refuse it instead of printing 0.
+sed 's/, \$lost chars cut)"$/)"/' "$cb2/inject-global-memory.sh" > "$cb2/hook.mut"
+mv "$cb2/hook.mut" "$cb2/inject-global-memory.sh"
+mutnotice="$(CLAUDE_GLOBAL_MEMORY_DIR="$cb2/memories/global" bash "$cb2/inject-global-memory.sh" | tail -1)"
+case "$mutnotice" in
+  *"chars cut"*) bad "the mutant still names a count -- the sed missed, so the control below proves nothing" ;;
+  *"hooks abbreviated to"*) ok "mutant control armed: abbreviating, naming no count" ;;
+  *) bad "the mutant stopped abbreviating entirely: $mutnotice" ;;
+esac
+if out="$("$CB" --check --root="$cb2" 2>&1)"; then
+  bad "an unmeasurable index-hook loss was reported as a number instead of refusing"
+elif echo "$out" | grep -q "names no 'N chars cut'"; then
+  ok "an unmeasurable loss FAILS CLOSED rather than reporting 0"
+else
+  bad "the check failed for the wrong reason: $out"
+fi
+
+# --- 9. the dangling-lane-pointer count, both directions -------------------
+# REPORT-ONLY by design (lane files are operational scratch in many repos; a
+# hard failure over them gets the guard switched off). So what is pinned is the
+# MEASUREMENT, in both directions: a pointer with no body anywhere is counted, a
+# pointer that resolves is not, and a lane-to-lane reference is not. A one-sided
+# test would pass for a scanner that counted every pointer, or for one that
+# counted none.
+lanes="$(mktemp -d)"
+trap 'rm -rf "$tmp" "$cb2" "$lanes"' EXIT
+mkdir -p "$lanes/lanes"
+real="$(ls "$ROOT/memories/global" | grep -v '^MEMORY.md$' | head -1)"; real="${real%.md}"
+printf 'cites a real memory [[%s]] and a made-up one [[zzz-no-such-lesson-anywhere]]\n' \
+  "$real" > "$lanes/lanes/alpha.md"
+printf 'cites the other lane [[alpha]] and the same made-up one [[zzz-no-such-lesson-anywhere]]\n' \
+  > "$lanes/lanes/beta.md"
+lp="$(CLAUDE_OPS_DIR="$lanes" python3 -c "
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('cb', '$CB')
+cb = importlib.util.module_from_spec(spec); spec.loader.exec_module(cb)
+r = cb.lane_pointers('$ROOT')
+print(r['lanes'], r['dangling'], ','.join(r['names']), r['counts'].get('zzz-no-such-lesson-anywhere'))
+")"
+set -- $lp
+if [ "$1" = 2 ] && [ "$2" = 1 ] && [ "$3" = "zzz-no-such-lesson-anywhere" ] && [ "$4" = 2 ]; then
+  ok "lane-pointer scan: counts the dangling one (2 lanes), not the resolving one, not the lane ref"
+else
+  bad "lane-pointer scan misread the fixture: got '$lp' (want '2 1 zzz-no-such-lesson-anywhere 2')"
+fi
+
+# An unreadable ledger must report NOT MEASURED, never 0: absence of a scan is
+# not absence of debt. Without this the metric reads perfect on every machine
+# that has no lane directory, which is every fresh clone.
+absent="$(CLAUDE_OPS_DIR="$lanes/nonexistent" python3 -c "
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('cb', '$CB')
+cb = importlib.util.module_from_spec(spec); spec.loader.exec_module(cb)
+r = cb.lane_pointers('$ROOT')
+print(repr(r['dangling']), '|', cb.lane_pointer_line(r))
+")"
+case "$absent" in
+  "None | dangling lane pointers: NOT MEASURED"*) ok "no ledger reports NOT MEASURED, not 0" ;;
+  *) bad "a missing ledger did not report NOT MEASURED: $absent" ;;
+esac
+
+# A project-local memory must RESOLVE a pointer. Resolving only against
+# memories/global/ is the measurement error this metric exists to prevent: a
+# 2026-09-17 inventory reported 8 dangling pointers cited by 2+ lanes, and all
+# of them had bodies in one project's store.
+# Pick a project memory that is NOT also in the global store, or the case would
+# pass on the global resolution and prove nothing about the project one.
+projmem=""
+for d in "$HOME"/.claude*/projects/*/memory; do
+  [ -d "$d" ] || continue
+  for f in "$d"/*.md; do
+    [ -f "$f" ] || continue
+    b="$(basename "$f" .md)"
+    [ "$b" = MEMORY ] && continue
+    [ -f "$ROOT/memories/global/$b.md" ] && continue
+    projmem="$b"; break
+  done
+  [ -n "$projmem" ] && break
+done
+if [ -n "$projmem" ]; then
+  printf 'cites a PROJECT memory [[%s]]\n' "$projmem" > "$lanes/lanes/gamma.md"
+  pd="$(CLAUDE_OPS_DIR="$lanes" python3 -c "
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('cb', '$CB')
+cb = importlib.util.module_from_spec(spec); spec.loader.exec_module(cb)
+print(','.join(cb.lane_pointers('$ROOT')['names']))
+")"
+  case "$pd" in
+    *"$projmem"*) bad "a pointer answered by a PROJECT memory was counted as dangling" ;;
+    *) ok "a project-local memory resolves its pointer (global-only would not)" ;;
+  esac
+  rm -f "$lanes/lanes/gamma.md"
+else
+  echo "  skip: no project memory store on this machine to resolve against"
+fi
+
 # --- 7. this test mutated nothing tracked ----------------------------------
 after="$(shasum "$ROOT/CLAUDE.md" "$ROOT/memories/global/MEMORY.md" | awk '{print $1}')"
 if [ "$before" = "$after" ]; then

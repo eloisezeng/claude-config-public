@@ -30,3 +30,18 @@ can SEE the change: `grep` the old name and require the error count to match the
 positive control on an unrelated line proves only that the file is read, not that the type came
 from the right tree. Same class as [[measure-what-reaches-context-not-disk]] and
 [[a-linked-config-file-can-become-a-copy]]: the artifact that ACTS is not the one you authored.
+
+**The MIRROR-IMAGE half-repair is worse than no repair, because it moves the symptom instead of
+removing it.** Measured 2026-09-05: a worktree whose `node_modules` held only a `.bin` link into the
+shared checkout and no packages made the `tsx` spawn SUCCEED, so the child then died on
+`Cannot find module '<worktree>/node_modules/tsx/dist/cli.mjs'` — a different error, a different
+failing set (60 tests across 6 files) and no `ENOENT` anywhere to match the documented signature, so
+it did not read as the known class at all. A bare `node_modules/*` glob is how you get there: it
+matches no dotfile, so it links every package and NOT `.bin`. Enumerate with a lister that sees
+dotfiles, link `.bin` AND the packages, then positively control it by re-running the exact failing
+subset on the SAME bytes before attributing anything to a diff. Note also that a real red can hide
+inside the phantom set — one repair turned 11 phantom files into one genuine failure the noise had
+been masking — so repair the worktree BEFORE concluding a suite is phantom-red end to end.
+A red whose count MOVES between runs of identical bytes is measuring the machine:
+[[a-red-suite-with-no-failing-test-lost-a-worker]] and
+[[a-build-dir-in-the-tree-reddens-whole-tree-guards]] are the same family.

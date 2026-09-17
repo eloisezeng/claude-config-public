@@ -133,8 +133,17 @@ if [ "${#out}" -gt "$budget" ]; then
     total_n="$(grep -c '^- ' <<<"$body")"
     # Both forms carry the same phrase "$nab hooks abbreviated to $cap chars", so a
     # test (and a reader) can key on one string whichever fired.
+    #
+    # BOTH forms also carry "$lost chars cut". They did not, and the short form's
+    # omission made the bill read ZERO at the moment it was largest: the long
+    # form's length grows with $idx, so a clone under a long root (a worktree path
+    # is ~46 chars longer than the live checkout's) falls back to the short form,
+    # and bin/context-budget.py's index_hook_chars_lost — which parses "chars cut"
+    # and treats its absence as 0 — then reported 0 chars lost while 71 of 116
+    # hooks were being abbreviated, i.e. its best possible value. A cap must NAME
+    # the count it discarded on every path that can fire.
     notice="… (all $total_n memories above are listed; $nab hooks abbreviated to $cap chars, $lost chars cut — read $idx for the full line)"
-    [ "${#notice}" -le "$reserve" ] || notice="… ($nab of $total_n hooks abbreviated to $cap chars)"
+    [ "${#notice}" -le "$reserve" ] || notice="… ($nab of $total_n hooks abbreviated to $cap chars, $lost chars cut)"
     # $body2 already ends in a newline and `printf '%s\n'` adds the final one.
     out="$header"$'\n\n'"$body2""$notice"
   fi

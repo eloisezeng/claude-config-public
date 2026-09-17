@@ -97,11 +97,39 @@ lane_key() {
 # because a --force re-dispatch can retarget the link between the first read
 # and the lock. The legacy .lock sweep is dispatch-only: no close predates the
 # .flock design, so there is no legacy claim a close could be racing.
+# lesson_ok <text> — true when the line NAMES a memory or declares none owed
+# with a reason. A memory slug is the only machine-checkable shape available:
+# three or more lowercase hyphen-separated words, which every memory in the
+# store satisfies (measured 2026-09-17 over the 232 global bodies: the minimum
+# hyphen count is 2, so this rule is satisfiable by every existing name as well
+# as failable — `[[a-guard-must-be-satisfiable-not-just-failable]]`).
+#
+# The check cannot verify that the memory was actually written, and does not
+# try: its whole job is to make the QUESTION unavoidable at the one moment the
+# answer is still cheap. "none" on its own is a free pass, so a `none` verdict
+# must carry a reason; a bare word is refused.
+lesson_ok() {
+  case "$1" in
+    none|none[!a-z0-9-]*) [ "${#1}" -ge 24 ] && return 0; return 1 ;;
+  esac
+  [[ "$1" =~ [a-z0-9]+(-[a-z0-9]+){2,} ]] && return 0
+  return 1
+}
+
 close_lane() {
   _cl_lane="${1:-}"; _cl_disp="${2:-}"
-  [ $# -ge 2 ] || die "usage: handoff.sh --close <lane-key> <completed|cancelled|superseded> [one-line note]"
+  [ $# -ge 2 ] || die "usage: handoff.sh --close <lane-key> <completed|cancelled|superseded> --lesson <memory-slug | 'none: <why>'> [one-line note]"
   shift 2
-  _cl_note="$*"
+  # --lesson may appear anywhere after the disposition; everything else is the
+  # free-form note, so an existing call's note keeps working unchanged.
+  _cl_lesson=""; _cl_note=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --lesson) need_val "$1" $# "${2:-}"; _cl_lesson="$2"; shift 2 ;;
+      --lesson=*) _cl_lesson="${1#--lesson=}"; shift ;;
+      *) _cl_note="${_cl_note:+$_cl_note }$1"; shift ;;
+    esac
+  done
   case "$_cl_lane" in
     ''|*[!0-9A-Za-z._-]*) die "--close: the lane key must be one token of [0-9A-Za-z._-] (got: ${_cl_lane:-empty}) — it is a pathname under $OPS_DIR/dispatches" ;;
   esac
@@ -112,6 +140,16 @@ close_lane() {
   if [ -n "$_cl_note" ]; then
     rec_ok_value "$_cl_note" || die "--close: the note must be a single line — a record value that spans lines can forge another field"
   fi
+  # THE LESSON IS REQUIRED. A lane is where a lesson is learned and the memory
+  # store is where it survives, and the gap between them is only ever closed by
+  # someone deciding to close it. Measured 2026-09-17 over 380 lane files: ten
+  # distinct lessons appeared in two or more lanes each — the same thing learned
+  # up to twelve times — with no memory anywhere. Asking at CLOSE time is the one
+  # moment the answer is both known and cheap, which is why it is a hard refusal
+  # rather than a reminder: a reminder is what the last year already was.
+  [ -n "$_cl_lesson" ] || die "--close: --lesson is required — name the memory this lane leaves behind (a slug, e.g. --lesson='wrote a-red-suite-with-no-failing-test-lost-a-worker') or say none is owed WITH a reason (--lesson='none: one-off config typo, nothing general'). Nothing else records what this lane taught."
+  rec_ok_value "$_cl_lesson" || die "--close: the lesson must be a single line — a record value that spans lines can forge another field"
+  lesson_ok "$_cl_lesson" || die "--close: --lesson must NAME a memory (three or more lowercase hyphen-separated words, the shape every memory slug has) or begin 'none' WITH a reason of at least a few words. Got: $_cl_lesson"
   _cl_link="$OPS_DIR/dispatches/$_cl_lane"
   [ -L "$_cl_link" ] || die "--close: no open dispatched lane named $_cl_lane in $OPS_DIR/dispatches — already closed, or never registered (non-dispatched lanes close by editing their file in $OPS_DIR/lanes)"
   _cl_rec="$(readlink "$_cl_link" 2>/dev/null)" || _cl_rec=""
@@ -135,6 +173,7 @@ close_lane() {
   _cl_rec2="$(readlink "$_cl_link" 2>/dev/null)" || _cl_rec2=""
   [ "$_cl_rec2" = "$_cl_rec" ] || die "--close: lane $_cl_lane was re-registered while this close was taking the lock (it now points at ${_cl_rec2:-nothing}, was $_cl_rec) — a re-dispatch owns it again; re-run --close only if the NEW dispatch is also to be closed"
   rec_put "$_cl_rec" disposition "$_cl_disp" || die "--close: cannot write the disposition into $_cl_rec — refusing to remove the lane from the open set without an audit line"
+  rec_put "$_cl_rec" lesson "$_cl_lesson" || die "--close: the disposition landed in $_cl_rec but the lesson did not — the lane is still open; re-run --close to finish"
   if [ -n "$_cl_note" ]; then
     rec_put "$_cl_rec" disposition_note "$_cl_note" || die "--close: the disposition landed in $_cl_rec but the note did not — the lane is still open; re-run --close to finish"
   fi
@@ -3091,7 +3130,7 @@ dispatch() {
   PROMPT="Read the handoff file at $FILE_ABS. It is your only context: nothing from the session that wrote it carries over.
 Objective: $OBJ
 Record progress back into that file as you go, so a stall is legible from the artifact.
-This work is lane $LANE in the operational ledger (~/.claude/ops/ — read its README.md once). Your session ending does NOT close the lane: when the objective is COMPLETE (or the work is cancelled or superseded), run: ~/dotfiles/claude/hooks/handoff.sh --close $LANE completed (or cancelled/superseded) with a one-line note; handing off onward with handoff.sh moves the lane automatically. Anything unresolved you discover and are NOT handing forward must be written to ~/.claude/ops/lanes/ before your window ends."
+This work is lane $LANE in the operational ledger (~/.claude/ops/ — read its README.md once). Your session ending does NOT close the lane: when the objective is COMPLETE (or the work is cancelled or superseded), run: ~/dotfiles/claude/hooks/handoff.sh --close $LANE completed (or cancelled/superseded) --lesson '<what this lane taught, naming the memory you wrote — or none: <why nothing general is owed>>' with a one-line note; the --lesson is REQUIRED and the close refuses without it, because a lesson that stays in a lane gets learned again by the next session; handing off onward with handoff.sh moves the lane automatically. Anything unresolved you discover and are NOT handing forward must be written to ~/.claude/ops/lanes/ before your window ends."
 
   # ADVISORY, not enforced: this is prose in a system prompt, and a same-user
   # session can do anything the user could. The launcher enforces ownership,
@@ -3358,7 +3397,7 @@ This work is lane $LANE in the operational ledger (~/.claude/ops/ — read its R
 }
 
 # ---------------------------------------------------------------------- main
-[ $# -gt 0 ] || die "usage: handoff.sh <handoff-file> <objective> [options] | --status | --watch <record> | --close <lane> <completed|cancelled|superseded> [note]"
+[ $# -gt 0 ] || die "usage: handoff.sh <handoff-file> <objective> [options] | --status | --watch <record> | --close <lane> <completed|cancelled|superseded> --lesson <memory-slug | 'none: <why>'> [note]"
 
 MODE_TAKEN=""
 case "$1" in
@@ -3426,6 +3465,6 @@ esac
 # reporting a shell error instead of the actual failure. Worse, with arguments
 # left over it would have DISPATCHED a successor nobody asked for.
 [ -z "$MODE_TAKEN" ] || die "$MODE_TAKEN did not complete (it failed before it could exit; see $LOG) — refusing to fall through to a dispatch"
-[ $# -gt 0 ] || die "usage: handoff.sh <handoff-file> <objective> [options]   (also --status, --watch <record>, --watch-once <record>, --close <lane> <disposition> [note], --help; --no-retire keeps this seat alive)"
+[ $# -gt 0 ] || die "usage: handoff.sh <handoff-file> <objective> [options]   (also --status, --watch <record>, --watch-once <record>, --close <lane> <disposition> --lesson <memory-slug | 'none: <why>'> [note], --help; --no-retire keeps this seat alive)"
 
 dispatch "$@"

@@ -155,6 +155,31 @@ The growth was broad suite growth — tests 3.9x, duration 6.5x, per-test cost o
 It bought scheduling room, not health.
 Always report a timeout raise together with the growth rate that forced it, so the next person knows when it will be hit again.
 
+### A scheduled workflow does not run when its cron says, and the top of the hour is the worst slot
+
+GitHub queues `schedule:` triggers and fires them late, by hours rather than minutes, and it is worst at round times because that is when everyone else's cron is also due.
+This does not change the bill, because the run is the same length whenever it starts.
+It changes the two things a schedule is usually chosen for: WHEN the result is ready, and who is awake to see a red one.
+
+Measured 2026-09-15 on a nightly full suite set to `0 8 * * *`.
+Across all five runs at that setting GitHub delayed the trigger by 3h47m, 4h56m, 6h33m and 4h59m, a median of about 4h56m, so the runs actually started between **07:47 and 10:33 America/New_York**.
+The workflow's own comment described it as a US-overnight run.
+It had never once run overnight, and nobody had checked, because a scheduled workflow gives no signal that it is late — it simply appears in the run list with a start time nobody reads.
+
+Three rules follow.
+
+- **Never write a time-of-day claim into a workflow comment without measuring it.**
+  Compare each run's `created_at` against the cron, and quote the delay.
+  The comment is where the wrong belief survives longest, because it reads as documentation rather than as an assumption.
+- **Choose an odd minute in a quiet hour**, not a round hour.
+  Pick the time so it is acceptable under both regimes, the delayed one and the undelayed one, because you cannot control which you get.
+- **The mitigation is unverified until you re-measure at the new time.**
+  The realised delay at an odd minute cannot be read off history if no run has ever used one.
+  Say so in the comment, and re-measure over the first week rather than assuming the move worked.
+
+The same reasoning applies to any schedule whose value is its timing: a nightly whose result is meant to be waiting in the morning, a soak meant to run off-peak, or a job timed to land before a working day starts.
+Where the timing genuinely does not matter, none of this does either.
+
 ## The interaction with the always-on directives
 
 Do not restate these here; they already fire on every turn.

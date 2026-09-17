@@ -77,6 +77,7 @@ existed nowhere else, so "the body already says it" was false.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -225,6 +226,7 @@ def measure(root: str) -> dict:
         "_directives": directives,
         "_index": idx,
         "_bodies": bodies,
+        "_lanes": lane_pointers(root),
     }
 
 
@@ -276,9 +278,113 @@ def hook_chars_lost(root: str) -> int:
 
     Zero when nothing is abbreviated. Parsed from the hook's own notice rather
     than recomputed, for the reason in run_hook().
+
+    FAILS CLOSED when the hook says it abbreviated but names no count. This is
+    not hypothetical: the hook has two notice forms, and only the long one used
+    to carry "N chars cut". The long one's length grows with the index path, so
+    under a long root (a worktree path runs ~46 chars longer than the live
+    checkout's) it fell back to the short form and this function returned 0 --
+    the metric's BEST possible value -- while 71 of 116 hooks were being cut, a
+    measured 7,958 chars. A bill that reads zero exactly when it is largest is
+    worse than no bill, so an unparseable notice raises instead.
     """
-    m = re.search(r"(\d+) chars cut", run_hook(root))
-    return int(m.group(1)) if m else 0
+    out = run_hook(root)
+    m = re.search(r"(\d+) chars cut", out)
+    if m:
+        return int(m.group(1))
+    if "hooks abbreviated to" in out:
+        raise SystemExit(
+            "context-budget: the injection abbreviated hooks but its notice "
+            "names no 'N chars cut' figure, so the loss cannot be measured. "
+            "Fix the notice in inject-global-memory.sh; do NOT report 0.")
+    return 0
+
+
+def memory_names(root: str) -> set[str]:
+    """Every memory slug this machine can resolve, across EVERY store.
+
+    The global store is not the whole corpus. Project-local memories live in
+    <config-root>/projects/<project>/memory, and a lane written inside a project
+    cites them by the same `[[slug]]` syntax. A scan that resolves only against
+    memories/global/ therefore reports a project memory as MISSING.
+
+    That is not hypothetical: it is the measurement error this metric exists to
+    prevent. A 2026-09-17 inventory reported "21 fully dangling pointers, 8 of
+    them cited by 2+ lanes" from a global-only scan. Re-resolved against every
+    store, all five multi-lane names already had bodies in one project's store,
+    and ZERO truly dangling pointers were cited by more than one lane.
+    """
+    names = set()
+    gdir = os.path.join(root, "memories", "global")
+    for fn in os.listdir(gdir):
+        if fn.endswith(".md") and fn != "MEMORY.md":
+            names.add(fn[:-3])
+    for d in glob.glob(os.path.expanduser("~/.claude*/projects/*/memory")):
+        try:
+            entries = os.listdir(d)
+        except OSError:
+            continue  # a store that cannot be read adds no names; see below
+        for fn in entries:
+            if fn.endswith(".md") and fn != "MEMORY.md":
+                names.add(fn[:-3])
+    return names
+
+
+def lane_pointers(root: str) -> dict:
+    """Dangling `[[pointers]]` in the lane ledger. REPORTED, never enforced.
+
+    A lane naming a lesson in pointer syntax with no body anywhere is a lesson
+    that was learned and not written down: the pointer reads like a link and
+    resolves to nothing, so the next session that follows it finds no artifact.
+    Counting them is the cheapest standing measure of how much the ledger owes
+    the memory store.
+
+    It is deliberately REPORT-ONLY. Lane files are operational scratch written
+    by many sessions in many repos, and a hard failure over them would fail runs
+    for reasons the committer cannot fix from inside this repo -- which is how a
+    guard gets switched off. See the REPORTED block for the same argument about
+    totals.
+
+    Two classes are excluded from the count rather than resolved:
+      * a pointer whose name matches a LANE file -- lanes cross-reference each
+        other in the same syntax, and that reference does resolve, to a lane;
+      * nothing else. A prose word in double brackets (`[[link]]`, `[[slug]]`)
+        counts as dangling on purpose, because it is indistinguishable from a
+        lesson name by any rule a scanner can apply, and the names are listed so
+        a reader can dismiss it in a second.
+
+    Returns `dangling=None` when the ledger cannot be read. An unscannable
+    ledger must never report 0 dangling pointers: absence of a scan is not
+    absence of debt.
+    """
+    ops = os.environ.get(
+        "CLAUDE_OPS_DIR",
+        os.path.join(os.environ.get("CLAUDE_CONFIG_DIR",
+                                    os.path.expanduser("~/.claude")), "ops"))
+    lanes_dir = os.path.join(ops, "lanes")
+    try:
+        files = sorted(fn for fn in os.listdir(lanes_dir) if fn.endswith(".md"))
+    except OSError:
+        return {"lanes": None, "dangling": None, "names": [], "where": lanes_dir}
+
+    known = memory_names(root)
+    lane_names = {fn[:-3] for fn in files}
+    cites: dict[str, set[str]] = {}
+    for fn in files:
+        with open(os.path.join(lanes_dir, fn), encoding="utf-8",
+                  errors="replace") as fh:
+            for p in re.findall(r"\[\[([a-z0-9][a-z0-9-]*)\]\]", fh.read()):
+                cites.setdefault(p, set()).add(fn)
+    dangling = {p: ls for p, ls in cites.items()
+                if p not in known and p not in lane_names}
+    return {
+        "lanes": len(files),
+        "cited": len(cites),
+        "dangling": len(dangling),
+        "names": sorted(dangling, key=lambda p: (-len(dangling[p]), p)),
+        "counts": {p: len(ls) for p, ls in dangling.items()},
+        "where": lanes_dir,
+    }
 
 
 def dropped_index_lines(memory_md: str, root: str) -> int:
@@ -334,6 +440,13 @@ METRICS = [
     ("index_max_bytes", "longest MEMORY.md index line"),
 ]
 
+# The dangling-lane-pointer count is reported too, by lane_pointer_line() rather
+# than from this table: it has no `targets` entry and no `limits` entry, so no
+# ratchet path can reach it, and it reads an artifact OUTSIDE this repo (the lane
+# ledger) whose contents this repo's committer cannot fix. Its target is
+# self-evidently 0 and it is printed with the member names, because a bare count
+# can only be believed.
+#
 # REPORTED, never enforced: the bill. These are what the corpus actually costs
 # per session, and they rise with honest growth -- so they are shown, with their
 # targets, and never used to fail a build. Hiding them would be worse: the point
@@ -345,6 +458,24 @@ REPORTED = [
     ("index_mean_bytes", "mean MEMORY.md index line", " B"),
     ("index_hook_chars_lost", "index hook text abbreviated away", " chars"),
 ]
+
+
+def lane_pointer_line(lanes: dict) -> str:
+    """One reported line for the lane-pointer debt, named members first.
+
+    A bare count can only be believed, so the line names up to four of the
+    dangling pointers with their lane counts. NOT MEASURED is printed distinctly
+    from 0: a clone with no lane ledger has not proved anything about the debt.
+    """
+    if lanes["dangling"] is None:
+        return (f"dangling lane pointers: NOT MEASURED (no ledger at "
+                f"{lanes['where']}) (not enforced, report-only)")
+    head = ", ".join(f"{p} x{lanes['counts'][p]}" for p in lanes["names"][:4])
+    more = f", +{len(lanes['names']) - 4} more" if len(lanes["names"]) > 4 else ""
+    tail = f" — {head}{more}" if head else ""
+    return (f"dangling lane pointers: {lanes['dangling']:,} of "
+            f"{lanes['cited']:,} cited across {lanes['lanes']:,} lanes "
+            f"(not enforced, report-only){tail}")
 
 
 def tokens(text: str):
@@ -402,6 +533,8 @@ def cmd_check(root: str) -> int:
         got, tgt = m[key], base["targets"][key]
         debt = f", {got - tgt:,}{unit} over target" if got > tgt else ", at target"
         print(f"      {label}: {got:,}{unit} (not enforced){debt}")
+
+    print("      " + lane_pointer_line(m["_lanes"]))
 
     if fail:
         print("\nThe context budget only ratchets DOWN. To land this change, "

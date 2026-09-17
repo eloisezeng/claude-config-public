@@ -40,6 +40,22 @@
         "hooks": [
           {
             "type": "command",
+            "command": "node \"$HOME/dotfiles/claude/hooks/repo-health-at-session-start.mjs\""
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$HOME/dotfiles/claude/hooks/memory-store-refresh.mjs\""
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
             "command": "bash \"$HOME/dotfiles/claude/inject-ops-lanes.sh\""
           }
         ]

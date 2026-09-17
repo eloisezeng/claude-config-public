@@ -33,6 +33,13 @@ push-to-main only, so every green tick beside a pull request was measuring the c
 merge. Tests that run after landing report on a break; tests that run on the pull request prevent
 one.
 
+**The same rule applies to the assertion's MESSAGE, and to which tree each side is derived from.**
+A set comparison that reports only cardinalities (`expected 283 to be 285`) gives the next session
+nothing to act on, and the usual cause is not a real violation at all but the two sides reading
+DIFFERENT trees — a name list derived from a fixed base against the PR head sha, and a file list
+from `git ls-files` over the checked-out merge ref. Intersect and NAME the member, and derive both
+sides from one tree: `[[a-count-only-assertion-cannot-name-what-is-missing]]`.
+
 Related: [[a-guard-must-be-satisfiable-not-just-failable]] · [[a-mention-is-not-a-property]] ·
 [[counting-a-set-is-not-classifying-it]] · [[verify-claims-against-artifacts]] ·
-[[a-subset-run-is-not-a-suite-run]]
+[[a-subset-run-is-not-a-suite-run]] · [[a-count-only-assertion-cannot-name-what-is-missing]]

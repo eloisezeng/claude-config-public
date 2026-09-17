@@ -16,6 +16,7 @@ The config repo (`claude-config`) keeps only `scope: global` memories.
 What a clone cannot do is put it where Claude Code reads: that path is `<config-root>/projects/<abs-path-with-every-/-replaced-by-->/memory/`, derived from the clone's absolute path.
 So make the harness path a **directory symlink** into the clone — never a copy.
 A copy gives one project two homes that drift apart silently.
+Point the link at a DEDICATED sparse clone outside the working checkout (on the default branch, marked `git config --local claude.memoryStore true`), never at the shared checkout, which sits on whatever branch was last used and which an isolated session may not write through; the SessionStart hook `hooks/memory-store-refresh.mjs` fast-forwards every marked store and reports a refusal, a git failure, or notes that exist only on this machine.
 `sync-memories.sh` will not fight this: `find -P -type f` does not descend a symlinked directory (verified with a `-L` control that DID see the file).
 
 Three traps, all measured on the your-project repo:

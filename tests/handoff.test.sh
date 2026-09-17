@@ -6256,14 +6256,42 @@ dy_chan()   { dy_sites "$1" | cut -d'|' -f1 | tr ',' '\n' | grep -c "^$2\$" | tr
 # record and owner as arguments and re-verifies them at act time. Set-diff of
 # dy_sites old vs new: that one sentence out, its reworded form in, 145 both
 # sides -- count unchanged, digest moved.
-assert_eq "$(dy_sites "$SCRIPT" | grep -c . | tr -d ' ')" "145" DY
-for _dyc in die:101 alert_once:22 prelaunch_die:6 notify:7 stderr:3 msgvar:6; do
+#   145 -> 149 and die 101 -> 105 with the 2026-09-17 REQUIRED --lesson on
+# --close, all four new sentences on the die channel, each read before the
+# numbers moved:
+#   * the lesson is MISSING -- says what the flag is for and gives both accepted
+#     shapes verbatim, because a refusal that does not show the accepted form
+#     costs the operator a second round trip;
+#   * the lesson spans LINES -- reuses the note's forgery wording, the same
+#     record-field-forging risk in the same surface;
+#   * the lesson is neither a memory name nor a reasoned "none" -- states the
+#     shape rule (three or more lowercase hyphen-separated words) and echoes
+#     what it got, so the operator can see which half it failed;
+#   * the lesson could not be WRITTEN into the record -- the fourth
+#     write-ordering refusal, in the form the other three already use (what
+#     landed, what did not, and that re-running --close finishes it).
+#   The three usage lines (close_lane's and both top-level ones) were REWORDED
+# to list --lesson, and the successor prompt now passes it -- count unchanged by
+# those, digest moved, which is the count/digest split working as designed.
+# None of the four names a mechanism it did not see.
+# The baseline counts, named ONCE and DERIVED at every control below. They used to
+# be restated at seven sites, and the 2026-09-17 --lesson round bumped only three:
+# the baseline loop moved die 101 -> 105 while both mutant controls went on asserting
+# 101, so the controls contradicted the very thing they exist to control and the
+# suite reddened on a number nobody chose. A control that neither adds nor removes a
+# message must read the SAME counts as the baseline. That is a RELATIONSHIP, not a
+# coincidence, and arithmetic is the only form of it a half-landed bump cannot
+# survive -- control 1 adds exactly one die site, so it says so.
+DY_SITES_N=149
+DY_DIE_N=105
+assert_eq "$(dy_sites "$SCRIPT" | grep -c . | tr -d ' ')" "$DY_SITES_N" DY
+for _dyc in "die:$DY_DIE_N" alert_once:22 prelaunch_die:6 notify:7 stderr:3 msgvar:6; do
   assert_eq "$(dy_chan "$SCRIPT" "${_dyc%%:*}")" "${_dyc##*:}" "DY ${_dyc%%:*}"
 done
 # every emitted row must carry all three fields and a real source line: a row
 # whose third field is empty or a comment would be a census counting itself.
 assert_eq "$(dy_sites "$SCRIPT" | awk -F'|' 'NF < 3 || $3 == "" || $3 ~ /^#/' | grep -c . | tr -d ' ')" "0" DY
-assert_eq "$(dy_digest "$SCRIPT")" "503ae92fd3d25cdd10b3992064644d381d7c60b143584ae523a9abc63a7a5e82" DY
+assert_eq "$(dy_digest "$SCRIPT")" "b9f450bbfc1091282a5af5ce6faface43b7e1736d13ac2df13cc3e783b5b0e7f" DY
 # Four controls, each the surviving mutant of a review round, whole-file.
 # 1. micro-review 8's: a new degraded probe whose refusal names a mount nothing
 #    observed -- the exact shape DU, DW and DX all stayed green on.
@@ -6275,7 +6303,7 @@ if cmp -s "$SCRIPT" "$DYMUT"; then
 elif ! bash -n "$DYMUT" 2>/dev/null; then
   echo "FAIL[DY]: the invented-cause mutant does not parse, so it proves nothing about the census above"; fail=1
 else
-  assert_eq "$(dy_sites "$DYMUT" | grep -c . | tr -d ' ')" "146" DY
+  assert_eq "$(dy_sites "$DYMUT" | grep -c . | tr -d ' ')" "$((DY_SITES_N + 1))" DY
   if [ "$(dy_digest "$DYMUT")" = "$(dy_digest "$SCRIPT")" ]; then
     echo "FAIL[DY]: a new operator message did not move the digest, so this census cannot see the shape it exists for"; fail=1
   fi
@@ -6290,7 +6318,7 @@ if cmp -s "$SCRIPT" "$DYMUT2"; then
 elif ! bash -n "$DYMUT2" 2>/dev/null; then
   echo "FAIL[DY]: the reword mutant does not parse, so it proves nothing about the census above"; fail=1
 else
-  assert_eq "$(dy_sites "$DYMUT2" | grep -c . | tr -d ' ')" "145" DY
+  assert_eq "$(dy_sites "$DYMUT2" | grep -c . | tr -d ' ')" "$DY_SITES_N" DY
   if [ "$(dy_digest "$DYMUT2")" = "$(dy_digest "$SCRIPT")" ]; then
     echo "FAIL[DY]: a REWORDED operator message did not move the digest, so this census counts sentences rather than freezing them"; fail=1
   fi
@@ -6306,8 +6334,8 @@ if cmp -s "$SCRIPT" "$DYMUT3"; then
 elif ! bash -n "$DYMUT3" 2>/dev/null; then
   echo "FAIL[DY]: the message-variable mutant does not parse, so it proves nothing about the census above"; fail=1
 else
-  assert_eq "$(dy_sites "$DYMUT3" | grep -c . | tr -d ' ')" "145" DY
-  assert_eq "$(dy_chan "$DYMUT3" die)" "101" DY
+  assert_eq "$(dy_sites "$DYMUT3" | grep -c . | tr -d ' ')" "$DY_SITES_N" DY
+  assert_eq "$(dy_chan "$DYMUT3" die)" "$DY_DIE_N" DY
   if [ "$(dy_digest "$DYMUT3")" = "$(dy_digest "$SCRIPT")" ]; then
     echo "FAIL[DY]: an invented cause written into a message VARIABLE did not move the digest, so the census still reads only the channel line"; fail=1
   fi
@@ -6341,8 +6369,8 @@ if cmp -s "$SCRIPT" "$DYMUT4"; then
 elif ! bash -n "$DYMUT4" 2>/dev/null; then
   echo "FAIL[DY]: the permutation mutant does not parse, so it proves nothing about the census above"; fail=1
 else
-  assert_eq "$(dy_sites "$DYMUT4" | grep -c . | tr -d ' ')" "145" DY
-  assert_eq "$(dy_chan "$DYMUT4" die)" "101" DY
+  assert_eq "$(dy_sites "$DYMUT4" | grep -c . | tr -d ' ')" "$DY_SITES_N" DY
+  assert_eq "$(dy_chan "$DYMUT4" die)" "$DY_DIE_N" DY
   if [ "$(dy_litdigest "$DYMUT4")" != "$(dy_litdigest "$SCRIPT")" ]; then
     echo "FAIL[DY]: the permutation control changed the SET of messages, so it is a reword and cannot show what site binding buys"; fail=1
   fi
@@ -6847,13 +6875,13 @@ assert_eq "$code" "0" LANE-1
 assert_eq "$(ls "$CLAUDE_OPS_DIR/dispatches" 2>/dev/null | grep -c '^HANDOFF-lane1-')" "1" LANE-1
 
 # ---- LANE-2. --close stamps the disposition and removes the entry -----------
-out="$(bash "$SCRIPT" --close "$LN1_LANE" completed "done in test" 2>&1)"; code=$?
+out="$(bash "$SCRIPT" --close "$LN1_LANE" completed --lesson='pinned by a-sessionstart-hook-runs-in-bursts' "done in test" 2>&1)"; code=$?
 assert_eq "$code" "0" LANE-2
 assert_rec "$LN1_REC" "disposition=completed" LANE-2
 assert_rec "$LN1_REC" "disposition_note=done in test" LANE-2
 [ ! -L "$CLAUDE_OPS_DIR/dispatches/$LN1_LANE" ] || { echo "FAIL[LANE-2]: the closed lane's ledger entry survived"; fail=1; }
 # a second close refuses: the lane is no longer in the open set
-out="$(bash "$SCRIPT" --close "$LN1_LANE" completed 2>&1)"; code=$?
+out="$(bash "$SCRIPT" --close "$LN1_LANE" completed --lesson='pinned by a-sessionstart-hook-runs-in-bursts' 2>&1)"; code=$?
 [ "$code" != "0" ] || { echo "FAIL[LANE-2]: closing an already-closed lane must refuse"; fail=1; }
 assert_contains "no open dispatched lane" "$out" LANE-2
 
@@ -6871,12 +6899,12 @@ assert_contains "one token" "$out" LANE-3
 # dangling: the record is gone; the close must refuse AND leave the link, because
 # silently dropping the lane is exactly the disappearance the ledger exists to stop
 mv "$LN3_HO.dispatch" "$LN3_HO.dispatch.hidden"
-out="$(bash "$SCRIPT" --close "$LN3_LANE" completed 2>&1)"; code=$?
+out="$(bash "$SCRIPT" --close "$LN3_LANE" completed --lesson='pinned by a-sessionstart-hook-runs-in-bursts' 2>&1)"; code=$?
 [ "$code" != "0" ] || { echo "FAIL[LANE-3]: a dangling lane was closed without its record"; fail=1; }
 assert_contains "investigate" "$out" LANE-3
 [ -L "$CLAUDE_OPS_DIR/dispatches/$LN3_LANE" ] || { echo "FAIL[LANE-3]: the dangling link was dropped -- a lane must err open, never closed"; fail=1; }
 mv "$LN3_HO.dispatch.hidden" "$LN3_HO.dispatch"
-bash "$SCRIPT" --close "$LN3_LANE" cancelled "test cleanup" >/dev/null 2>&1
+bash "$SCRIPT" --close "$LN3_LANE" cancelled --lesson='pinned by a-sessionstart-hook-runs-in-bursts' "test cleanup" >/dev/null 2>&1
 
 # ---- LANE-3b. an unwritable record refuses the close BEFORE the link moves ---
 # The write-before-remove ordering is the whole audit guarantee, and the mutant
@@ -6891,13 +6919,13 @@ LN3B_HO="$(NEWHO lane3b)"
 GOF "$LN3B_HO" "for the write-refusal pin" >/dev/null 2>&1
 LN3B_LANE="$(sed -n 's/^lane=//p' "$LN3B_HO.dispatch" 2>/dev/null | tail -1)"
 chmod 444 "$LN3B_HO.dispatch"
-out="$(bash "$SCRIPT" --close "$LN3B_LANE" completed 2>&1)"; code=$?
+out="$(bash "$SCRIPT" --close "$LN3B_LANE" completed --lesson='pinned by a-sessionstart-hook-runs-in-bursts' 2>&1)"; code=$?
 [ "$code" != "0" ] || { echo "FAIL[LANE-3b]: a close whose audit line could not be written still succeeded"; fail=1; }
 assert_contains "without an audit line" "$out" LANE-3b
 [ -L "$CLAUDE_OPS_DIR/dispatches/$LN3B_LANE" ] || { echo "FAIL[LANE-3b]: the link was removed although the record took no disposition"; fail=1; }
 grep -q '^disposition=' "$LN3B_HO.dispatch" && { echo "FAIL[LANE-3b]: a disposition line landed in a 444 record -- the refusal fired for the wrong reason"; fail=1; }
 chmod 644 "$LN3B_HO.dispatch"
-bash "$SCRIPT" --close "$LN3B_LANE" cancelled "test cleanup" >/dev/null 2>&1
+bash "$SCRIPT" --close "$LN3B_LANE" cancelled --lesson='pinned by a-sessionstart-hook-runs-in-bursts' "test cleanup" >/dev/null 2>&1
 
 # ---- LANE-3c. --close refuses while a dispatch holds the lane's lock ---------
 # F1 of the 2026-08-31 review: close used to read the link and remove it without
@@ -6924,13 +6952,13 @@ perl -e '
 LN3C_HOLDER=$!
 n=0; while [ ! -s "$tmp/lane3c-held" ] && [ "$n" -lt 100 ]; do sleep 0.1; n=$(( n + 1 )); done
 [ -s "$tmp/lane3c-held" ] || { echo "FAIL[LANE-3c]: the background holder never took the lock, so this case proves nothing"; fail=1; }
-out="$(bash "$SCRIPT" --close "$LN3C_LANE" completed "should be refused" 2>&1)"; code=$?
+out="$(bash "$SCRIPT" --close "$LN3C_LANE" completed --lesson='pinned by a-sessionstart-hook-runs-in-bursts' "should be refused" 2>&1)"; code=$?
 [ "$code" != "0" ] || { echo "FAIL[LANE-3c]: a close racing a held dispatch lock still succeeded"; fail=1; }
 assert_contains "running right now" "$out" LANE-3c
 [ -L "$CLAUDE_OPS_DIR/dispatches/$LN3C_LANE" ] || { echo "FAIL[LANE-3c]: the refused close still removed the lane's ledger entry"; fail=1; }
 assert_missing "disposition=" "$(cat "$LN3C_REC" 2>/dev/null)" LANE-3c
 kill "$LN3C_HOLDER" 2>/dev/null; wait "$LN3C_HOLDER" 2>/dev/null
-out="$(bash "$SCRIPT" --close "$LN3C_LANE" completed "lock released" 2>&1)"; code=$?
+out="$(bash "$SCRIPT" --close "$LN3C_LANE" completed --lesson='pinned by a-sessionstart-hook-runs-in-bursts' "lock released" 2>&1)"; code=$?
 assert_eq "$code" "0" LANE-3c
 assert_rec "$LN3C_REC" "disposition=completed" LANE-3c
 [ ! -L "$CLAUDE_OPS_DIR/dispatches/$LN3C_LANE" ] || { echo "FAIL[LANE-3c]: the positive-control close left the ledger entry behind"; fail=1; }
@@ -6952,7 +6980,7 @@ LN3D_LANE="$(sed -n 's/^lane=//p' "$LN3D_REC" 2>/dev/null | tail -1)"
 [ -n "$LN3D_LANE" ] || { echo "FAIL[LANE-3d]: the fixture dispatch registered no lane"; fail=1; }
 LN3D_DECOY="$tmp/work/HANDOFF-lane3d-decoy.md.dispatch"
 printf 'session_id=ffff9999\nstate=verified\nobjective=the colliding re-registration\n' > "$LN3D_DECOY"
-out="$(CLAUDE_HANDOFF_CLOSE_RETARGET_DEBUG="$LN3D_DECOY" bash "$SCRIPT" --close "$LN3D_LANE" completed "should be refused" 2>&1)"; code=$?
+out="$(CLAUDE_HANDOFF_CLOSE_RETARGET_DEBUG="$LN3D_DECOY" bash "$SCRIPT" --close "$LN3D_LANE" completed --lesson='pinned by a-sessionstart-hook-runs-in-bursts' "should be refused" 2>&1)"; code=$?
 [ "$code" != "0" ] || { echo "FAIL[LANE-3d]: a close whose lane was re-registered mid-close still succeeded"; fail=1; }
 assert_contains "re-registered" "$out" LANE-3d
 [ "$(readlink "$CLAUDE_OPS_DIR/dispatches/$LN3D_LANE" 2>/dev/null)" = "$LN3D_DECOY" ] || {
@@ -6962,9 +6990,57 @@ assert_missing "disposition=" "$(cat "$LN3D_REC" 2>/dev/null)" LANE-3d
 # Positive control: with the link restored and the seam off, the same close
 # succeeds -- or the refusal above could be a close that never works at all.
 ln -sfn "$LN3D_REC" "$CLAUDE_OPS_DIR/dispatches/$LN3D_LANE"
-out="$(bash "$SCRIPT" --close "$LN3D_LANE" completed "seam off" 2>&1)"; code=$?
+out="$(bash "$SCRIPT" --close "$LN3D_LANE" completed --lesson='pinned by a-sessionstart-hook-runs-in-bursts' "seam off" 2>&1)"; code=$?
 assert_eq "$code" "0" LANE-3d
 assert_rec "$LN3D_REC" "disposition=completed" LANE-3d
+
+# ---- LANE-3e. the LESSON is required, and the lane survives a refusal --------
+# A lane is where a lesson is learned and the memory store is where it survives.
+# Measured 2026-09-17 over 380 lane files: ten distinct lessons appeared in two
+# or more lanes each -- the same thing learned up to twelve times -- with no
+# memory anywhere. The close is the one moment the answer is known and cheap, so
+# it is a hard refusal. What is pinned here is that refusal AND its two escapes:
+# naming a memory, and declaring none owed WITH a reason. A one-sided test would
+# pass for a gate that refused everything.
+live_json "running"
+LN3E_HO="$(NEWHO lane3e)"
+GOF "$LN3E_HO" "for the lesson gate" >/dev/null 2>&1
+LN3E_REC="$LN3E_HO.dispatch"
+LN3E_LANE="$(sed -n 's/^lane=//p' "$LN3E_REC" 2>/dev/null | tail -1)"
+[ -n "$LN3E_LANE" ] || { echo "FAIL[LANE-3e]: the fixture dispatch registered no lane"; fail=1; }
+# no --lesson at all: refused, and NOTHING moves
+out="$(bash "$SCRIPT" --close "$LN3E_LANE" completed "no lesson given" 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[LANE-3e]: a close with no --lesson succeeded"; fail=1; }
+assert_contains "--lesson is required" "$out" LANE-3e
+[ -L "$CLAUDE_OPS_DIR/dispatches/$LN3E_LANE" ] || { echo "FAIL[LANE-3e]: the refused close still removed the lane"; fail=1; }
+assert_missing "disposition=" "$(cat "$LN3E_REC" 2>/dev/null)" LANE-3e
+# a bare word is not a lesson, and a bare "none" is not a reason -- the two
+# shapes the gate exists to refuse, since either would make it decorative
+for bad_lesson in "done" "none" "fixed it"; do
+  out="$(bash "$SCRIPT" --close "$LN3E_LANE" completed --lesson="$bad_lesson" 2>&1)"; code=$?
+  [ "$code" != "0" ] || { echo "FAIL[LANE-3e]: --lesson='$bad_lesson' was accepted"; fail=1; }
+  assert_contains "must NAME a memory" "$out" LANE-3e
+done
+# a multi-line lesson cannot forge another record field
+out="$(bash "$SCRIPT" --close "$LN3E_LANE" completed --lesson="$(printf 'a-real-memory-name\nstate=verified')" 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[LANE-3e]: a multi-line lesson was accepted"; fail=1; }
+assert_contains "must be a single line" "$out" LANE-3e
+# ESCAPE 1: a named memory. Succeeds, and the name lands in the record.
+out="$(bash "$SCRIPT" --close "$LN3E_LANE" completed --lesson="wrote a-sessionstart-hook-runs-in-bursts" "with a lesson" 2>&1)"; code=$?
+assert_eq "$code" "0" LANE-3e
+assert_rec "$LN3E_REC" "lesson=wrote a-sessionstart-hook-runs-in-bursts" LANE-3e
+assert_rec "$LN3E_REC" "disposition_note=with a lesson" LANE-3e
+# ESCAPE 2: none owed, with a reason. Without this the gate would be
+# unsatisfiable for the many lanes that genuinely teach nothing general.
+live_json "running"
+LN3F_HO="$(NEWHO lane3f)"
+GOF "$LN3F_HO" "for the none escape" >/dev/null 2>&1
+LN3F_REC="$LN3F_HO.dispatch"
+LN3F_LANE="$(sed -n 's/^lane=//p' "$LN3F_REC" 2>/dev/null | tail -1)"
+out="$(bash "$SCRIPT" --close "$LN3F_LANE" completed --lesson="none: a one-off typo in one config file" 2>&1)"; code=$?
+assert_eq "$code" "0" LANE-3f
+assert_rec "$LN3F_REC" "lesson=none: a one-off typo in one config file" LANE-3f
+[ ! -L "$CLAUDE_OPS_DIR/dispatches/$LN3F_LANE" ] || { echo "FAIL[LANE-3f]: the closed lane's ledger entry survived"; fail=1; }
 
 # ---- LANE-4. registration is fail-closed: no ledger, no launch --------------
 # The mutant this pins: an `|| true` on the ln/mkdir would launch an

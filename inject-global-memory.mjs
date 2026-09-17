@@ -102,7 +102,13 @@ if (out.length > BUDGET) {
       `abbreviated to ${cap} chars, ${lost} chars cut — read ${dir}/MEMORY.md ` +
       `for the full line)`;
     if (notice.length > RESERVE) {
-      notice = `\u2026 (${abbreviated} of ${total} hooks abbreviated to ${cap} chars)`;
+      // The SHORT form still carries `${lost} chars cut`. Without it the loss is
+      // unmeasurable on exactly the runs where it is largest, and the reader in
+      // bin/context-budget.py reports 0 chars lost over a run that cut thousands
+      // -- a bill that reads zero is worse than no bill. Kept identical to the
+      // bash hook's short form, which tests/inject-budget-parity.test.sh compares
+      // byte for byte.
+      notice = `\u2026 (${abbreviated} of ${total} hooks abbreviated to ${cap} chars, ${lost} chars cut)`;
     }
     out = header + lines.join('\n') + '\n' + notice + '\n';
   }

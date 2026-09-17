@@ -42,6 +42,16 @@ reason in the 2026-09-08 section below), and refuse an empty derived set as a pa
 than reading it as a pass. Working implementation:
 `~/.claude/bin/ci-green.sh` + `ci-derive.py`.
 
+**Presence has an ordering half too: a ROLLUP JOB publishes its own check-run AFTER the jobs it
+reads.** A rollup (`needs: [...]` + `if: always()`) cannot start until its inputs finish, so there
+is a real window in which every job you can see has concluded and the one name branch protection
+actually requires has not appeared yet. Measured 2026-09-15: a detector armed on the six jobs
+present at arm time read SETTLED while the required rollup `test + typecheck` was still to come,
+and only the act-time re-check reading `--required` explicitly caught it before a merge. The
+derived-expected-set rule above already covers this, because a rollup job is a job in the workflow
+and lands in the derived set — but a detector that snapshots "the jobs that exist right now"
+instead of deriving them will miss it every time, and it will miss it silently.
+
 **One NAME can carry several check-runs, and keying by name fails open a third time.** Measured
 2026-09-01 auditing `ci-derive.py` itself: it built `{name: (status, conclusion)}`, so a second
 check-run under the same name — a `workflow_dispatch` run alongside the `pull_request` one, or a
@@ -124,6 +134,23 @@ Two separate causes, and both are the same mistake at different scopes:
 The asymmetry that decides every one of these calls: an unsatisfiable required set is WORSE than a
 narrow fail-open hole, because a job that did register is still checked for greenness by the rows
 loop, while a job that never registers can never be made green by any commit.
+
+**A CORRECT exclusion can still leave its subject with no reporter at all — ask that question in
+the same change.** Dropping the schedule-only jobs from a commit-scoped verdict is right, and
+everything above argues for it. What it also did was leave the nightly full suite, which by then
+was the ONLY full-suite run anywhere, reported by nothing: `ci-green.sh` answered `VERDICT: GREEN`
+for a pull-request sha on 2026-09-14/15 while that workflow was red on the default branch, and it
+stayed red for **44 hours**. The detection worked perfectly and twice; the silence was total, and
+the pull request that eventually repaired the defect said in its own message that nothing had
+caught it. Note the shape: nobody made a mistake at the exclusion. The exclusion was the correct
+scoping decision, and the gap opened underneath it.
+
+The general form, which is wider than CI: **whenever you correctly exclude something from a
+verdict, name what still REPORTS it, and if the answer is nothing, that is the change's own
+finding.** The fix is not to widen the verdict — that re-introduces the unsatisfiability the
+exclusion existed to avoid — but to add a second, differently-scoped channel. Here that is an
+advisory printed beside the verdict without touching it or its exit code, plus an ops lane that
+restates until the run goes green. Both are cheap precisely because they are not the verdict.
 
 Two things this cost that are worth carrying:
 the pre-existing test pinning the base-union rule went red on the correct fix, and its comment — "a

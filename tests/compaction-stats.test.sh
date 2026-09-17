@@ -122,7 +122,7 @@ assert_contains "p90 <= 3"                        "$b_out" "B: target is stated"
 # ---------------------------------------------------------------------------
 # C: the fixture carries no project directory name into the public mirror
 # ---------------------------------------------------------------------------
-leak="$(grep -ciE 'your-module|netorg|orgnet|your-other-project|arbitrage|lavish|example-co|Coding' "$FIXTURE" || true)"
+leak="$(grep -ciE 'your-module|netorg|orgnet|your-other-project|your-data-product|lavish|example-co|Coding' "$FIXTURE" || true)"
 assert_eq "$leak" "0" "C: no project name in the pinned fixture"
 # The fixture is the baseline the verdict compares against. An unremarked edit
 # to it would redefine success without changing a line of code, so its content

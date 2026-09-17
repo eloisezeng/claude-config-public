@@ -96,4 +96,47 @@ if ! gh api "repos/$REPO/commits/$FULL/check-runs" --paginate \
   rm -rf $D; exit 2
 fi
 python3 "$(dirname "$0")/ci-derive.py" "$FULL" "$D"
-rc=$?; rm -rf $D; exit $rc
+rc=$?; rm -rf $D
+
+# ---------------------------------------------------------------------------------------------
+# ADVISORY ONLY: the health of the default branch's SCHEDULED backstop.
+#
+# This deliberately does NOT touch $rc. The verdict above is a question about ONE COMMIT, and
+# ci-derive.py is right to drop schedule-triggered workflows from the expected set: a scheduled
+# run never registers a check against a sha, so requiring one would report NOT-GREEN forever.
+#
+# But "correctly excluded from the verdict" turned into "never mentioned at all", and that silence
+# cost 44 hours. Measured 2026-09-14/15 on your-org/your-other-project: the nightly full suite --
+# the only full-suite run anywhere, and the backstop that makes the per-pull-request affected-test
+# selection defensible -- was red on `main` two nights running. Running this script on any PR sha
+# in that window printed VERDICT: GREEN and said nothing. The pull request that eventually fixed
+# the failure stated in its own commit message that "nothing caught it", because nobody could see
+# what had.
+#
+# So: same verdict, one more sentence. Fail open and stay quiet on any error -- an advisory that
+# breaks the tool it advises is worse than the silence it replaces.
+# ---------------------------------------------------------------------------------------------
+{
+  default_branch=$(gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name 2>/dev/null)
+  if [ -n "$default_branch" ] && [ -d .github/workflows ]; then
+    for wf in .github/workflows/*.yml .github/workflows/*.yaml; do
+      [ -e "$wf" ] || continue
+      grep -qE '^[[:space:]]*schedule:' "$wf" || continue
+      base=$(basename "$wf")
+      read -r st cc < <(gh api \
+        "repos/$REPO/actions/workflows/$base/runs?branch=$default_branch&per_page=1" \
+        --jq '.workflow_runs[0] | "\(.status) \(.conclusion)"' 2>/dev/null)
+      [ "$st" = "completed" ] || continue
+      case "$cc" in
+        failure|timed_out)
+          echo "ADVISORY: the scheduled backstop '$base' is $cc on $default_branch of $REPO."
+          echo "ADVISORY:   The verdict above is about $FULL alone and is unaffected. A red backstop"
+          echo "ADVISORY:   means a failure the per-PR test selection let through is already merged."
+          echo "ADVISORY:   https://github.com/$REPO/actions/workflows/$base"
+          ;;
+      esac
+    done
+  fi
+} 2>/dev/null || true
+
+exit $rc

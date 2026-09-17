@@ -29,9 +29,16 @@ if command -v node >/dev/null 2>&1; then
   sh_n="$(printf '%s\n' "$sh_out" | grep -c '^- ')"
   mjs_n="$(printf '%s\n' "$mjs_out" | grep -c '^- ')"
   if [ "$sh_out" != "$mjs_out" ]; then
+    # Report the DIFFERING LINES, not just the entry counts. The counts agreed at
+    # 116 on both sides while the outputs differed by one notice line, so the old
+    # message printed two equal numbers under the word "drift" and named nothing to
+    # act on -- a failure report that sends the reader back to the subject to find
+    # out what failed. The diff is the evidence; the counts are context.
     echo "FAIL: injection OUTPUT drift — sh keeps $sh_n entries, mjs keeps $mjs_n"
-    echo "      (same budget, different result: check byte-vs-char slicing and the"
-    echo "       index-compaction rewrite in both runtimes)"
+    echo "      differing lines (< bash, > node):"
+    diff <(printf '%s\n' "$sh_out") <(printf '%s\n' "$mjs_out") | sed 's/^/      /' | head -12
+    echo "      (check byte-vs-char slicing, the notice text in BOTH runtimes, and"
+    echo "       the index-compaction rewrite)"
     fail=1
   else
     echo "  ok: both runtimes emit identical output ($sh_n entries)"
