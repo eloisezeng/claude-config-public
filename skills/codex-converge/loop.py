@@ -829,6 +829,58 @@ def round_findings(events: Sequence[Mapping], track: str, rnd: int) -> tuple[lis
     return list(dict.fromkeys(ids)), unreadable
 
 
+def unledgered_verdicts(arc: str, events: Sequence[Mapping]) -> list[str]:
+    """Review verdicts sitting in the arc directory that no ledgered review names.
+
+    MEASURED 2026-10-28 on arc `jobs/66648556/tmp`: 86 findings across the verdict files on disk,
+    80 across the reviews the ledger recorded. The 6 were `process-critique.verdict.json`, launched
+    with `run-codex.sh --one-off` -- which schedules into a THROWAWAY arc, so the real arc's ledger
+    never heard of it. Every gate here reads the ledger, so a verdict the ledger never heard of is
+    not undispositioned, it is ABSENT: nothing counts it and nothing can hold a round open over it.
+    The write path (`review record`) only helps a session that calls it; this is the read that
+    notices the session that did not.
+
+    A verdict is identified by CONTENT, never by file name: any top-level `*.json` in the arc that
+    parses as an object carrying a `findings` list, because that is exactly what `round_findings`
+    counts and a naming convention is something a caller can skip. It is LEDGERED when a `review`
+    start event on a real (non-one-off) track names it as `out`. A one-off-track event does not
+    count: `arc_rounds` excludes that track, so its findings reach no gate either and it is the
+    same hole by another route.
+
+    Bound, stated rather than glossed: only the arc directory itself is scanned (not `verdicts/`,
+    which holds the loop's own kept copies, and not subdirectories), so a verdict written somewhere
+    else entirely is still invisible. The arc directory is where `run-codex.sh` and every arc in
+    this skill write, which is what makes this the cheap read that catches the measured case.
+    """
+    # Only the start event's `out` is consulted: the end event's kept `verdict` always lives under
+    # `verdicts/`, which this never scans, so reading it would be a branch no input can reach.
+    named = {os.path.realpath(str(ev['out'])) for ev in events
+             if ev.get('ev') == 'start' and ev.get('kind') == 'review' and ev.get('out')
+             and str(ev.get('track')) not in ('', 'None', ONE_OFF_TRACK)}
+    found: list[str] = []
+    for path in sorted(glob.glob(os.path.join(glob.escape(arc), '*.json'))):
+        try:
+            with open(path, encoding='utf-8') as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(doc, dict) or not isinstance(doc.get('findings'), list):
+            continue
+        if os.path.realpath(path) not in named:
+            found.append(path)
+    return found
+
+
+def render_unledgered(arc: str, paths: Sequence[str]) -> str:
+    """The remedy for `unledgered_verdicts`, one ready-to-run command per file."""
+    return '\n'.join(
+        '    python3 {}/loop.py review record --arc {} --track <T> --round <N> --name {} '
+        '--party codex|claude --verdict {}'
+        .format(HERE, shlex.quote(arc),
+                shlex.quote(os.path.basename(p).split('.')[0] or 'review'), shlex.quote(p))
+        for p in paths)
+
+
 #: Why a review name is refused. One value per REMEDY, because the two refusals are not repaired
 #: the same way: a review writing ELSEWHERE is given its own `--name`, while a name whose review
 #: already succeeded is SPENT for this round and cannot be reused at any path, including its own.
@@ -3825,6 +3877,13 @@ def cmd_close_round(args) -> int:
         for lid in triggered:
             print(f'  python3 {HERE}/loop.py lever --arc {shlex.quote(arc)} --track {shlex.quote(str(args.track))} '
                   f'--round {args.round} --id {lid} --state landed|declined --note "..."')
+    # REPORT, not refuse: a stray verdict need not belong to THIS round, so closing over it is not
+    # wrong here -- but `converge` will refuse over it, and this is the earliest the count is cheap.
+    stray = unledgered_verdicts(arc, ledger_read(arc))
+    if stray:
+        print('\nUNLEDGERED: {} review verdict(s) in the arc directory are named by no ledgered '
+              'review; `converge` will refuse until each is recorded:\n{}'
+              .format(len(stray), render_unledgered(arc, stray)))
     return 0
 
 
@@ -4147,6 +4206,15 @@ def cmd_converge(args) -> int:
         refusals.append('  {} review verdict(s) cannot be read, so a round\'s finding count is '
                         'UNKNOWN and unknown is not zero — {}'
                         .format(len(unreadable_all), '; '.join(unreadable_all)))
+    # REFUSE, not report: converge is the one place the claim "every finding is accounted for" is
+    # made, and a verdict no ledgered review names is a set of findings that claim silently omits.
+    stray = unledgered_verdicts(arc, events)
+    if stray:
+        refusals.append('  {} review verdict(s) in the arc directory are named by no ledgered '
+                        'review, so their findings are counted by nothing — ledger each one '
+                        '(then disposition its findings), or move a file that is not a review of '
+                        'this arc out of {}:\n{}'
+                        .format(len(stray), arc, render_unledgered(arc, stray)))
     verdict, errs = check_ranges(arc, repo, args.range, events, ranges_read(arc))
     if errs:
         refusals.extend('  ' + e for e in errs)

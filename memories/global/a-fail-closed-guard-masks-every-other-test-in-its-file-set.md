@@ -36,6 +36,5 @@ Two corollaries worth carrying:
   indistinguishable at review time, so the count is what you report.
 
 Related: [[a-build-dir-in-the-tree-reddens-whole-tree-guards]] ·
-[[a-rename-sweep-takes-its-census-from-the-guard]] ·
 [[a-red-suite-with-no-failing-test-lost-a-worker]] ·
 [[a-guard-must-be-satisfiable-not-just-failable]]

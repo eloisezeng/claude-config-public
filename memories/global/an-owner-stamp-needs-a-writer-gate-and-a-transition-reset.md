@@ -37,5 +37,4 @@ full truth table over (stored owner) x (viewer state) and assert every dispositi
 Reproduce both the expiry and the failed-read paths in a browser before fixing.
 
 Related: [[encode-the-invariant-in-the-shape-not-another-guard]],
-[[a-validated-write-surface-has-an-unvalidated-sibling]],
-[[widening-a-value-type-gets-no-compiler-census]].
+[[a-validated-write-surface-has-an-unvalidated-sibling]].

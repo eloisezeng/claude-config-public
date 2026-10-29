@@ -14,6 +14,7 @@ import io
 import json
 import os
 import random
+import re
 import shutil
 import signal
 import stat
@@ -4650,6 +4651,99 @@ class TestConvergeCannotBeDeclaredWithAnOpenRound(unittest.TestCase):
                       '--out', os.path.join(f.s.dir, 'c.json'))
         self.assertEqual(out.returncode, loop.RC_FAILCLOSED, out.stderr)
         self.assertIn('has not started', out.stderr)
+
+
+class TestAVerdictTheLedgerNeverHeardOfCannotBeOmittedFromConvergence(unittest.TestCase):
+    """Lane a-verdict-never-launched-through-the-scheduler-is-invisible.
+
+    `process-critique.verdict.json` (6 findings) sat in arc `jobs/66648556/tmp` and was launched
+    with `run-codex.sh --one-off`, which ledgers into a throwaway arc. Every gate reads the ledger,
+    so it was not undispositioned, it was absent. `converge` must now refuse over it and
+    `close-round` must report it.
+    """
+
+    def converged_arc(self, test_self):
+        f = RangeFixture(test_self)
+        head = f.commit('codex work')
+        f.claim('P1', f.base, head)
+        f.review('codex', 'diff-correctness')
+        f.review('claude', 'claude-correctness')
+        self.assertEqual(f.close('--range', f.rng()).returncode, 0)
+        return f
+
+    def converge(self, f):
+        return f.s.run('converge', '--arc', f.s.arc, '--range', f.rng(), '--repo', f.repo,
+                       '--out', os.path.join(f.s.dir, 'c.json'))
+
+    def test_a_stray_verdict_in_the_arc_refuses_and_recording_it_lets_the_same_call_pass(self):
+        f = self.converged_arc(self)
+        self.assertEqual(self.converge(f).returncode, 0, 'control: the arc converges without it')
+        os.remove(os.path.join(f.s.dir, 'c.json'))
+        stray = write_verdict(os.path.join(f.s.arc, 'process-critique.verdict.json'),
+                              'process-critique', 0)
+        blocked = self.converge(f)
+        self.assertEqual(blocked.returncode, loop.RC_GATE, blocked.stderr)
+        self.assertIn('1 review verdict(s) in the arc directory are named by no ledgered review',
+                      blocked.stderr)
+        self.assertIn('review record', blocked.stderr)
+        self.assertIn(stray, blocked.stderr)
+        self.assertFalse(os.path.exists(os.path.join(f.s.dir, 'c.json')))
+        rec = f.s.run('review', 'record', '--arc', f.s.arc, '--track', 'process', '--round', '1',
+                      '--party', 'codex', '--name', 'process-critique', '--verdict', stray)
+        self.assertEqual(rec.returncode, 0, rec.stderr)
+        closed = f.close('--range', f.rng(), track='process')
+        self.assertEqual(closed.returncode, 0, closed.stderr)
+        passes = self.converge(f)
+        self.assertEqual(passes.returncode, 0, passes.stderr)
+
+    def test_detection_is_by_content_and_ignores_the_loops_own_files(self):
+        f = self.converged_arc(self)
+        arc = f.s.arc
+        write_verdict(os.path.join(arc, 'oddly-named.json'), 'x', 2)       # no .verdict suffix
+        with io.open(os.path.join(arc, 'levers.json'), 'w', encoding='utf-8') as fh:
+            json.dump([{'id': 'L1'}], fh)                                    # a list, not a verdict
+        with io.open(os.path.join(arc, 'broken.verdict.json'), 'w', encoding='utf-8') as fh:
+            fh.write('{not json')
+        os.makedirs(os.path.join(arc, 'verdicts'), exist_ok=True)
+        write_verdict(os.path.join(arc, 'verdicts', 'kept.json'), 'k', 1)  # the loop's own copies
+        self.assertEqual(loop.unledgered_verdicts(arc, loop.ledger_read(arc)),
+                         [os.path.join(arc, 'oddly-named.json')])
+
+    def test_a_verdict_named_only_by_a_one_off_track_event_is_still_unledgered(self):
+        # `arc_rounds` excludes the one-off track, so its findings reach no gate: the same hole.
+        f = self.converged_arc(self)
+        path = write_verdict(os.path.join(f.s.arc, 'opinion.verdict.json'), 'opinion', 1)
+        loop.ledger_append(f.s.arc, dict(ev='start', t=1.0, job='j1', track=loop.ONE_OFF_TRACK,
+                                         round=1, kind='review', name='opinion', out=path))
+        loop.ledger_append(f.s.arc, dict(ev='end', t=2.0, job='j1', track=loop.ONE_OFF_TRACK,
+                                         round=1, kind='review', name='opinion', rc=0))
+        self.assertEqual(loop.unledgered_verdicts(f.s.arc, loop.ledger_read(f.s.arc)), [path])
+        # ...and the same event on a real track ledgers it.
+        loop.ledger_append(f.s.arc, dict(ev='start', t=3.0, job='j2', track='code', round=9,
+                                         kind='review', name='opinion', out=path))
+        self.assertEqual(loop.unledgered_verdicts(f.s.arc, loop.ledger_read(f.s.arc)), [])
+
+    def test_close_round_reports_the_count_and_still_closes(self):
+        f = RangeFixture(self)
+        f.review('codex', 'diff-correctness')
+        write_verdict(os.path.join(f.s.arc, 'process-critique.verdict.json'), 'pc', 3)
+        out = f.close()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn('UNLEDGERED: 1 review verdict(s)', out.stdout)
+
+    @unittest.skipUnless(os.path.isdir(REAL_REPLAY_ARC),
+                         'the motivating arc has been reaped')
+    def test_the_motivating_arc_names_exactly_the_measured_verdict(self):
+        arc = REAL_REPLAY_ARC
+        stray = loop.unledgered_verdicts(arc, loop.ledger_read(arc))
+        self.assertEqual([os.path.basename(p) for p in stray], ['process-critique.verdict.json'])
+
+
+class TestReservedNamesAreDefinedOnce(unittest.TestCase):
+    def test_one_off_track_has_exactly_one_definition(self):
+        with io.open(os.path.join(HERE, 'loop.py'), encoding='utf-8') as fh:
+            src = fh.read()
+        self.assertEqual(len(re.findall(r'^ONE_OFF_TRACK\s*=', src, re.M)), 1)
 
 
 class TestTheMotivatingArcIsRefusedByTheNewGates(unittest.TestCase):
