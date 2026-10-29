@@ -65,8 +65,16 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Mapping, Sequence
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+# The finding-outcome store validates `outcome` against this skill's one closed set of six
+# (§5.3). Imported rather than re-declared: two copies of a closed set is the shape where a
+# seventh value is accepted by one reader and refused by another, and the two stores here would
+# then disagree about what a countable outcome is. The two files ship together in this directory,
+# so a missing sibling is a broken install rather than a configuration to degrade around.
+import review_eval  # noqa: E402
 KINDS = ('review', 'write', 'vitest', 'tsc', 'mutant', 'ci', 'other')
 WAIT_KINDS = ('review', 'write', 'codex', 'ci')
 CPU_CLASSES = ('heavy', 'light', 'none')
@@ -78,6 +86,13 @@ PREFLIGHT_FIELDS = ('critical_path', 'parallel', 'batch', 'scope', 'stop', 'driv
 PREFLIGHT_FILLER = frozenset(
     ('n/a', 'na', 'none', 'nothing', 'tbd', 'todo', '-', '--', '?', 'x', 'no', 'yes', 'same',
      'default', 'unknown', 'as usual', 'standard', 'normal'))
+#: The reserved track `run-codex.sh --one-off` schedules into. A one-off is scheduled for its
+#: TREE LOCK and its movement check, never for round accounting: NOTHING ever closes a round on
+#: this track, which is what lets a one-off neither block nor be blocked by a real arc.
+#: `run-codex.sh` reads this value back (`loop.py one-off-track`) rather than spelling it a second
+#: time, because two spellings of a reserved name is the shape where the exemption in
+#: `review_name_collision` covers a track the launcher has stopped using.
+ONE_OFF_TRACK = 'one-off'
 GAP_MIN_S = 1800
 REAP_GRACE_S = 10.0   # per signal: how long a killed process group gets to actually go away
 SCOPED_MAX_FILES = 8
@@ -121,17 +136,82 @@ def iso_to_epoch(s: str) -> float | None:
 
 
 # ----------------------------------------------------------------- pure: test output
+# The prefix is `[^A-Za-z]*`, not `\W*`: node's counter glyph U+2139 (INFORMATION SOURCE) is
+# Alphabetic in Unicode, so Python's `\w` MATCHES it and `\W` does not — a `\W+` prefix matches
+# nothing at all here and every counter line reads as absent.
+NODE_COUNTER_RE = re.compile(r'^[^A-Za-z]*(tests|suites|pass|fail|cancelled|skipped|todo)'
+                             r'\s+(\d+)$')
+
+
+def node_test_counts(out: str) -> dict[str, int] | None:
+    """The `node --test` runner's end-of-run counters, or None when `out` holds none.
+
+    The second supported runner.  `node --test` prints no single `Tests ...` line; it
+    prints one counter per line, each behind an information glyph, so the real bytes of
+    a green run are `\x1b[34m\u2139 pass 9\x1b[39m`.  A parser that only knows vitest
+    reads that as NO SUMMARY, `tests_ran` returns 0, and the run is refused as
+    `BASELINE NOT GREEN: the suite executed ZERO tests` with nine passing tests in the
+    very output being quoted — measured 2026-10-07 against a `node --test` repository.
+    Fail-closed made it survivable, as with the ANSI class above, but a harness that
+    cannot see a pass cannot verify a mutant on that runner at all.
+
+    `pass` and `fail` are the executed count; `skipped` and `todo` are deliberately not,
+    for the same reason skipped tests do not count on vitest.
+    """
+    counts: dict[str, int] = {}
+    for line in _plain_lines(out):
+        match = NODE_COUNTER_RE.match(line)
+        if match:
+            counts[match.group(1)] = int(match.group(2))
+    # `pass` and `fail` are both always printed, so requiring both rejects a stray line
+    # of prose that happens to end in a number.
+    if 'pass' not in counts or 'fail' not in counts:
+        return None
+    return counts
+
+
 def tests_ran(out: str) -> int:
-    """How many tests actually EXECUTED, from vitest's `Tests ...` summary line.
+    """How many tests actually EXECUTED, on either supported runner.
 
     Skipped tests do not count: a `-t` filter that matches nothing reports them as
     skipped and exits 0, and that must not be readable as a surviving mutant or a green
-    run.  Returns 0 when no summary line is present (no run happened at all).
+    run.  Returns 0 when no summary is present at all (no run happened).
+
+    Reads vitest's single `Tests ...` summary line first, then `node --test`'s
+    per-counter block; see `node_test_counts`.
     """
-    line = next((ln.strip() for ln in out.splitlines() if ln.strip().startswith('Tests ')), None)
-    if line is None:
+    line = next((ln for ln in _plain_lines(out) if ln.startswith('Tests ')), None)
+    if line is not None:
+        return sum(int(n) for n in re.findall(r'(\d+)\s+(?:passed|failed)', line))
+    counts = node_test_counts(out)
+    if counts is None:
         return 0
-    return sum(int(n) for n in re.findall(r'(\d+)\s+(?:passed|failed)', line))
+    return counts['pass'] + counts['fail']
+
+
+ANSI_RE = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])')
+
+
+def strip_ansi(text: str) -> str:
+    """`text` with every ANSI escape removed.
+
+    This is a CAPTURE-SITE rule, not a cosmetic one.  vitest's default reporter
+    colourises even when its stdout is a pipe, so its summary line really arrives as
+    `\x1b[2m Test Files \x1b[22m...`.  `line.strip().startswith('Test Files')` therefore
+    matched NOTHING, and the fail-closed count read every genuinely green scoped run as
+    `rc 5 NO-TESTS` — measured 2026-10-03 on a run whose own log says
+    `Test Files  2 passed (2)` / `Tests  32 passed (32)`.
+
+    Fail-closed is why this was survivable rather than silent, but a check that cannot
+    see a pass is not a check: it makes the per-task gate unusable for a whole arc, and
+    the obvious repair is `--allow-no-tests` everywhere, which switches the gate off.
+    """
+    return ANSI_RE.sub('', text)
+
+
+def _plain_lines(out: str) -> list[str]:
+    """`out`'s lines, escapes removed and edges trimmed, ready to match on."""
+    return [ln.strip() for ln in strip_ansi(out).splitlines()]
 
 
 def test_files_ran(out: str) -> int | None:
@@ -141,14 +221,14 @@ def test_files_ran(out: str) -> int | None:
     with code 0` and no summary at all — measured 2026-09-02 — so absence is the
     fail-open case and the caller must treat None as 0.
     """
-    line = next((ln.strip() for ln in out.splitlines() if ln.strip().startswith('Test Files')), None)
+    line = next((ln for ln in _plain_lines(out) if ln.startswith('Test Files')), None)
     if line is None:
         return None
     return sum(int(n) for n in re.findall(r'(\d+)\s+(?:passed|failed)', line))
 
 
 def no_tests_found(out: str) -> bool:
-    return 'No test files found' in out
+    return 'No test files found' in strip_ansi(out)
 
 
 def vitest_verdict(rc: int, out: str, name_filtered: bool, allow_no_tests: bool) -> tuple[int, str]:
@@ -352,6 +432,79 @@ def tail_is_incomplete(fd: int) -> bool:
         return False
 
 
+def _jsonl_append(path: str, lock_path: str, rec: dict) -> None:
+    """Append one JSON object as one line, atomically against every other appender.
+
+    Extracted from `ledger_append` when the outcome store of §5.2 became the second append-only
+    JSONL file in the arc directory. A second copy of this would have been a second copy of the
+    LIFE5 fix below, and the two would have drifted on the first repair to either.
+    """
+    with _jsonl_locked(path, lock_path) as fd:
+        _jsonl_write(fd, rec)
+
+
+@contextlib.contextmanager
+def _jsonl_locked(path: str, lock_path: str):
+    """Hold the file's exclusive lock and yield an append-mode fd on it.
+
+    Round 3 (LIFE5). O_APPEND makes each os.write land at the end atomically, but it says nothing
+    about the write LOOP: a short write in process A, followed by a complete record from process
+    B, followed by A's suffix, produces one malformed line out of two good events — and
+    `_jsonl_read` turns malformed JSON into a non-terminal `corrupt` record, so the casualty is a
+    start/end/close silently DISAPPEARING from a lifecycle decision rather than failing it closed.
+    An exclusive lock over the whole record makes the append atomic between processes; the
+    readers' half of the fix is `ledger_corrupt`, which the admission and close paths refuse on.
+
+    It is a context manager rather than part of the append because the outcome store needs a
+    read-decide-append TRANSACTION under the same lock (§5.4): without one, two concurrent
+    recorders both read "no prior row for this key" and both append, producing from the writer
+    that enforces the key the very duplicate the key exists to prevent. A second lock file for
+    the transaction would not do — these locks are per open file description, so a second fd on
+    one lock path from one process deadlocks against itself.
+    """
+    lfd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        fcntl.flock(lfd, fcntl.LOCK_EX)
+        yield fd
+    finally:
+        os.close(fd)
+        try:
+            fcntl.flock(lfd, fcntl.LOCK_UN)
+        finally:
+            os.close(lfd)
+
+
+def _jsonl_write(fd: int, rec: dict) -> None:
+    """One record, one line, onto an fd whose lock the caller already holds."""
+    buf = (json.dumps(rec, sort_keys=True) + '\n').encode('utf-8')
+    if tail_is_incomplete(fd):
+        buf = b'\n' + buf
+    while buf:
+        buf = buf[os.write(fd, buf):]
+
+
+def _jsonl_read(path: str) -> list[dict]:
+    """Every parseable record, with an unparseable line reported as `corrupt` rather than dropped.
+
+    Dropping it would make a hole indistinguishable from an absence, and every reader here asks
+    presence/absence questions.
+    """
+    if not os.path.exists(path):
+        return []
+    out = []
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for ln in fh:
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                out.append(json.loads(ln))
+            except json.JSONDecodeError:
+                out.append({'ev': 'corrupt', 'raw': ln[:200]})
+    return out
+
+
 def ledger_append(arc: str, ev: dict) -> None:
     os.makedirs(arc, exist_ok=True)
     ev = dict(ev)
@@ -369,46 +522,51 @@ def ledger_append(arc: str, ev: dict) -> None:
     _mono = time.monotonic()
     ev.setdefault('mono', round(_mono, 3))
     ev.setdefault('coff', round(now() - _mono, 3))
-    line = json.dumps(ev, sort_keys=True) + '\n'
-    buf = line.encode('utf-8')
-    # Round 3 (LIFE5). O_APPEND makes each os.write land at the end atomically, but it says nothing
-    # about the LOOP below: a short write in process A, followed by a complete record from process
-    # B, followed by A's suffix, produces one malformed line out of two good events — and
-    # `ledger_read` turns malformed JSON into a non-terminal `corrupt` event, so the casualty is a
-    # start/end/close silently DISAPPEARING from a lifecycle decision rather than failing it closed.
-    # An exclusive lock over the whole record makes the append atomic between processes; the
-    # readers' half of the fix is `ledger_corrupt`, which the admission and close paths refuse on.
-    lfd = os.open(ledger_lock_path(arc), os.O_RDWR | os.O_CREAT, 0o644)
-    fd = os.open(ledger_path(arc), os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o644)
-    try:
-        fcntl.flock(lfd, fcntl.LOCK_EX)
-        if tail_is_incomplete(fd):
-            buf = b'\n' + buf
-        while buf:
-            buf = buf[os.write(fd, buf):]
-    finally:
-        os.close(fd)
-        try:
-            fcntl.flock(lfd, fcntl.LOCK_UN)
-        finally:
-            os.close(lfd)
+    _jsonl_append(ledger_path(arc), ledger_lock_path(arc), ev)
 
 
 def ledger_read(arc: str) -> list[dict]:
-    p = ledger_path(arc)
-    if not os.path.exists(p):
-        return []
-    out = []
-    with open(p, encoding='utf-8', errors='replace') as fh:
-        for ln in fh:
-            ln = ln.strip()
-            if not ln:
-                continue
-            try:
-                out.append(json.loads(ln))
-            except json.JSONDecodeError:
-                out.append({'ev': 'corrupt', 'raw': ln[:200]})
-    return out
+    return _jsonl_read(ledger_path(arc))
+
+
+def verdict_keep_path(arc: str, job: str) -> str:
+    """Where this arc keeps its own copy of one paid review verdict."""
+    return os.path.join(arc, 'verdicts', f'{job}.json')
+
+
+def keep_verdict(arc: str, job: str, out: str) -> str:
+    """Snapshot a paid review verdict into the arc. Returns where it landed, or `''`.
+
+    `close-round` has to know how many findings a round reported, and it used to read that off
+    the verdict path the CALLER passed on the command line. That path is not ours: a later launch
+    on ANOTHER track may legitimately reuse it (`review_name_collision` is scoped to one track and
+    one round, so it does not speak for that case), and the caller may delete it between runs to
+    tell "this launch landed a verdict" from "it did not". MEASURED 2026-10-26: the suite's own
+    `launch()` does exactly that, track A round 1 became unclosable with `RC_FAILCLOSED`, and the
+    refusal told the operator to "restore the verdict (this loop keeps a durable copy of every
+    paid verdict)" -- a recovery that did not exist, since `shutil` appeared nowhere in this file.
+
+    So the loop now keeps the copy its own refusal promised, taken at `end` where the run has been
+    paid for and the verdict is on disk. A failure to snapshot never fails the run -- rc is about
+    the review, not about our bookkeeping -- but it is printed, because the round may later refuse
+    to close over it.
+    """
+    dest = verdict_keep_path(arc, job)
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(out, encoding='utf-8') as fh:
+            text = fh.read()
+        write_atomic(dest, text)
+    # ValueError as well as OSError: a verdict holding invalid UTF-8 raises `UnicodeDecodeError`,
+    # which is a ValueError, and letting it out would crash a run that has ALREADY been paid for
+    # over a failure to keep a copy of its result. That is the one thing this handler exists to
+    # prevent, so it must cover both ways the copy can fail rather than only the filesystem's.
+    except (OSError, ValueError) as exc:
+        print(f'loop.py: WARNING could not keep a copy of {out} at {dest}: '
+              f'{type(exc).__name__}: {exc} — `close-round` will have to read the caller\'s copy, '
+              'and will refuse the round if that is gone too', file=sys.stderr)
+        return ''
+    return dest
 
 
 def write_atomic(path: str, text: str) -> None:
@@ -435,6 +593,1024 @@ def ledger_corrupt(events: list[dict]) -> int:
     refuse on it instead of deciding over a hole.
     """
     return sum(1 for ev in events if ev.get('ev') == 'corrupt')
+
+
+# ------------------------------------------------------------------- finding outcomes (§5)
+# Decision 5: every review finding gets exactly one finding outcome, saved where it can be
+# counted. The store is a second append-only JSONL beside `jobs.jsonl` rather than a new tool,
+# because this module already owns the arc → track → round identity every outcome is filed under
+# and a separate store would carry its own copy of that identity and could disagree with it.
+#
+# "Exactly one" is enforced here and not stated: `(arc, track, round, findingId)` is a uniqueness
+# key, a byte-identical retry is idempotent, and a conflicting one refuses. An append-only file
+# whose writer does not enforce its key accepts the retry's second row and double-counts it,
+# which is how a decision becomes prose.
+OUTCOMES = 'outcomes.jsonl'
+
+#: The record of §5.3, in full. Every field is required: a store whose shape is optional cannot be
+#: counted by severity or by file, which is what decision 5 asked for.
+OUTCOME_FIELDS = ('arc', 'track', 'round', 'findingId', 'severity', 'file',
+                  'lineStart', 'lineEnd', 'outcome', 'note')
+
+#: The uniqueness key of §5.4. `findingId` alone is not it: the same finding id recurs across
+#: rounds of one track by design, and the same round number recurs across tracks.
+OUTCOME_KEY_FIELDS = ('arc', 'track', 'round', 'findingId')
+
+#: Stamped on every row and deliberately OUTSIDE the key and outside the identity comparison: a
+#: retry is the same decision recorded again, and a clock reading is not part of the decision. In
+#: the ledger's unit (epoch seconds, as `t` is) so a report can order an outcome against the job
+#: that produced the finding without converting between two time formats.
+OUTCOME_STAMP = 'recordedAt'
+
+
+def canonical_arc(arc: str) -> str:
+    """The ONE spelling of an arc path that every store keys on, written AND read through it.
+
+    `os.path.abspath` normalises `.`, `..` and a relative prefix and stops there: it does not
+    resolve a symlink. Three stores here key rows on the arc, and all three used to compare
+    `abspath` against an `abspath` of whatever spelling the writer happened to pass. A caller that
+    reserved three case launches through a symlinked arc and then read the store through its real
+    path saw NO rows, and the spend gate — which counts rows — handed out a fourth launch. The hole
+    is in the KEY, so it is closed in the key: canonicalise at the boundary, store that value, and
+    compare that value.
+    """
+    return os.path.realpath(os.path.abspath(arc))
+
+
+def outcomes_path(arc: str) -> str:
+    return os.path.join(arc, OUTCOMES)
+
+
+def outcome_key(rec: Mapping) -> tuple:
+    """The uniqueness key of §5.4, read out of a record.
+
+    `round` is normalised to a string because the CLI parses it as an int while a hand-written or
+    JSON-round-tripped row may carry either, and a key that compares 3 against '3' as different
+    keys would let the same finding be recorded twice — the exact hole this key exists to close.
+    """
+    return tuple('' if rec.get(f) is None else str(rec.get(f)) for f in OUTCOME_KEY_FIELDS)
+
+
+#: The declared fields that are not part of the key. These are what two rows for one finding can
+#: disagree ABOUT, which is the whole of a conflict.
+OUTCOME_VALUE_FIELDS = tuple(f for f in OUTCOME_FIELDS if f not in OUTCOME_KEY_FIELDS)
+
+
+def outcome_identity(rec: Mapping) -> dict:
+    """The part of a record that can CONFLICT: the declared fields outside the key.
+
+    The key fields are deliberately absent. `outcome_admission` only ever compares rows whose
+    keys are equal, so re-comparing them here cannot find a real difference — but it can find a
+    spurious one, and did: `outcome_key` normalises `round` to a string so 3 and '3' are one
+    finding, while a raw comparison of the same field called them a conflict. A row that
+    round-tripped through JSON would then have refused its own retry, reporting a disagreement
+    about the very field that identified it as the same record.
+    """
+    return {f: rec.get(f) for f in OUTCOME_VALUE_FIELDS}
+
+
+def store_admission(existing: Sequence[Mapping], new: Mapping, key_fields: Sequence[str],
+                    value_fields: Sequence[str]) -> tuple[str, Mapping | None, list[str]]:
+    """The ONE identity rule both append-only stores in this module obey.
+
+    Returns `(verdict, the conflicting prior row or None, the fields it differs on)`, where
+    `verdict` is `'append' | 'idempotent' | 'refuse'`. The MESSAGE is composed by the caller, not
+    here: each store's refusal names its own subject in its own words, and generalising the
+    sentence would have made two stores share a message that describes neither. What is shared is
+    the decision, which is the part that must not drift — the finding store and the run-summary
+    store both claim "exactly one row per key", and two copies of that claim is the shape where a
+    retry is idempotent in one store and a duplicate in the other.
+
+    Pure, so the rule is exercisable without a filesystem and so a mutant that drops the key check
+    is killed by an assertion about the DECISION rather than about a file's line count.
+
+    Three answers and not two. `idempotent` is a success that appends nothing, which is what makes
+    a retried record safe; collapsing it into `append` would double-count and collapsing it into
+    `refuse` would make every interrupted recorder look like a conflict.
+
+    A conflict is ANY difference in the declared value fields, not only in the one field a reader
+    happens to care about. Two rows disagreeing about a severity, a file, a line range or a set of
+    caught cases are two readings of one thing, and a report would answer from whichever it read
+    first.
+
+    The comparison runs against EVERY prior row for the key, not the last one: a file that already
+    holds two conflicting rows (written by hand, or by a writer that predates this key) must not be
+    made to look settled by a third row that happens to match one of them.
+
+    `round` and every other key part are compared AS STRINGS, because the CLI parses some of them
+    as ints while a JSON-round-tripped row may carry either, and a key that called 3 and '3'
+    different keys would let one record be written twice — the exact hole the key closes.
+    """
+    def key_of(rec: Mapping) -> tuple:
+        return tuple('' if rec.get(f) is None else str(rec.get(f)) for f in key_fields)
+
+    def identity_of(rec: Mapping) -> dict:
+        return {f: rec.get(f) for f in value_fields}
+
+    key = key_of(new)
+    prior = [r for r in existing if key_of(r) == key]
+    if not prior:
+        return 'append', None, []
+    want = identity_of(new)
+    differing = [r for r in prior if identity_of(r) != want]
+    if not differing:
+        return 'idempotent', None, []
+    was = differing[0]
+    return 'refuse', was, sorted(f for f in value_fields if was.get(f) != want.get(f))
+
+
+def outcome_admission(existing: Sequence[Mapping], new: Mapping) -> tuple[str, str]:
+    """May this finding outcome be appended? Returns `('append' | 'idempotent' | 'refuse', reason)`.
+
+    The rule is `store_admission`; this composes the refusal decision 5 owes a reader.
+    """
+    verdict, was, fields = store_admission(existing, new, OUTCOME_KEY_FIELDS, OUTCOME_VALUE_FIELDS)
+    if verdict == 'append':
+        return 'append', ''
+    if verdict == 'idempotent':
+        return 'idempotent', (
+            'finding {} of track {} round {} already carries outcome {!r} with identical '
+            'details; recorded once, so this retry appends nothing'
+            .format(new.get('findingId'), new.get('track'), new.get('round'), new.get('outcome'))
+        )
+    return 'refuse', (
+        'finding {} of track {} round {} already carries outcome {!r}; this record says {!r} and '
+        'differs on {}. Exactly one outcome per finding (decision 5), so the stored record stands '
+        'and a correction is a deliberate edit of the store, never a second append.'
+        .format(new.get('findingId'), new.get('track'), new.get('round'),
+                was.get('outcome'), new.get('outcome'), ', '.join(fields))
+    )
+
+
+def outcome_duplicate_keys(records: Sequence[Mapping]) -> list[tuple]:
+    """Keys appearing on more than one row, in the order they first appear.
+
+    ANY repeat, identical rows included. `outcome_admission` never produces one, so a repeat here
+    means something else wrote the file, and a store whose writer cannot be identified is not a
+    store `close-round` may close over. Every report reads validated unique findings rather than
+    counting rows, which is the other half of the same rule.
+    """
+    return store_duplicate_keys(records, OUTCOME_KEY_FIELDS)
+
+
+def outcomes_read(arc: str) -> list[dict]:
+    return _jsonl_read(outcomes_path(arc))
+
+
+def outcomes_for_round(records: Sequence[Mapping], arc: str, track: str, rnd) -> list[dict]:
+    """The rows filed under one (arc, track, round). Reads rows; counts nothing a run returned."""
+    want = (canonical_arc(arc), str(track), str(rnd))
+    return [dict(r) for r in records
+            if (canonical_arc(str(r.get('arc') or '')), str(r.get('track')),
+                str(r.get('round'))) == want]
+
+
+def finding_id(job_name: str, index: int) -> str:
+    """A finding's id: its verdict file's job name and its INDEX in that file's `findings` array.
+
+    The review-output schema gives a finding no id of its own, and `facts-from-verdict.py` already
+    dispositions findings by that index, so this is the id the loop already uses rather than a new
+    one. Deriving it means the round's finding set comes from the artifacts the round produced; a
+    hand-typed list of ids would be a second list that could simply omit the finding nobody wanted
+    to disposition, which is the hole §5.5 closes.
+    """
+    return f'{job_name}#{index}'
+
+
+def round_findings(events: Sequence[Mapping], track: str, rnd: int) -> tuple[list[str], list[str]]:
+    """Every finding this round's reviewers reported, and every verdict that could not be read.
+
+    Returns `(finding_ids, unreadable)`. `unreadable` is the fail-closed half: a review job that
+    ended rc=0 and recorded a verdict path which is now missing or unparseable means the round's
+    finding count is UNKNOWN, and unknown must not read as zero — zero is the one value that makes
+    §5.5's requirement vacuous.
+
+    Only review jobs that ended rc=0 are consulted. A review that failed or was quarantined wrote
+    no verdict, and `close-round` already refuses over a job with no terminal event, so this adds
+    no second opinion about liveness.
+    """
+    ends = {ev.get('job'): ev for ev in events if ev.get('ev') == 'end'}
+    ids: list[str] = []
+    unreadable: list[str] = []
+    for ev in events:
+        if ev.get('ev') != 'start' or ev.get('kind') != 'review':
+            continue
+        if str(ev.get('track')) != str(track) or str(ev.get('round')) != str(rnd):
+            continue
+        end = ends.get(ev.get('job'), {})
+        if end.get('rc') != 0:
+            continue
+        # The arc's OWN copy first (`keep_verdict`, recorded on the end event), and the caller's
+        # path only as the fallback for a ledger written before this loop kept one. The caller's
+        # path is not ours to depend on: a later launch on another track may reuse it, and the
+        # caller may delete it between runs. A row with neither readable is the fail-closed case
+        # below, and it is now a genuinely lost verdict rather than a tidy caller.
+        out = end.get('verdict') or ev.get('out')
+        if not out:
+            continue
+        try:
+            with open(out, encoding='utf-8') as fh:
+                verdict = json.load(fh)
+            findings = verdict['findings']
+            if not isinstance(findings, list):
+                raise TypeError('findings is not a list')
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            unreadable.append(f'{out} ({exc.__class__.__name__}: {exc})')
+            continue
+        name = str(ev.get('name'))
+        ids.extend(finding_id(name, i) for i in range(len(findings)))
+    # One id names one finding, so the set is what this returns. `review_name_collision` is what
+    # keeps two DIFFERENT findings from ever sharing an id, and it refuses at launch rather than
+    # here: since it also refuses a same-path re-run after a SUCCESSFUL review, at most one rc=0
+    # review per name per round can exist and this deduplication is now defence over a ledger
+    # written before that rule, not the thing standing between a rerun and a lost finding. It
+    # cannot be the latter — a rerun overwrites the file, so the lost finding is not in `ids` to
+    # deduplicate.
+    return list(dict.fromkeys(ids)), unreadable
+
+
+#: Why a review name is refused. One value per REMEDY, because the two refusals are not repaired
+#: the same way: a review writing ELSEWHERE is given its own `--name`, while a name whose review
+#: already succeeded is SPENT for this round and cannot be reused at any path, including its own.
+CLASH_ELSEWHERE = 'elsewhere'
+CLASH_AFTER_SUCCESS = 'after-success'
+
+
+def review_name_collision(events: Sequence[Mapping], track: str, rnd, name: str,
+                          out: str) -> tuple[str, str] | None:
+    """`(why, the other review's verdict path)` when `name` is already spent in this round.
+
+    A finding's id is `<name>#<index in that verdict's findings array>`, which is the id a human
+    can type and the whole reason it is the display name rather than the ledger's job string.
+    There are TWO ways one name mints one id for two findings, and they are refused separately
+    because their remedies differ.
+
+    `CLASH_ELSEWHERE` — two reviews of one round sharing a name while writing DIFFERENT verdict
+    files. `outcome_coverage` reads one outcome row as covering both, and the round closes with a
+    finding nobody dispositioned — §5.5's hole, re-opened by a name.
+
+    `CLASH_AFTER_SUCCESS` — a second review under a name whose first review already ended `rc=0`,
+    even at the SAME path. The rerun OVERWRITES that verdict and `round_findings` reads only the
+    file that survives, so a finding the first run reported and the second did not disappears
+    entirely, while an outcome already recorded against it becomes a stray that `outcome_coverage`
+    deliberately does not refuse on. MEASURED 2026-10-26 by driving the head functions: a
+    one-element list holding the first lens's first finding id after the first run, then
+    `([], [])` once a successful same-name rerun wrote zero findings to the same path, with
+    `outcome_coverage` reporting nothing missing. (That id is spelled out nowhere here on
+    purpose: a finding id's `<lens>` plus index suffix carries the same shape as a pull-request
+    citation, which `publishing_guard_test.py` refuses in a SHIPPED module by design -- its
+    class 1. The guard's recorded remedy for a literal it cannot tell from a real one is to
+    neutralise the literal rather than to widen the shape set, which is what this wording is.)
+
+    A prior run that ended `rc != 0` — failed, or quarantined by a tree move, which moves its
+    output to `<out>.tree-moved` — left this round no verdict to read, so it is the one case where
+    the name may be reused at the same path. That re-run is what the same-path exemption was
+    written for, and it is all the exemption now covers. A prior with no terminal event at all
+    stays OPEN in the ledger and `close-round` already refuses over it, so that case is answered
+    there rather than twice here.
+
+    Refused at LAUNCH, where exactly one of the two runs is wrong and renaming it costs nothing.
+    At close time both verdicts already exist and neither can be renamed without orphaning its
+    artifact, so the only remaining move there is to refuse the close, which strands the round.
+
+    ADJUDICATED 2026-10-26, against the alternative of changing the test that caught it. The
+    reserved `ONE_OFF_TRACK` is EXEMPT, because both refusals above are statements about what
+    happens when the round CLOSES -- `CLASH_ELSEWHERE` says the round would close with an
+    undispositioned finding, and `CLASH_AFTER_SUCCESS` says a finding would vanish from the count
+    `close-round` reads. Nothing closes a round on that track, `cmd_close_round` now refuses to,
+    and no outcome is ever required of a one-off, so neither harm is reachable there and the rule
+    was only ever charging a one-off for a gate it cannot reach. MEASURED: without the exemption
+    the SECOND one-off under a given verdict basename was refused `RC_FAILCLOSED` forever, per
+    user and per name, because the one-off arc is shared (`${TMPDIR}/cc-one-off-$(id -u)`) and
+    round 1 of that track never closes -- `codex-opinion`, whose every call is a one-off, would
+    have worked exactly once. The exemption is pinned in BOTH directions
+    (`TestOneOffTrackIsExemptFromNameCollision`): a one-off name reruns, and the identical reuse
+    on a real track still refuses.
+    """
+    if str(track) == ONE_OFF_TRACK:
+        return None
+    want = os.path.abspath(out) if out else ''
+    ends = {ev.get('job'): ev for ev in events if ev.get('ev') == 'end'}
+    for ev in events:
+        if ev.get('ev') != 'start' or ev.get('kind') != 'review':
+            continue
+        if str(ev.get('track')) != str(track) or str(ev.get('round')) != str(rnd):
+            continue
+        if str(ev.get('name')) != str(name):
+            continue
+        other = ev.get('out')
+        if other and os.path.abspath(str(other)) != want:
+            return CLASH_ELSEWHERE, str(other)
+        if ends.get(ev.get('job'), {}).get('rc') == 0:
+            return CLASH_AFTER_SUCCESS, str(other or '')
+    return None
+
+
+def outcome_coverage(finding_ids: Sequence[str], rows: Sequence[Mapping]) -> tuple[list[str], list[str]]:
+    """`(findings with no outcome, outcome rows naming no finding)`, both in order.
+
+    The two directions are treated differently by `close-round`, and the asymmetry has a reason
+    written here because it looks like an oversight. A MISSING outcome is the defect decision 5
+    asks this gate to catch, so it refuses. A STRAY row is a mistyped id, and the store is
+    append-only with a uniqueness key — so refusing on a stray would make the round permanently
+    unclosable unless somebody hand-edited the evidence store, and a gate whose only remedy is
+    editing its own evidence is worse than the typo it caught. A stray is therefore reported
+    loudly and does not refuse; it cannot hide a missing outcome, because that is the other
+    direction and is checked separately.
+    """
+    recorded = {str(r.get('findingId')) for r in rows}
+    want = list(dict.fromkeys(str(i) for i in finding_ids))
+    missing = [i for i in want if i not in recorded]
+    stray = [i for i in sorted(recorded) if i not in set(want)]
+    return missing, stray
+
+
+#: What every rendered report says in words, per §5.7. MEASURED 2026-10-21: of the 1,310 findings
+#: in this repository's 460 past verdict files, 0 carry a finding outcome, because outcomes existed
+#: only as free text before this store. So a zero in any bucket below is an absence of RECORDS, not
+#: an absence of findings, and a reader who does not know that reads the first report as evidence
+#: that nothing was ever found. The sentence travels with the numbers rather than living in the
+#: spec, because a report is read where the spec is not.
+OUTCOME_COUNTS_BEGIN_NOTE = (
+    'Counts begin at the first round recorded after this store shipped. Measured 2026-10-21, 0 of '
+    'the 1,310 findings in this arc\'s 460 past verdict files carry an outcome, so no historical '
+    'count is recoverable and a zero here means no record rather than no finding.'
+)
+
+
+def outcome_report(rows: Sequence[Mapping], arc: str, track: str | None = None,
+                   rnd=None) -> dict:
+    """Count finding outcomes by kind, by severity and by round, FROM THE ROWS (§5.6).
+
+    Pure: it takes the rows a caller read and never reads the store itself, so the rule is
+    exercisable with no filesystem and a mutant that drops one of the three groupings is killed by
+    an assertion about a count rather than about output text.
+
+    It counts rows and never what a run returned. The store is append-only with several writers —
+    one `finding record` per finding, a retry that can land mid-report, an ordinary hand edit of a
+    JSONL file — so a tally kept by the recorder agrees with the file only until something else
+    writes it, and the disagreement is silent.
+
+    Three groupings, each present because two stores can agree on the others:
+
+    - `by_outcome` is zero-filled over `review_eval.FINDING_OUTCOMES`, so a bucket that is empty
+      cannot be told from a bucket that was dropped. A value outside that closed set is NOT folded
+      into a bucket: the recorder refuses one, so a row carrying one was written by something else,
+      and it is named in `unknown_outcomes` where it is visible.
+    - `by_severity` is open, because severity comes from the reviewer's own vocabulary and a new
+      severity word is a reviewer change rather than a defect here.
+    - `by_round` is keyed `<track>:<round>`, because a round number recurs across tracks and a
+      count keyed on the number alone would add two tracks together.
+
+    Uniqueness is enforced rather than assumed, which is the other half of
+    `outcome_duplicate_keys`' rule that a report reads validated unique findings. A key appearing
+    twice is counted ONCE and named in `duplicate_keys`; a key whose rows DISAGREE about the
+    declared fields is counted not at all and named in `conflicting_keys`, because which of two
+    readings to count is not a choice a report may make silently. `outcomes_record` produces
+    neither, so both lists are empty for a store this tool wrote and loud for one it did not.
+    """
+    want_arc = canonical_arc(arc)
+    scoped = []
+    for rec in rows:
+        if canonical_arc(str(rec.get('arc') or '')) != want_arc:
+            continue
+        if track is not None and str(rec.get('track')) != str(track):
+            continue
+        if rnd is not None and str(rec.get('round')) != str(rnd):
+            continue
+        scoped.append(rec)
+
+    duplicate_keys = outcome_duplicate_keys(scoped)
+    grouped: dict[tuple, list[Mapping]] = {}
+    for rec in scoped:
+        grouped.setdefault(outcome_key(rec), []).append(rec)
+
+    conflicting = [k for k, rs in grouped.items()
+                   if any(outcome_identity(r) != outcome_identity(rs[0]) for r in rs[1:])]
+    conflicting_set = set(conflicting)
+
+    by_outcome = {o: 0 for o in review_eval.FINDING_OUTCOMES}
+    by_severity: dict[str, int] = {}
+    by_round: dict[str, int] = {}
+    unknown: list[str] = []
+    total = 0
+    for key, rs in grouped.items():
+        if key in conflicting_set:
+            continue
+        rec = rs[0]
+        total += 1
+        outcome = str(rec.get('outcome'))
+        if outcome in by_outcome:
+            by_outcome[outcome] += 1
+        elif outcome not in unknown:
+            unknown.append(outcome)
+        sev = str(rec.get('severity'))
+        by_severity[sev] = by_severity.get(sev, 0) + 1
+        bucket = '{}:{}'.format(rec.get('track'), rec.get('round'))
+        by_round[bucket] = by_round.get(bucket, 0) + 1
+
+    return {
+        'arc': want_arc,
+        'scope': {'track': track, 'round': rnd},
+        'total': total,
+        'by_outcome': by_outcome,
+        'by_severity': by_severity,
+        'by_round': by_round,
+        'unknown_outcomes': unknown,
+        'duplicate_keys': duplicate_keys,
+        'conflicting_keys': conflicting,
+    }
+
+
+def render_outcome_report(rep: Mapping) -> str:
+    """The report as text, carrying §5.7's sentence with the numbers it qualifies."""
+    scope = rep.get('scope') or {}
+    where = 'arc {}'.format(rep.get('arc'))
+    if scope.get('track') is not None:
+        where += ' track {}'.format(scope['track'])
+    if scope.get('round') is not None:
+        where += ' round {}'.format(scope['round'])
+    lines = ['finding outcomes — {}'.format(where), 'total {}'.format(rep.get('total', 0)), '',
+             'by kind:']
+    for outcome, n in rep['by_outcome'].items():
+        lines.append('  {:<20} {}'.format(outcome, n))
+    lines += ['', 'by severity:']
+    for sev, n in sorted(rep['by_severity'].items(), key=lambda kv: (-kv[1], kv[0])):
+        lines.append('  {:<20} {}'.format(sev, n))
+    lines += ['', 'by round:']
+    for bucket, n in sorted(rep['by_round'].items()):
+        lines.append('  {:<20} {}'.format(bucket, n))
+    if rep['unknown_outcomes']:
+        lines += ['', 'OUTSIDE the closed set of six (this tool refuses to write one, so these '
+                      'rows were written by something else): ' + ', '.join(rep['unknown_outcomes'])]
+    if rep['duplicate_keys']:
+        lines += ['', 'REPEATED keys, counted once each: '
+                      + '; '.join(repr(k) for k in rep['duplicate_keys'])]
+    if rep['conflicting_keys']:
+        lines += ['', 'CONFLICTING keys, counted NOT AT ALL because two rows disagree about what '
+                      'happened: ' + '; '.join(repr(k) for k in rep['conflicting_keys'])]
+    lines += ['', OUTCOME_COUNTS_BEGIN_NOTE]
+    return '\n'.join(lines)
+
+
+def store_record(path: str, row: Mapping, decide, stamp_field: str,
+                 corrupt_subject: str) -> tuple[str, str]:
+    """Read, decide and append ONE row as ONE transaction under one store's lock.
+
+    Every append-only store in this skill goes through here, and that is the point: the read, the
+    decision and the write are one transaction, which is the difference between ENFORCING a
+    uniqueness key and merely checking it. Two copies of this sequence is the shape where one
+    store takes its lock and the other forgets to.
+
+    `decide(existing_rows, row) -> (verdict, reason)` is each store's own admission rule, so the
+    refusal still names its own subject in its own words; what is shared is the transaction, never
+    the sentence. A corrupt file REFUSES rather than appending, because an existing row for this
+    key cannot be ruled out, and `corrupt_subject` is how that refusal says what could not be
+    ruled out.
+
+    `decide` may instead return `(verdict, reason, row)`, and THAT row is the one written. A store
+    whose key holds a field it can only compute under the lock — the launch store's `attempt` —
+    otherwise has to hand `decide` a placeholder and keep the real row somewhere on the side, and
+    then the row admitted is not the row stored. Measured: every reservation reached the store
+    with `attempt: 0` while its key had been checked against the real number, so two concurrent
+    reservations of one case could both admit and both append, and nothing could join a
+    reservation to anything keyed on the attempt it really was.
+
+    `stamp_field` is written inside the transaction and AFTER the decision, so a refused or
+    idempotent call writes nothing at all — including no clock reading a later reader could
+    mistake for a row.
+    """
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with _jsonl_locked(path, path + '.lock') as fd:
+        records = _jsonl_read(path)
+        corrupt = ledger_corrupt(records)
+        if corrupt:
+            return 'refuse', (
+                f'refusing to record: {path} holds {corrupt} unparseable row(s), so an existing '
+                f'{corrupt_subject} cannot be ruled out'
+            )
+        decided = decide(records, row)
+        if len(decided) == 3:
+            verdict, reason, row = decided
+        else:
+            verdict, reason = decided
+        if verdict == 'append':
+            _jsonl_write(fd, dict(row, **{stamp_field: now()}))
+        return verdict, reason
+
+
+def outcomes_record(arc: str, rec: dict) -> tuple[str, str]:
+    """Record one finding outcome. Returns `(verdict, reason)` from `outcome_admission`."""
+    os.makedirs(arc, exist_ok=True)
+    return store_record(outcomes_path(arc), rec, outcome_admission, OUTCOME_STAMP,
+                        'outcome for this finding')
+
+
+# ------------------------------------------------------------------ authored ranges (§3)
+# Requirement 3: every commit range is approved by a party that did NOT write it. Until this store
+# existed the rule was prose — `SKILL.md` calls treating a Codex verdict over its own range as a
+# verdict "the one substitution that turns the entire loop into theatre" — and nothing recorded an
+# author or a sha, so the property could not even be asked about after the fact. MEASURED
+# 2026-10-28 against arc `jobs/66648556/tmp`: 9 Codex-authored ranges over 9 tasks, 0 Claude review
+# artifacts, and no record from which a non-author review could be shown or disproved.
+#
+# ONE row per task, written by the tool that CREATES the range (`run-codex.sh` write mode) rather
+# than by a session remembering afterwards. A write run that cannot record its range FAILS, so a
+# missing row is a red run rather than a silent gap —
+# memory couple-an-effect-to-its-write-at-the-chokepoint.
+#
+# Claude-authored ranges are deliberately NOT recorded. Authorship in this loop is BINARY, so
+# Claude's set is the COMPLEMENT of the codex rows over the range being closed: every commit no
+# codex row claims is Claude's. A second recording mechanism would need per-commit discipline from
+# a session, and the session that forgets would leave a commit claimed by nobody — which under the
+# complement rule is not a gap but a Claude commit demanding a CODEX review.
+RANGES = 'ranges.jsonl'
+
+#: The record, in full. `startSha`/`endSha` are what the launcher measured, not what a session
+#: remembered: write mode already computes `START_SHA` before it hands the worktree to codex.
+RANGE_FIELDS = ('arc', 'track', 'task', 'party', 'startSha', 'endSha')
+
+#: The uniqueness key. `task` alone is not it — the same task label recurs across tracks of one arc
+#: and across arcs — and `round` is deliberately absent, because a range is a span of commits and
+#: not a thing that happens inside one round: a task resumed in round 3 is the same range.
+RANGE_KEY_FIELDS = ('arc', 'track', 'task')
+
+RANGE_VALUE_FIELDS = tuple(f for f in RANGE_FIELDS if f not in RANGE_KEY_FIELDS)
+
+#: Outside the key and outside the identity comparison, for the same reason as `OUTCOME_STAMP`: a
+#: retry is the same range recorded again and a clock reading is not part of the range.
+RANGE_STAMP = 'recordedAt'
+
+#: The two parties that can author or review anything here. Binary ON PURPOSE: the complement rule
+#: above is sound only because there is no third author.
+PARTIES = ('codex', 'claude')
+
+#: What a review event carrying no `party` is credited to. This is a MEASUREMENT and not a
+#: convenience default: every review in every ledger written before the field existed was a Codex
+#: launch through `run-codex.sh`, there being no command that could record a Claude one. It is also
+#: the fail-closed direction for the check that matters — a codex-authored range needs a CLAUDE
+#: artifact, and an unlabelled event can never supply one.
+DEFAULT_REVIEW_PARTY = 'codex'
+
+#: The task name the complement is reported under. `range record` refuses it, so a session cannot
+#: claim the complement by naming it and thereby hand its own commits an author of its choosing.
+COMPLEMENT_TASK = '(complement)'
+
+
+def ranges_path(arc: str) -> str:
+    return os.path.join(arc, RANGES)
+
+
+def range_admission(existing: Sequence[Mapping], new: Mapping) -> tuple[str, str]:
+    """May this range row be appended? `('append' | 'idempotent' | 'refuse', reason)`.
+
+    The rule is `store_admission`, which both other stores here obey; this composes the refusal in
+    this store's own words. A conflicting row is refused rather than appended because the two
+    readings disagree about WHO WROTE a commit, and the independence gate would then answer from
+    whichever row it read first — the one question in this loop where reading the wrong row
+    silently converts a real review into theatre.
+    """
+    verdict, was, fields = store_admission(existing, new, RANGE_KEY_FIELDS, RANGE_VALUE_FIELDS)
+    if verdict == 'append':
+        return 'append', ''
+    if verdict == 'idempotent':
+        return 'idempotent', (
+            'task {} of track {} already records {}..{} authored by {}; recorded once, so this '
+            'retry appends nothing'
+            .format(new.get('task'), new.get('track'), str(new.get('startSha'))[:12],
+                    str(new.get('endSha'))[:12], new.get('party'))
+        )
+    return 'refuse', (
+        'task {} of track {} already records a range authored by {} ({}..{}); this record says {} '
+        '({}..{}) and differs on {}. Exactly one author per task, so the stored row stands — a '
+        'correction is a deliberate edit of the store, never a second append.'
+        .format(new.get('task'), new.get('track'), was.get('party'),
+                str(was.get('startSha'))[:12], str(was.get('endSha'))[:12], new.get('party'),
+                str(new.get('startSha'))[:12], str(new.get('endSha'))[:12], ', '.join(fields))
+    )
+
+
+def store_duplicate_keys(records: Sequence[Mapping], key_fields: Sequence[str]) -> list[tuple]:
+    """Keys appearing on more than one row, in first-appearance order. ANY repeat counts.
+
+    `outcome_duplicate_keys` is this function over `OUTCOME_KEY_FIELDS` and stays as its own name
+    because its refusal cites decision 5; the rule is here once so a second store cannot ship with
+    a subtly different idea of what a duplicate is.
+    """
+    seen: dict = {}
+    dupes = []
+    for rec in records:
+        key = tuple('' if rec.get(f) is None else str(rec.get(f)) for f in key_fields)
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] == 2:
+            dupes.append(key)
+    return dupes
+
+
+def ranges_read(arc: str) -> list[dict]:
+    return _jsonl_read(ranges_path(arc))
+
+
+def ranges_for_arc(records: Sequence[Mapping], arc: str) -> list[dict]:
+    """The rows filed under one arc, canonicalised at BOTH ends (see `canonical_arc`)."""
+    want = canonical_arc(arc)
+    return [dict(r) for r in records if canonical_arc(str(r.get('arc') or '')) == want]
+
+
+def ranges_record(arc: str, rec: dict) -> tuple[str, str]:
+    """Record one authored range. Returns `(verdict, reason)` from `range_admission`."""
+    os.makedirs(arc, exist_ok=True)
+    return store_record(ranges_path(arc), rec, range_admission, RANGE_STAMP,
+                        'range for this task')
+
+
+def other_party(party: str) -> str:
+    """The party that did not write this, which is the only one whose review counts for it."""
+    return 'claude' if str(party) == 'codex' else 'codex'
+
+
+def range_verdict(commits: Sequence[str], rows: Sequence[Mapping],
+                  review_parties: Sequence[str]) -> dict:
+    """Who wrote each commit of one range, and whose review is still owed. PURE.
+
+    `commits` is the range's own commit list, in order, as git reports it. `rows` are range rows
+    whose `commits` key has already been resolved to the shas that row claims. `review_parties`
+    are the parties with a readable review artifact in this arc.
+
+    Three answers, and they are not interchangeable:
+
+    - A commit claimed by MORE THAN ONE row is AMBIGUOUS and refuses. Two rows claiming one commit
+      disagree about who wrote it, and the independence gate would answer from whichever it read
+      first.
+    - A commit claimed by EXACTLY ONE row is that row's party's work, and the row needs a review
+      artifact from the OTHER party.
+    - A commit claimed by NO row is the COMPLEMENT: Claude's, by the binary-authorship rule above,
+      and it needs a CODEX review artifact. This is why no second recording mechanism is needed and
+      also why a launcher that fails to write its row cannot open a hole — the commit does not
+      vanish from the table, it moves to the complement and demands a review of the other party.
+
+    A row claiming only commits OUTSIDE this range is reported in `outside` and contributes
+    nothing: the rows of one arc legitimately span branches that already merged, and a range table
+    that included them could never equal the pull request's own commit list.
+
+    The bound this leaves open, stated rather than glossed: `review_parties` is ARC-scoped, so this
+    proves the other party reviewed SOMETHING in this arc and not that it read this exact range.
+    Scoping it per range would need a verdict's `reviewed.base`/`reviewed.head` to be trustworthy
+    for document reviews, where the schema makes both `null` by design. The approved plan says "a
+    review artifact in this arc whose party differs", and that is what this is.
+    """
+    want = list(dict.fromkeys(str(c) for c in commits))
+    inside = set(want)
+    seen = {str(p) for p in review_parties}
+    claims: dict[str, list[str]] = {c: [] for c in want}
+    table: list[dict] = []
+    outside: list[str] = []
+    for row in rows:
+        task = str(row.get('task'))
+        # An unlabelled row reads `codex` for the same reason an unlabelled review event does, and
+        # here too that is the fail-closed direction: it demands a CLAUDE review of the range.
+        party = str(row.get('party') or DEFAULT_REVIEW_PARTY)
+        mine = {str(c) for c in (row.get('commits') or []) if str(c) in inside}
+        if not mine:
+            outside.append(task)
+            continue
+        for c in mine:
+            claims[c].append(task)
+        table.append(dict(task=task, authorParty=party, reviewParty=other_party(party),
+                          startSha=row.get('startSha'), endSha=row.get('endSha'),
+                          commits=[c for c in want if c in mine]))
+    ambiguous = [(c, sorted(claims[c])) for c in want if len(claims[c]) > 1]
+    complement = [c for c in want if not claims[c]]
+    if complement:
+        table.append(dict(task=COMPLEMENT_TASK, authorParty='claude', reviewParty='codex',
+                          startSha=None, endSha=None, commits=complement))
+    for entry in table:
+        entry['reviewed'] = entry['reviewParty'] in seen
+    missing = [e for e in table if not e['reviewed']]
+    return dict(commits=want, table=table, ambiguous=ambiguous, complement=complement,
+                outside=sorted(set(outside)), missing=missing,
+                ok=(not ambiguous and not missing))
+
+
+def git_range_commits(repo: str, rng: str) -> list[str]:
+    """The commits of one `BASE..HEAD`, oldest first, as git itself reports them.
+
+    `--reverse` so the table reads in the order the work happened, which is the order a human
+    checking it against `git log` will scroll.
+    """
+    return [c.strip() for c in git(repo, 'rev-list', '--reverse', rng).splitlines() if c.strip()]
+
+
+def resolve_range_rows(repo: str, rows: Sequence[Mapping]) -> tuple[list[dict], list[str]]:
+    """Attach each row's commit list by asking git. `(resolved rows, unresolvable descriptions)`.
+
+    A row whose two shas git cannot walk is UNRESOLVABLE and refuses rather than being skipped.
+    Skipping it would move its commits into the complement and demand a Codex review of what may
+    be Codex's own work — the exact substitution this store exists to prevent — so the one safe
+    answer is to say which row could not be read and in which repository.
+    """
+    resolved: list[dict] = []
+    bad: list[str] = []
+    for row in rows:
+        start, end = str(row.get('startSha') or ''), str(row.get('endSha') or '')
+        if not start or not end:
+            bad.append('task {} of track {} records no {} sha'
+                       .format(row.get('task'), row.get('track'),
+                               'start' if not start else 'end'))
+            continue
+        try:
+            commits = git_range_commits(repo, f'{start}..{end}')
+        except subprocess.CalledProcessError as exc:
+            bad.append('task {} of track {} claims {}..{}, which git cannot walk in {} ({})'
+                       .format(row.get('task'), row.get('track'), start[:12], end[:12], repo,
+                               (exc.stderr or '').strip().splitlines()[:1] or 'no stderr'))
+            continue
+        resolved.append(dict(row, commits=commits))
+    return resolved, bad
+
+
+def check_ranges(arc: str, repo: str, rng: str, events: Sequence[Mapping],
+                 rows: Sequence[Mapping]) -> tuple[dict | None, list[str]]:
+    """The range verdict for `rng`, or `(None, why it could not be computed)`.
+
+    Separated from the refusal text so that `close-round` and `converge` ask the SAME question and
+    only their sentences differ. Two copies of this sequence is the shape where one command's
+    independence rule drifts from the other's, and the one that drifts is whichever is run less.
+    """
+    try:
+        commits = git_range_commits(repo, rng)
+    except subprocess.CalledProcessError as exc:
+        return None, ['git cannot resolve {!r} in {}: {}'
+                      .format(rng, repo, (exc.stderr or '').strip() or 'no stderr')]
+    if not commits:
+        return None, ['{!r} names no commit in {} — a range table over an empty range proves '
+                      'nothing, so this is refused rather than passed vacuously'.format(rng, repo)]
+    resolved, bad = resolve_range_rows(repo, ranges_for_arc(rows, arc))
+    if bad:
+        return None, bad
+    return range_verdict(commits, resolved, review_artifact_parties(events)), []
+
+
+def render_range_refusal(verdict: Mapping) -> str:
+    """Why this range does not satisfy requirement 3, naming every range and every commit.
+
+    Named rather than counted: the remedy for an ambiguous commit is editing the store, and the
+    remedy for an unreviewed range is a review — so a reader who is told only "2 problems" has to
+    go and find out which of the two they are looking at.
+    """
+    lines: list[str] = []
+    for sha, tasks in verdict['ambiguous']:
+        lines.append('  commit {} is claimed by {} range rows ({}) — two rows disagree about who '
+                     'wrote it, and the independence gate would answer from whichever it read '
+                     'first.'.format(sha[:12], len(tasks), ', '.join(tasks)))
+    for entry in verdict['missing']:
+        if entry['task'] == COMPLEMENT_TASK:
+            lines.append('  {} commit(s) are claimed by no range row, so they are CLAUDE-authored '
+                         'by the complement rule and need a party=codex review artifact in this '
+                         'arc: {}.'
+                         .format(len(entry['commits']),
+                                 ', '.join(c[:12] for c in entry['commits'][:8])
+                                 + (', …' if len(entry['commits']) > 8 else '')))
+        else:
+            lines.append('  range {} ({}..{}, {} commit(s)) was authored by {} and has no '
+                         'party={} review artifact in this arc — a verdict by the author over its '
+                         'own range is the one substitution that turns the loop into theatre.'
+                         .format(entry['task'], str(entry['startSha'])[:12],
+                                 str(entry['endSha'])[:12], len(entry['commits']),
+                                 entry['authorParty'], entry['reviewParty']))
+    return '\n'.join(lines)
+
+
+def review_artifact_parties(events: Sequence[Mapping], track: str | None = None,
+                            rnd=None) -> set[str]:
+    """Every party holding a SUCCESSFUL review artifact in this ledger.
+
+    Only `rc=0` review jobs count: a review that failed or was quarantined wrote no verdict, and
+    an independence gate satisfied by a failed review is the gate not existing.
+
+    The reserved one-off track is excluded. A one-off is an UNATTRIBUTED call whose arc is shared
+    per user (`run-codex.sh --one-off`), so counting it would let any session's unrelated
+    `codex-opinion` call discharge another session's independence requirement.
+    """
+    ends = {ev.get('job'): ev for ev in events if ev.get('ev') == 'end'}
+    parties: set[str] = set()
+    for ev in events:
+        if ev.get('ev') != 'start' or ev.get('kind') != 'review':
+            continue
+        if str(ev.get('track')) == ONE_OFF_TRACK:
+            continue
+        if track is not None and str(ev.get('track')) != str(track):
+            continue
+        if rnd is not None and str(ev.get('round')) != str(rnd):
+            continue
+        if ends.get(ev.get('job'), {}).get('rc') != 0:
+            continue
+        parties.add(str(ev.get('party') or DEFAULT_REVIEW_PARTY))
+    return parties
+
+
+#: The contract `run-codex.sh` hands `codex exec --output-schema`, which is therefore the contract
+#: a Claude review artifact must also satisfy for `round_findings` to be able to count it.
+REVIEW_SCHEMA_PATH = os.path.join(HERE, 'review-output.schema.json')
+
+
+def review_schema_contract(path: str = REVIEW_SCHEMA_PATH) -> dict:
+    """`{top, finding, severities, verdicts}` READ FROM the schema file, never retyped.
+
+    `jsonschema` is not installed on this machine (measured 2026-10-28: `import jsonschema` raises
+    `ModuleNotFoundError`), so the validation below is hand-rolled. A hand-rolled validator
+    carrying its own copy of the field list would be a SECOND contract, free to drift from the one
+    the launcher passes to codex — and the drift would show up as a Claude verdict this loop
+    accepts and codex's own runs could never produce. The file is the contract; this reads it.
+    """
+    with open(path, encoding='utf-8') as fh:
+        doc = json.load(fh)
+    finding = doc['properties']['findings']['items']
+    return dict(top=tuple(doc['required']),
+                finding=tuple(finding['required']),
+                severities=tuple(finding['properties']['severity']['enum']),
+                verdicts=tuple(doc['properties']['verdict']['enum']))
+
+
+def verdict_errors(doc, contract: Mapping) -> list[str]:
+    """Every way `doc` fails the review-output contract, in order. Empty means it passes.
+
+    Every way, and not the first: an artifact rejected one field at a time costs one round trip per
+    field, and the party fixing it is a session that has already finished reviewing.
+    """
+    errs: list[str] = []
+    if not isinstance(doc, Mapping):
+        return [f'the verdict is a {type(doc).__name__}, not a JSON object']
+    for field in contract['top']:
+        if field not in doc:
+            errs.append(f'missing required top-level field {field!r}')
+    if 'verdict' in doc and doc['verdict'] not in contract['verdicts']:
+        errs.append('verdict is {!r}; the schema allows {}'
+                    .format(doc['verdict'], ' | '.join(contract['verdicts'])))
+    findings = doc.get('findings')
+    if 'findings' in doc and not isinstance(findings, list):
+        errs.append(f'findings is a {type(findings).__name__}, not an array')
+        findings = []
+    for i, f in enumerate(findings or []):
+        if not isinstance(f, Mapping):
+            errs.append(f'findings[{i}] is a {type(f).__name__}, not an object')
+            continue
+        for field in contract['finding']:
+            if field not in f:
+                errs.append(f'findings[{i}] is missing required field {field!r}')
+        if 'severity' in f and f['severity'] not in contract['severities']:
+            errs.append('findings[{}].severity is {!r}; the schema allows {}'
+                        .format(i, f['severity'], ' | '.join(contract['severities'])))
+    return errs
+
+
+# ------------------------------------------------------------ run summaries (§4.4, §4.5)
+# `keep_verdict(baseline, candidate)` refuses when the baseline is `None`, and until this store
+# existed NOTHING wrote a `RunSummary` anywhere: the keep rule would have refused every comparison
+# forever, which reads as the gate working rather than as a missing producer. One JSON object per
+# run, beside `outcomes.jsonl` in the same arc directory and NOT inside it — two stores in one file
+# would make each one's uniqueness key evaluate the other's rows.
+RUN_SUMMARIES = 'run-summaries.jsonl'
+
+#: The uniqueness key. A run id is unique within an arc and an arc directory is per job, so the
+#: two together are the identity; `runId` alone would collide the moment two arcs shared a store.
+RUN_SUMMARY_KEY_FIELDS = ('arc', 'runId')
+
+#: The persisted fields of a `RunSummary`, in `review_eval`'s own field order, camelCased for the
+#: row. `catches`, `escape_cases` and `clean_cases` are deliberately ABSENT: S1 made them
+#: properties of the sets they count, so persisting one would reintroduce the integer a caller
+#: could supply — the exact shape that let a per-finding sum be passed where a per-case count
+#: belongs.
+RUN_SUMMARY_SET_FIELDS = (
+    ('case_ids', 'caseIds'),
+    ('caught_case_ids', 'caughtCaseIds'),
+    ('scorable_case_ids', 'scorableCaseIds'),
+    ('clean_case_ids', 'cleanCaseIds'),
+)
+RUN_SUMMARY_SCALAR_FIELDS = (
+    ('false_alarms', 'falseAlarms'),
+    ('case_manifest_hash', 'caseManifestHash'),
+    ('malformed_findings', 'malformedFindings'),
+    ('out_of_scope_findings', 'outOfScopeFindings'),
+)
+
+#: Everything a second row for one run could DISAGREE about: the summary itself and the judge that
+#: produced part of it. `judge` is in here rather than outside it because two runs of one id that
+#: used different models are two runs, not one recorded twice.
+RUN_SUMMARY_VALUE_FIELDS = tuple(
+    [row for _, row in RUN_SUMMARY_SET_FIELDS] + [row for _, row in RUN_SUMMARY_SCALAR_FIELDS]
+) + ('judge',)
+
+#: Stamped on every row, outside the key and outside the identity comparison, for the same reason
+#: `OUTCOME_STAMP` is: a retry is the same result recorded again, and a clock reading is not part
+#: of the result. Epoch seconds, as the ledger's `t` is.
+RUN_SUMMARY_STAMP = 'recordedAt'
+
+
+def run_summaries_path(arc: str) -> str:
+    return os.path.join(arc, RUN_SUMMARIES)
+
+
+def run_summaries_read(arc: str) -> list[dict]:
+    return _jsonl_read(run_summaries_path(arc))
+
+
+def run_summary_row(arc: str, run_id: str, summary, judge: Mapping | None) -> dict:
+    """One `RunSummary` as a row. The ONLY serialiser, so there is one field mapping.
+
+    `judge` is REQUIRED and may be `None`, which is a recorded fact rather than a missing key: a
+    run that did no near-miss judging says so, and a reader can tell that from a run whose judge
+    was never written down. S8 fills it with the model identity and effort it used.
+    """
+    row = {'arc': canonical_arc(arc), 'runId': run_id,
+           'judge': dict(judge) if judge is not None else None}
+    for attr, key in RUN_SUMMARY_SET_FIELDS:
+        row[key] = list(getattr(summary, attr))
+    for attr, key in RUN_SUMMARY_SCALAR_FIELDS:
+        row[key] = getattr(summary, attr)
+    return row
+
+
+def run_summary_from_row(row: Mapping):
+    """A row back into a `RunSummary`, through its own constructor so its refusals still fire.
+
+    The sets come back as TUPLES, not lists: `RunSummary` is a frozen dataclass compared by value,
+    and a list-valued field would make a round-tripped summary unequal to the one that was written
+    while every member matched.
+    """
+    kwargs = {attr: tuple(row[key]) for attr, key in RUN_SUMMARY_SET_FIELDS}
+    kwargs.update({attr: row[key] for attr, key in RUN_SUMMARY_SCALAR_FIELDS})
+    return review_eval.RunSummary(**kwargs)
+
+
+def run_summary_admission(existing: Sequence[Mapping], new: Mapping) -> tuple[str, str]:
+    """May this run summary be appended? Same rule as the finding store, its own words."""
+    verdict, was, fields = store_admission(existing, new, RUN_SUMMARY_KEY_FIELDS,
+                                           RUN_SUMMARY_VALUE_FIELDS)
+    if verdict == 'append':
+        return 'append', ''
+    if verdict == 'idempotent':
+        return 'idempotent', (
+            'run {!r} of arc {} is already recorded with an identical summary; recorded once, so '
+            'this retry appends nothing'.format(new.get('runId'), new.get('arc'))
+        )
+    return 'refuse', (
+        'run {!r} of arc {} is already recorded and this summary differs on {}. One run id, one '
+        'result: a second reading of one run is two answers rather than a correction, and the keep '
+        'rule compares these sets across runs, so a disagreement between them does not fail — it '
+        'answers wrongly. The stored row stands.'
+        .format(new.get('runId'), new.get('arc'), ', '.join(fields))
+    )
+
+
+def run_summaries_record(arc: str, row: dict) -> tuple[str, str]:
+    """Record one run summary. Read, decide and append as ONE transaction under the store's lock."""
+    os.makedirs(arc, exist_ok=True)
+    return store_record(run_summaries_path(arc), row, run_summary_admission, RUN_SUMMARY_STAMP,
+                        'summary for this run')
+
+
+def run_summary_baseline(records: Sequence[Mapping], arc: str) -> dict | None:
+    """The most recently recorded summary of `arc`, or `None`.
+
+    `None` and never an empty summary. An empty one would let the keep rule's like-with-like gate
+    pass vacuously — identical (empty) case sets compare equal on both halves — which is the one
+    answer a gate must not give in the absence of its own input.
+
+    "Most recent" is by `recordedAt`, with the file's own order breaking a tie, because two rows
+    can share a clock reading on a fast machine and append order is the only remaining evidence.
+    """
+    want = canonical_arc(arc)
+    mine = [r for r in records if canonical_arc(str(r.get('arc') or '')) == want]
+    if not mine:
+        return None
+    best = max(range(len(mine)), key=lambda i: (float(mine[i].get(RUN_SUMMARY_STAMP) or 0.0), i))
+    return dict(mine[best])
+
+
+def run_summary_from_scores(doc: Mapping):
+    """Build a `RunSummary` from a scored-run document, THROUGH `build_run_summary`.
+
+    Never field by field. That producer derives `caught_case_ids` and `scorable_case_ids` from one
+    reading of one set of scores and refuses a duplicate case id; a recorder assembling the row
+    itself could write a summary whose two sets came from different readings, and the keep rule
+    compares exactly those two sets across runs.
+    """
+    scores = []
+    for raw in doc['escapeScores']:
+        scores.append(review_eval.CaseScore(
+            case_id=str(raw['caseId']),
+            caught=bool(raw['caught']),
+            verdicts=tuple(raw['verdicts']),
+            near_misses=tuple(raw['nearMisses']),
+            malformed=int(raw['malformed']),
+            out_of_scope=int(raw['outOfScope']),
+            scorable=bool(raw['scorable']),
+        ))
+    clean = {str(k): int(v) for k, v in doc['cleanFalseAlarms'].items()}
+    return review_eval.build_run_summary(scores, clean, str(doc['caseManifestHash']))
 
 
 def record_job(arc: str, track: str, rnd: int, kind: str, name: str, t_start: float, t_end: float,
@@ -652,6 +1828,24 @@ def admission_decision(closed: bool, corrupt: int) -> tuple[bool, str]:
     return True, ''
 
 
+def admit_into_round(events: Sequence[Mapping], track: str, rnd) -> tuple[bool, str]:
+    """May work be added to this round? The ONE call site of `admission_decision`.
+
+    Two commands add work to a round — `cmd_run` launching a job and `cmd_review` filing a review
+    artifact — and before this helper each carried its own copy of the pair (`round_status` for
+    the seal, `ledger_corrupt` for the hole). Two copies is the shape where one command checks the
+    seal and the other forgets, and the one that forgets is whichever is used less, which is the
+    newer of the two by construction. It also made the mutant that bypasses admission arm at two
+    sites, so a kill no longer isolated either: `loop.mutants.json`'s M64 anchors HERE, and it now
+    breaks both commands at once, which is the property worth pinning.
+
+    Takes the events the caller already read under the round lock rather than reading them again:
+    the whole point of the lock is that one snapshot answers every admission question in the
+    transaction, and a second read inside it could answer differently.
+    """
+    return admission_decision(round_status(events, track, rnd)['closed'], ledger_corrupt(events))
+
+
 def lock_modes(cpu: str, has_tree: bool, writes_tree: bool) -> tuple[str | None, str | None]:
     """The (tree, cpu) lock modes for a job.
 
@@ -833,13 +2027,6 @@ def unbounded_stop(text: str | None) -> str | None:
         return None
     return ('names no bound -- give a round ceiling, the census/last-panel that ends the region, '
             'or the finding class that may reopen it')
-
-
-# The reserved track `run-codex.sh --one-off` schedules itself onto. It exists so a single
-# unattributed Codex call still queues on the worktree's lock and still gets its movement check;
-# it is not a convergence arc and has no rounds beyond 1. run-codex.sh writes this literal, and
-# the two are pinned equal by a test -- if you rename it here, rename it there.
-ONE_OFF_TRACK = 'one-off'
 
 
 def preflight_decision(rnd: int, has_preflight: bool, paid_jobs: int, track: str = '') -> tuple[bool, str]:
@@ -1978,13 +3165,42 @@ def cmd_run(args) -> int:
         return die(f'cannot take locks under {lock_dir()}: {err} (refusing to run unlocked)', RC_LOCK)
     with round_lock(arc, args.track, args.round):
         events = ledger_read(arc)
-        ok, msg = admission_decision(round_status(events, args.track, args.round)['closed'],
-                                     ledger_corrupt(events))
+        ok, msg = admit_into_round(events, args.track, args.round)
         if not ok:
             print(f'loop.py: ADMISSION REFUSED launching {args.kind} into track {args.track} round '
                   f'{args.round}:\n{msg}', file=sys.stderr)
             return RC_GATE
-        if args.kind in GATED_KINDS:
+        if args.kind == 'review':
+            clash = review_name_collision(events, args.track, args.round, name, args.out or '')
+            if clash:
+                why, other = clash
+                if why == CLASH_ELSEWHERE:
+                    return die(
+                        'refusing to launch review {!r} into track {} round {}: a review of this '
+                        'round already carries that name and wrote its verdict to {}. A finding\'s '
+                        'id is <name>#<index>, so two verdict files under one name mint one id for '
+                        'two different findings and the round would close with one of them '
+                        'undispositioned. Give this run its own --name.'
+                        .format(name, args.track, args.round, other), RC_FAILCLOSED)
+                return die(
+                    'refusing to launch review {!r} into track {} round {}: a review of this round '
+                    'already carries that name and ended SUCCESSFULLY, writing {}. Re-running it '
+                    'would overwrite that verdict, and the round reads only the file that survives, '
+                    'so every finding the first run reported and this one does not would vanish '
+                    'with its outcome left as a stray nothing refuses on. The name is spent for '
+                    'this round: give this run its own --name. Only a review that FAILED or was '
+                    'quarantined may be retried under the same name.'
+                    .format(name, args.track, args.round, other or '(no --out recorded)'),
+                    RC_FAILCLOSED)
+        # The reserved one-off track is CARVED OUT, and the condition is derived from
+        # `ONE_OFF_TRACK` rather than spelling the string a second time (`cmd_one_off_track` exists
+        # for the same reason). `cmd_close_round` REFUSES on that track by design, so a one-off
+        # whose previous round was gated could never be unblocked by any command this tool offers:
+        # the gate would demand a close that the closer refuses, forever. The arc is shared per
+        # user (`${TMPDIR}/cc-one-off-$(id -u)`), so the first session to leave a round open there
+        # would wedge every later `codex-opinion` call on the machine. Pinned in both directions by
+        # `TestLaunchGateCarvesOutTheOneOffTrack`.
+        if args.kind in GATED_KINDS and str(args.track) != ONE_OFF_TRACK:
             ok, msg = gate(arc, args.track, args.round)
             if not ok:
                 print(f'loop.py: GATE REFUSED launching {args.kind} for track {args.track} round {args.round}:\n{msg}', file=sys.stderr)
@@ -2046,7 +3262,14 @@ def cmd_run(args) -> int:
     start_ev = dict(ev='start', t=t_start, job=job, track=args.track, round=args.round, kind=args.kind, name=name,
                     cpu=cpu, tree=tree, reads_sha=(tree_before[0] if tree_before else args.reads_sha),
                     t_req=t_req, queued_s=queued, cmd=cmd, cwd=cwd, log=log, out=args.out, checkpoint=checkpoint,
-                    affected=affected_files or None, pid=os.getpid(), tree_status=(tree_before[1] if tree_before else None))
+                    affected=affected_files or None, pid=os.getpid(), tree_status=(tree_before[1] if tree_before else None),
+                    # Requirement 3 needs to know WHO reviewed, and `loop.py run` launches a child
+                    # process — which a Claude reviewer subagent is not. Every review that reaches
+                    # here is therefore a `run-codex.sh` launch, and `--party` exists so that fact
+                    # is recorded rather than inferred later from the absence of a field. Stamped
+                    # only on a review: a `write` or `vitest` event carrying a reviewing party
+                    # would be a field with no meaning that some later reader would read anyway.
+                    party=(args.party if args.kind == 'review' else None))
     ledger_append(arc, start_ev)
     print(f'loop.py: [{job}] {args.kind}/{cpu} queued {queued:.1f}s → running: {shlex.join(cmd)}'
           + (f'  (log: {log})' if log else ''), file=sys.stderr)
@@ -2058,7 +3281,14 @@ def cmd_run(args) -> int:
     try:
         # The inner handshake: run-codex.sh honours CC_LOOP_JOB only when the ledger shows this
         # job started by ITS parent pid, so the marker cannot be forged by passing a flag.
-        child_env = dict(os.environ, CC_LOOP_JOB=job, CC_LOOP_ARC=arc)
+        # CC_LOOP_TRACK/ROUND/NAME join the handshake because `run-codex.sh` write mode has to
+        # record its authored range under (arc, track, task) and the inner launcher carries no
+        # --track of its own (see its own comment at the re-exec). The alternative was parsing
+        # `CC_LOOP_JOB`, which is `<track>.r<round>.<name>.<ms>.<pid>` — and both a track label and
+        # a job name may contain a dot, so that parse is ambiguous by construction.
+        child_env = dict(os.environ, CC_LOOP_JOB=job, CC_LOOP_ARC=arc,
+                         CC_LOOP_TRACK=str(args.track), CC_LOOP_ROUND=str(args.round),
+                         CC_LOOP_NAME=str(name))
 
         # Handlers go on BEFORE the fork. Installed after it, a signal landing in the window between
         # Popen and signal.signal() takes the DEFAULT disposition: the scheduler dies, its flock is
@@ -2158,10 +3388,23 @@ def cmd_run(args) -> int:
         # with this process, but the child inherited copies, so the tree stays locked while it lives.
         print(f'loop.py: [{job}] NOT TERMINAL — {reason}', file=sys.stderr)
         return RC_FAILCLOSED
+    # After the tree-move branch above, so a quarantined review (rc is RC_FAILCLOSED there, and
+    # the output has been moved to `<out>.tree-moved`) is never snapshotted: `round_findings`
+    # consults rc=0 reviews only, and there is nothing at `args.out` to copy.
+    if args.kind == 'review' and rc == 0 and args.out:
+        kept = keep_verdict(arc, job, args.out)
+        if kept:
+            end_ev['verdict'] = kept
     end_ev.update(rc=rc, reason=reason, span_s=span_s)
     ledger_append(arc, end_ev)
     print(f'loop.py: [{job}] done rc={rc} in {hms(t_end - t_start)} — {reason}', file=sys.stderr)
     return rc
+
+
+def cmd_one_off_track(_args) -> int:
+    """Print the reserved track name, so `run-codex.sh` need not spell it a second time."""
+    print(ONE_OFF_TRACK)
+    return 0
 
 
 def cmd_gate(args) -> int:
@@ -2441,6 +3684,119 @@ def cmd_close_round(args) -> int:
                        'abandoned).{}'
                        .format(args.round, args.track, len(dead),
                                ', '.join(str(j['name']) for j in dead), extra), RC_FAILCLOSED)
+        # §5.5: a round cannot close while any of its findings has no outcome. The requirement
+        # joins the gate that already decides whether the next round may launch, so the
+        # enforcement sits at a chokepoint rather than depending on an agent remembering. The
+        # change is additive: a round whose reviewers reported no findings — or that ran no
+        # review job at all — closes exactly as it did before, which is every round of every
+        # in-flight arc that predates this store.
+        # `review_name_collision` exempts the reserved one-off track because nothing closes a
+        # round there. That is an assumption until something enforces it, and an exemption whose
+        # premise is only a comment is the shape where a round DOES close one day having lost a
+        # finding to a reused name. So the premise is the mechanism: the close is refused here.
+        if str(args.track) == ONE_OFF_TRACK:
+            return die('cannot close round {} of track {!r}: that track is reserved for '
+                       '`run-codex.sh --one-off`, whose arc is shared per user and whose rounds '
+                       'are never accounted. A one-off reports no finding outcomes, and '
+                       '`review_name_collision` exempts this track on the strength of nothing '
+                       'closing a round on it — closing one would seal a round that may have '
+                       'reused a review name. Attribute the work to a real arc/track/round if it '
+                       'needs a round at all.'
+                       .format(args.round, ONE_OFF_TRACK), RC_FAILCLOSED)
+        rows = outcomes_read(arc)
+        corrupt_outcomes = ledger_corrupt(rows)
+        if corrupt_outcomes:
+            return die(f'cannot close round {args.round} of track {args.track}: '
+                       f'{outcomes_path(arc)} holds {corrupt_outcomes} unparseable row(s), so '
+                       'whether every finding carries an outcome cannot be established. Repair '
+                       'or archive the outcome store first.', RC_FAILCLOSED)
+        dupes = outcome_duplicate_keys(rows)
+        if dupes:
+            return die('cannot close round {} of track {}: the outcome store holds duplicate '
+                       'key(s) {} — decision 5 gives each finding EXACTLY ONE outcome, and a '
+                       'duplicate means two readings of one finding that every count would then '
+                       'answer from whichever row it read first. `loop.py finding record` cannot '
+                       'produce one, so these were written by something else.'
+                       .format(args.round, args.track,
+                               ', '.join('/'.join(k) for k in dupes)), RC_FAILCLOSED)
+        found, unreadable = round_findings(events, args.track, args.round)
+        if unreadable:
+            return die('cannot close round {} of track {}: {} review verdict(s) this round '
+                       'recorded cannot be read, so the round\'s finding count is UNKNOWN and an '
+                       'unrecorded outcome cannot be ruled out — {}. Unknown is not zero, and '
+                       'zero is the one value that would make the requirement vacuous. This loop '
+                       'keeps its own copy of every paid review verdict under {}, and the path '
+                       'named above is already that copy where one was taken — so a verdict '
+                       'unreadable here was either never snapshotted (a ledger written before '
+                       'this loop kept them, or a snapshot whose WARNING was printed at the time) '
+                       'or has been removed since. Restore the file at the path named and close '
+                       'again.'
+                       .format(args.round, args.track, len(unreadable), '; '.join(unreadable),
+                               os.path.join(arc, 'verdicts')),
+                       RC_FAILCLOSED)
+        missing, stray = outcome_coverage(found, outcomes_for_round(rows, arc, args.track, args.round))
+        if stray:
+            print('note: {} outcome row(s) name no finding this round reported — {}. Recorded '
+                  'anyway (see `outcome_coverage` for why a stray does not refuse), but one of '
+                  'them is usually a mistyped id whose real finding is still unrecorded.'
+                  .format(len(stray), ', '.join(stray)), file=sys.stderr)
+        if missing:
+            return die('cannot close round {} of track {}: {} of {} finding(s) carry no outcome '
+                       '— {}. Decision 5 gives every finding exactly one of {}. Record each with '
+                       '`loop.py finding record --arc {} --track {} --round {} --id <id> ...`; '
+                       'ids are <lens job name>#<index in that verdict\'s findings array>.'
+                       .format(args.round, args.track, len(missing), len(found),
+                               ', '.join(missing), ' | '.join(review_eval.FINDING_OUTCOMES),
+                               shlex.quote(arc), shlex.quote(str(args.track)), args.round),
+                       RC_FAILCLOSED)
+        # Requirement 3 at the round boundary: no commit of the range claimed twice, and every
+        # range reviewed by the party that did NOT write it. ADDITIVE in exactly the way the
+        # outcome store was — an arc with no range rows closes as it did before, which is every
+        # in-flight arc on this machine. Rows PRESENT with no `--range` fails CLOSED rather than
+        # closing vacuously: that is the one direction a "check it only if you asked" gate is
+        # always wrong in, because the party who would not ask is the party with something to hide.
+        raw_ranges = ranges_read(arc)
+        corrupt_ranges = ledger_corrupt(raw_ranges)
+        if corrupt_ranges:
+            return die(f'cannot close round {args.round} of track {args.track}: '
+                       f'{ranges_path(arc)} holds {corrupt_ranges} unparseable row(s), so who '
+                       'authored this range cannot be established. Repair or archive the range '
+                       'store first.', RC_FAILCLOSED)
+        range_dupes = store_duplicate_keys(raw_ranges, RANGE_KEY_FIELDS)
+        if range_dupes:
+            return die('cannot close round {} of track {}: the range store holds duplicate key(s) '
+                       '{} — exactly one author per task, and a duplicate means two rows '
+                       'disagreeing about who wrote a span of commits. `loop.py range record` '
+                       'cannot produce one, so these were written by something else.'
+                       .format(args.round, args.track,
+                               ', '.join('/'.join(k) for k in range_dupes)), RC_FAILCLOSED)
+        arc_ranges = ranges_for_arc(raw_ranges, arc)
+        if arc_ranges and not args.range:
+            return die('cannot close round {} of track {}: this arc records {} authored range(s), '
+                       'so requirement 3 (every range approved by a non-author) is live here — and '
+                       'it cannot be checked without the commit range this round closes over. '
+                       'Re-run with --range BASE..HEAD (and --repo DIR if the repository is not '
+                       'the current directory). An arc with no range rows still closes with no '
+                       '--range; this one has rows.'
+                       .format(args.round, args.track, len(arc_ranges)), RC_FAILCLOSED)
+        if args.range:
+            repo = os.path.abspath(args.repo or os.getcwd())
+            if tree_state(repo) is None:
+                return die(f'--range needs a git worktree to resolve in; {repo} is not one (pass '
+                           '--repo DIR)', RC_USAGE)
+            range_check, range_errs = check_ranges(arc, repo, args.range, events, raw_ranges)
+            if range_errs:
+                return die('cannot close round {} of track {}: the range {!r} cannot be checked:\n{}'
+                           .format(args.round, args.track, args.range,
+                                   '\n'.join('  - ' + e for e in range_errs)), RC_FAILCLOSED)
+            assert range_check is not None
+            if not range_check['ok']:
+                return die('cannot close round {} of track {}: requirement 3 is not satisfied over '
+                           '{}:\n{}\nRecord the missing review with `loop.py review record '
+                           '--party <the other party> --name <lens> --verdict <path>`; a range row '
+                           'is corrected by editing the store, never by a second append.'
+                           .format(args.round, args.track, args.range,
+                                   render_range_refusal(range_check)), RC_FAILCLOSED)
         txt, res = profile_text(arc, args.dirs, args.track, args.round, args.timeline)
         if res.get('empty') and not args.empty_ok:
             print(txt)
@@ -2487,6 +3843,407 @@ def cmd_lever(args) -> int:
         print(f'note: {args.id} was not TRIGGERED at the close of round {args.round}; recording anyway', file=sys.stderr)
     ledger_append(arc, dict(ev='lever', track=args.track, round=args.round, id=args.id, state=args.state, note=args.note))
     print(f'recorded {args.id} {args.state} for track {args.track} round {args.round}')
+    return 0
+
+
+def cmd_finding(args) -> int:
+    """`loop.py finding <record|report>` — the finding-outcome store's two commands.
+
+    One command with two actions rather than two commands, because both are about the same store
+    and the report's whole claim is that it reads the rows the recorder wrote.
+    """
+    arc = need_arc(args)
+    if not arc:
+        return RC_USAGE
+    if args.action == 'report':
+        return _finding_report(args, arc)
+    return _finding_record(args, arc)
+
+
+def _finding_report(args, arc: str) -> int:
+    """`loop.py finding report` — counts by kind, by severity and by round (§5.6).
+
+    Refuses over an unparseable store rather than reporting the smaller number it could still
+    count. A corrupt row is a row whose outcome is unknown, and a report that silently omitted it
+    would answer a question nobody asked — "how many rows can I read" rather than "what happened
+    to this round's findings".
+    """
+    records = outcomes_read(arc)
+    corrupt = ledger_corrupt(records)
+    if corrupt:
+        return die(
+            f'refusing to report: {outcomes_path(arc)} holds {corrupt} unparseable row(s), so the '
+            'counts below would be of what could be read rather than of what was recorded',
+            RC_FAILCLOSED)
+    print(render_outcome_report(outcome_report(records, arc, track=args.track, rnd=args.round)))
+    return 0
+
+
+def _finding_record(args, arc: str) -> int:
+    """`loop.py finding record` — file the ONE outcome a review finding gets (§5.1–§5.4).
+
+    The closed set of six comes from `review_eval.FINDING_OUTCOMES` rather than from a second
+    tuple here. Two copies of a closed set is the shape where a seventh value is accepted by one
+    reader and refused by the other, and this store's whole claim is that `outcome` is validated
+    against that set "and nothing else".
+
+    It is validated HERE rather than by `argparse(choices=...)` on purpose: argparse would refuse
+    first, with its own exit code and its own message, so the refusal a programmatic caller gets
+    from `outcome_admission` would never be the refusal the CLI exercises, and the test for it
+    would be a test of argparse.
+    """
+    if args.outcome not in review_eval.FINDING_OUTCOMES:
+        return die('--outcome must be one of {}; {!r} is outside the closed set of six that '
+                   'decision 5 names, and an unrecognised outcome cannot be counted'
+                   .format(list(review_eval.FINDING_OUTCOMES), args.outcome), RC_FAILCLOSED)
+    if not args.note.strip():
+        return die('--note must say what happened to this finding; an outcome with no note is a '
+                   'label nobody can audit', RC_USAGE)
+    if args.line_start > args.line_end:
+        return die(f'--line-start {args.line_start} is after --line-end {args.line_end}',
+                   RC_USAGE)
+    rec = {
+        'arc': canonical_arc(arc), 'track': args.track, 'round': args.round,
+        'findingId': args.id,
+        'severity': args.severity, 'file': args.file,
+        'lineStart': args.line_start, 'lineEnd': args.line_end,
+        'outcome': args.outcome, 'note': args.note,
+    }
+    missing = [f for f in OUTCOME_FIELDS if rec.get(f) in (None, '')]
+    if missing:
+        return die(f'every field of a finding outcome is required; missing: {", ".join(missing)}',
+                   RC_USAGE)
+    verdict, reason = outcomes_record(arc, rec)
+    if verdict == 'refuse':
+        return die(reason, RC_FAILCLOSED)
+    if verdict == 'idempotent':
+        print(reason)
+        return 0
+    print('recorded {} = {!r} for track {} round {}'
+          .format(args.id, args.outcome, args.track, args.round))
+    return 0
+
+
+def cmd_review(args) -> int:
+    """`loop.py review record` — file a review by a party that launches no child (requirement 2).
+
+    MEASURED 2026-10-28 on arc `jobs/66648556/tmp`: all 16 paid verdicts were Codex's and the arc
+    held 0 Claude review artifacts. That was not the Claude half of step 7 failing to run — a
+    reviewer subagent writes into a session transcript, and no command existed that could file its
+    verdict anywhere the loop reads. An absence by construction is indistinguishable from a review
+    that never happened, which is exactly why property 3 was unprovable from the record.
+
+    What this writes is deliberately the SAME pair of ledger events a launched review writes, with
+    `party` set, so no second gate is needed anywhere: `round_findings` counts its findings and
+    §5.5 therefore refuses the close while any of them lacks an outcome, and
+    `review_artifact_parties` reads it for the independence check. One new command, zero new gates.
+    """
+    arc = need_arc(args)
+    if not arc:
+        return RC_USAGE
+    if args.party not in PARTIES:
+        return die(f'--party must be one of {list(PARTIES)}; authorship here is binary and a third '
+                   'party would make the complement rule unsound', RC_USAGE)
+    path = os.path.abspath(args.verdict)
+    try:
+        with open(path, encoding='utf-8') as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return die(f'cannot read the verdict at {path}: {type(exc).__name__}: {exc}. A review '
+                   'artifact this loop cannot read is one `close-round` would later refuse the '
+                   'round over, so it is refused here where the reviewer is still in the room.',
+                   RC_FAILCLOSED)
+    errs = verdict_errors(doc, review_schema_contract())
+    if errs:
+        return die('the verdict at {} does not satisfy {}:\n{}\nThis is the same contract '
+                   '`run-codex.sh` hands `codex exec --output-schema`, so a Claude review is held '
+                   'to what a Codex review is held to — otherwise the two halves of one round '
+                   'would not be comparable and `round_findings` could not count both.'
+                   .format(path, os.path.basename(REVIEW_SCHEMA_PATH),
+                           '\n'.join('  - ' + e for e in errs)), RC_FAILCLOSED)
+    name = args.name
+    err = lock_dir_ready()
+    if err:
+        return die(f'cannot take locks under {lock_dir()}: {err} (refusing to record unlocked)',
+                   RC_LOCK)
+    with round_lock(arc, args.track, args.round):
+        events = ledger_read(arc)
+        ok, msg = admit_into_round(events, args.track, args.round)
+        if not ok:
+            # The same admission rule a launch obeys, for the same reason: a review filed after
+            # the close adds findings the close already accounted for as absent.
+            return die(f'cannot record a review into track {args.track} round {args.round}:\n{msg}',
+                       RC_GATE)
+        clash = review_name_collision(events, args.track, args.round, name, path)
+        if clash:
+            why, other = clash
+            return die(
+                'refusing to record review {!r} into track {} round {}: a review of this round '
+                'already carries that name and {}. A finding\'s id is <name>#<index>, so two '
+                'verdicts under one name mint one id for two findings and the round would close '
+                'with one of them undispositioned. Give this artifact its own --name.'
+                .format(name, args.track, args.round,
+                        'wrote its verdict to ' + other if why == CLASH_ELSEWHERE
+                        else 'ended successfully, writing ' + (other or '(no path recorded)')),
+                RC_FAILCLOSED)
+        t = now()
+        job = f'{args.track}.r{args.round}.{name}.{int(t * 1000)}.{os.getpid()}'
+        kept = keep_verdict(arc, job, path)
+        ledger_append(arc, dict(ev='start', t=t, job=job, track=args.track, round=args.round,
+                                kind='review', name=name, cpu='none', tree=None, out=path,
+                                party=args.party, pid=os.getpid(), recorded=True))
+        ledger_append(arc, dict(ev='end', t=now(), job=job, track=args.track, round=args.round,
+                                kind='review', name=name, rc=0, verdict=kept or None,
+                                party=args.party, recorded=True))
+    ids = [finding_id(name, i) for i in range(len(doc.get('findings') or []))]
+    print('recorded a {} review {!r} of track {} round {}: {} finding(s){}'
+          .format(args.party, name, args.track, args.round, len(ids),
+                  '' if not kept else f'; verdict kept at {kept}'))
+    if ids:
+        print('each of these now needs exactly one outcome before the round can close:')
+        for fid in ids:
+            print(f'  {fid}')
+    return 0
+
+
+def cmd_range(args) -> int:
+    """`loop.py range record` — one row per authored commit range (requirement 3).
+
+    Normally written by `run-codex.sh` write mode rather than by hand: the launcher already knows
+    `START_SHA` because it measured it before handing the worktree over, and a row a session has
+    to remember is a row that goes missing on the first resume path. The hand-written form exists
+    for the case the plan names — a range authored outside a write run — and it refuses to claim
+    the complement, because the complement is computed and never asserted.
+    """
+    arc = need_arc(args)
+    if not arc:
+        return RC_USAGE
+    if args.party not in PARTIES:
+        return die(f'--party must be one of {list(PARTIES)}', RC_USAGE)
+    if str(args.task) == COMPLEMENT_TASK:
+        return die('--task {!r} is reserved: the complement is DERIVED (every commit of the range '
+                   'no codex row claims) and never recorded. A row claiming it would let the '
+                   'author of those commits name their own reviewing party.'
+                   .format(COMPLEMENT_TASK), RC_FAILCLOSED)
+    rec = {'arc': canonical_arc(arc), 'track': args.track, 'task': args.task,
+           'party': args.party, 'startSha': args.start_sha, 'endSha': args.end_sha}
+    missing = [f for f in RANGE_FIELDS if rec.get(f) in (None, '')]
+    if missing:
+        return die(f'every field of a range row is required; missing: {", ".join(missing)}',
+                   RC_USAGE)
+    verdict, reason = ranges_record(arc, rec)
+    if verdict == 'refuse':
+        return die(reason, RC_FAILCLOSED)
+    if verdict == 'idempotent':
+        print(reason)
+        return 0
+    print('recorded range {} of track {}: {}..{} authored by {}'
+          .format(args.task, args.track, str(args.start_sha)[:12], str(args.end_sha)[:12],
+                  args.party))
+    return 0
+
+
+def arc_rounds(events: Sequence[Mapping]) -> dict[str, list[int]]:
+    """Every track this arc did anything on, and its rounds in order.
+
+    The reserved one-off track is excluded, because `cmd_close_round` refuses on it by design and
+    `converge` requiring a close there would be a requirement nothing can satisfy.
+    """
+    out: dict[str, set] = {}
+    for ev in events:
+        if ev.get('ev') not in TRACK_EVENTS:
+            continue
+        track = str(ev.get('track'))
+        rnd = ev.get('round')
+        if track in ('', 'None', ONE_OFF_TRACK):
+            continue
+        if not isinstance(rnd, int) or isinstance(rnd, bool) or rnd < 1:
+            continue
+        out.setdefault(track, set()).add(rnd)
+    return {t: sorted(rs) for t, rs in sorted(out.items())}
+
+
+def cmd_converge(args) -> int:
+    """`loop.py converge` — the one artifact a merge requires, obtainable only by closing everything.
+
+    This closes the gap the launch gate cannot reach. Gating round N+1 gates every round but the
+    LAST, and the last is the round convergence is declared on — so the final round's findings,
+    the ones that matter most, were the one set nothing could hold. The answer is not a new gate on
+    the round; it is to make the artifact the merge already requires be unobtainable while any
+    round is open.
+
+    What it verifies, and it is all re-used: every track's every round CLOSED, every finding of
+    every round carrying exactly one outcome, and the range table of `--range` with no commit
+    claimed twice and every range reviewed by the party that did not write it.
+
+    What it cannot verify, named rather than glossed: CI cannot check that the reviews happened,
+    because the arc is local and unpushed — memory a-gate-may-not-read-its-verdict-from-the-gated-party.
+    What the committed artifact CAN be held to is its own shape against the real commit list, which
+    the product-side validator recomputes from git. That turns "somebody forgot to close a round"
+    into "somebody would have to deliberately write a file whose commit list CI recomputes".
+    """
+    arc = need_arc(args)
+    if not arc:
+        return RC_USAGE
+    repo = os.path.abspath(args.repo or os.getcwd())
+    if tree_state(repo) is None:
+        return die(f'--repo {repo} is not a git worktree, so the range table cannot be computed '
+                   'from git', RC_USAGE)
+    events = ledger_read(arc)
+    corrupt = ledger_corrupt(events)
+    if corrupt:
+        return die(f'refusing to declare convergence: {ledger_path(arc)} holds {corrupt} '
+                   'unparseable record(s), so an open round cannot be ruled out', RC_FAILCLOSED)
+    tracks = arc_rounds(events)
+    if not tracks:
+        return die(f'refusing to declare convergence: {ledger_path(arc)} records no track with a '
+                   'round, so there is nothing whose closure could be checked. An arc that ran '
+                   'nothing has not converged; it has not started.', RC_FAILCLOSED)
+    rows = outcomes_read(arc)
+    corrupt_outcomes = ledger_corrupt(rows)
+    if corrupt_outcomes:
+        return die(f'refusing to declare convergence: {outcomes_path(arc)} holds '
+                   f'{corrupt_outcomes} unparseable row(s), so whether every finding carries an '
+                   'outcome cannot be established', RC_FAILCLOSED)
+    dupes = store_duplicate_keys(rows, OUTCOME_KEY_FIELDS)
+    if dupes:
+        return die('refusing to declare convergence: the outcome store holds duplicate key(s) {} '
+                   '— two readings of one finding, which every count would answer from whichever '
+                   'row it read first'.format(', '.join('/'.join(k) for k in dupes)),
+                   RC_FAILCLOSED)
+    open_rounds: list[str] = []
+    unreadable_all: list[str] = []
+    undispositioned: list[str] = []
+    table: list[dict] = []
+    reported = covered = 0
+    for track, rnds in tracks.items():
+        entries = []
+        for rnd in rnds:
+            st = round_status(events, track, rnd)
+            if not st['closed']:
+                open_rounds.append(
+                    '  round {} of track {} is not closed — run:\n    python3 {}/loop.py '
+                    'close-round --arc {} --track {} --round {}'
+                    .format(rnd, track, HERE, shlex.quote(arc), shlex.quote(track), rnd))
+                continue
+            found, unreadable = round_findings(events, track, rnd)
+            unreadable_all.extend(f'track {track} round {rnd}: {u}' for u in unreadable)
+            missing, _stray = outcome_coverage(found, outcomes_for_round(rows, arc, track, rnd))
+            reported += len(found)
+            covered += len(found) - len(missing)
+            if missing:
+                undispositioned.append(
+                    '  track {} round {}: {} of {} finding(s) carry no outcome — {}'
+                    .format(track, rnd, len(missing), len(found), ', '.join(missing)))
+            entries.append(dict(round=rnd, closedAt=st['close_t'],
+                                closedAtIso=(dt.datetime.fromtimestamp(st['close_t'],
+                                                                       dt.timezone.utc).isoformat()
+                                             if st['close_t'] else None),
+                                findingsReported=len(found),
+                                findingsWithOutcome=len(found) - len(missing)))
+        table.append(dict(track=track, lastRound=(rnds[-1] if rnds else None), rounds=entries))
+    refusals = open_rounds + undispositioned
+    if unreadable_all:
+        refusals.append('  {} review verdict(s) cannot be read, so a round\'s finding count is '
+                        'UNKNOWN and unknown is not zero — {}'
+                        .format(len(unreadable_all), '; '.join(unreadable_all)))
+    verdict, errs = check_ranges(arc, repo, args.range, events, ranges_read(arc))
+    if errs:
+        refusals.extend('  ' + e for e in errs)
+    elif verdict is not None and not verdict['ok']:
+        refusals.append(render_range_refusal(verdict))
+    if refusals:
+        return die('refusing to declare convergence for arc {}:\n{}\n\nEvery one of these is a '
+                   'thing the loop promised and can show. Nothing here has an override: the '
+                   'artifact a merge requires is exactly the artifact closing everything produces.'
+                   .format(arc, '\n'.join(refusals)), RC_GATE)
+    assert verdict is not None
+    base, head = args.range.split('..', 1) if '..' in args.range else (args.range, 'HEAD')
+    doc = {
+        'arc': canonical_arc(arc),
+        'generatedAt': now(),
+        'generatedAtIso': dt.datetime.now(dt.timezone.utc).isoformat(),
+        'repo': repo,
+        'range': args.range,
+        'base': git(repo, 'rev-parse', base.strip() or 'HEAD').strip(),
+        'head': git(repo, 'rev-parse', head.strip() or 'HEAD').strip(),
+        'tracks': table,
+        'findings': {'reported': reported, 'withOutcome': covered},
+        'reviewParties': sorted(review_artifact_parties(events)),
+        'rangeTable': [
+            {k: entry[k] for k in ('task', 'authorParty', 'reviewParty', 'startSha', 'endSha',
+                                   'commits')}
+            for entry in verdict['table']
+        ],
+    }
+    out = os.path.abspath(args.out or os.path.join(repo, 'convergence.json'))
+    write_atomic(out, json.dumps(doc, indent=1) + '\n')
+    print('CONVERGED: {} track(s), {} round(s), {} finding(s) all dispositioned, {} range(s) each '
+          'reviewed by a non-author.'
+          .format(len(table), sum(len(t['rounds']) for t in table), reported,
+                  len(doc['rangeTable'])))
+    print(f'wrote {out} — commit it, and name it on the pull request\'s `Convergence:` line.')
+    return 0
+
+
+def cmd_run_summary(args) -> int:
+    """`loop.py run-summary <record|baseline>` — the run-summary store's two commands (§4.4)."""
+    arc = need_arc(args)
+    if not arc:
+        return RC_USAGE
+    if args.action == 'baseline':
+        rows = run_summaries_read(arc)
+        corrupt = ledger_corrupt(rows)
+        if corrupt:
+            return die(f'refusing to answer: {run_summaries_path(arc)} holds {corrupt} '
+                       'unparseable row(s), so the most recent summary cannot be identified',
+                       RC_FAILCLOSED)
+        base = run_summary_baseline(rows, arc)
+        if base is None:
+            # Refuses rather than printing an empty summary: see `run_summary_baseline`.
+            return die(f'no run summary is recorded for arc {arc}, so there is no baseline to '
+                       'compare against. The keep rule refuses a comparison without one, which is '
+                       'the honest first answer rather than a defect to route around: record a '
+                       "run's summary with `loop.py run-summary record` and the next run has a "
+                       'baseline.', RC_FAILCLOSED)
+        print(json.dumps(base, indent=2, sort_keys=True))
+        return 0
+
+    if args.judge_model or args.judge_effort:
+        if not (args.judge_model and args.judge_effort):
+            return die('--judge-model and --judge-effort travel together: a model identity with '
+                       'no effort does not identify the judge that ran', RC_USAGE)
+        judge = {'model': args.judge_model, 'effort': args.judge_effort}
+    elif args.no_judge:
+        judge = None
+    else:
+        # A missing provenance field is reported, never silently filled. S8 persists the judge's
+        # identity here, and a run that did no near-miss judging must SAY so.
+        return die('this run summary records no judge. Pass --judge-model and --judge-effort for '
+                   'a run that judged near misses, or --no-judge for one that did not; an absent '
+                   'judge is a recorded fact, not a missing key.', RC_USAGE)
+
+    try:
+        with open(args.scores, encoding='utf-8') as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return die(f'cannot read the scored-run document {args.scores}: {exc}', RC_FAILCLOSED)
+    try:
+        summary = run_summary_from_scores(doc)
+    except (KeyError, TypeError, ValueError) as exc:
+        return die(f'refusing to record run {args.run_id!r}: {exc}', RC_FAILCLOSED)
+
+    verdict, reason = run_summaries_record(arc, run_summary_row(arc, args.run_id, summary, judge))
+    if verdict == 'refuse':
+        return die(reason, RC_FAILCLOSED)
+    if verdict == 'idempotent':
+        print(reason)
+        return 0
+    print('recorded run {!r}: {} escape case(s), {} caught, {} scorable, {} clean case(s), '
+          '{} false alarm(s), manifest {}'
+          .format(args.run_id, summary.escape_cases, summary.catches,
+                  len(summary.scorable_case_ids), summary.clean_cases, summary.false_alarms,
+                  summary.case_manifest_hash))
     return 0
 
 
@@ -2615,8 +4372,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--no-capture', dest='capture', action='store_false', help='let the child inherit stdout/stderr (--log is then a pointer)')
     p.add_argument('--cwd', help='working directory for the command (default: --tree, else cwd)')
     p.add_argument('--max-queue', type=float, help='seconds to wait for a lock before refusing (default: wait)')
+    # Defaulted rather than required because every review that reaches `run` is a `run-codex.sh`
+    # launch -- this command launches a CHILD PROCESS, and a Claude reviewer subagent is not one.
+    # `loop.py review record` is the Claude path. Recorded explicitly anyway, so the independence
+    # check reads a field rather than inferring a party from the absence of one.
+    p.add_argument('--party', choices=PARTIES, default=DEFAULT_REVIEW_PARTY,
+                   help='who authored this review (reviews only; default: %(default)s)')
     p.add_argument('cmd', nargs=argparse.REMAINDER, help='-- command...')
     p.set_defaults(fn=cmd_run)
+
+    # Printed rather than spelled twice: run-codex.sh asks for the reserved track name instead
+    # of carrying its own copy of the string. See ONE_OFF_TRACK.
+    p = sub.add_parser('one-off-track', help='print the reserved track name --one-off schedules into')
+    p.set_defaults(fn=cmd_one_off_track)
 
     p = sub.add_parser('gate', help='may round N of this track launch?')
     common(p)
@@ -2665,6 +4433,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help='comma-separated job names that ledgered a start but never a child, whose '
                         'processes you have CONFIRMED gone by hand; nothing else can close over them')
     p.add_argument('--timeline', help='heartbeat file for gap classification (default: <arc>/../timeline.jsonl)')
+    p.add_argument('--range', metavar='BASE..HEAD',
+                   help='the commit range this round closes over; REQUIRED once the arc records '
+                        'any authored range, because requirement 3 cannot be checked without it')
+    p.add_argument('--repo', help='worktree to resolve --range in (default: the current directory)')
     p.add_argument('dirs', nargs='*', help='extra artifact dirs to scan heuristically')
     p.set_defaults(fn=cmd_close_round)
 
@@ -2674,6 +4446,99 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--state', required=True, choices=('landed', 'declined'))
     p.add_argument('--note', required=True)
     p.set_defaults(fn=cmd_lever)
+
+    # NESTED actions, not one flat parser with a positional. `record` requires nine flags and
+    # `report` requires none of them, so a single parser would have to drop `required=True` from
+    # all nine and re-check them by hand -- which is how a recorder stops failing at the call
+    # site. argparse enforces each action's own flags this way, and `loop.py finding record ...`
+    # is unchanged for every existing caller.
+    p = sub.add_parser('finding', help='the ONE outcome a review finding gets (decision 5)')
+    fsub = p.add_subparsers(dest='action', required=True)
+
+    rec = fsub.add_parser('record',
+                          help='append one outcome under the (arc, track, round, findingId) key')
+    common(rec)
+    rec.add_argument('--id', required=True, help="the finding's id, as its verdict file names it")
+    rec.add_argument('--severity', required=True, help='the severity the reviewer gave it')
+    rec.add_argument('--file', required=True, help='the file the finding cited')
+    rec.add_argument('--line-start', dest='line_start', required=True, type=int)
+    rec.add_argument('--line-end', dest='line_end', required=True, type=int)
+    # Deliberately NOT argparse `choices`: see _finding_record's docstring for why the closed set
+    # is checked in the command instead, and why it comes from review_eval not from a literal.
+    rec.add_argument('--outcome', required=True,
+                     help='one of: ' + ' | '.join(review_eval.FINDING_OUTCOMES))
+    rec.add_argument('--note', required=True, help='what happened to this finding')
+    rec.set_defaults(fn=cmd_finding)
+
+    rep = fsub.add_parser('report',
+                          help='counts by kind, by severity and by round, read from the rows')
+    # --track and --round are OPTIONAL here and required on `record`: an outcome is filed under
+    # exactly one round, while a report over the whole arc is the common question and is the one
+    # that shows a round which recorded nothing.
+    common(rep, track=False)
+    rep.add_argument('--track', help='report one track only (default: every track in the arc)')
+    rep.add_argument('--round', type=int, help='report one round only (needs --track)')
+    rep.set_defaults(fn=cmd_finding)
+
+    p = sub.add_parser('review', help='file a review artifact a non-launching party produced (requirement 2)')
+    vsub = p.add_subparsers(dest='action', required=True)
+    rec = vsub.add_parser('record', help='snapshot one verdict and ledger it as this round\'s review')
+    common(rec)
+    rec.add_argument('--party', required=True, choices=PARTIES,
+                     help='who authored this review; a verdict over a range its own author wrote '
+                          'is the substitution the whole loop exists to prevent')
+    rec.add_argument('--name', required=True,
+                     help='the lens name; a finding\'s id is <name>#<index>, so it must be unique '
+                          'within the round')
+    rec.add_argument('--verdict', required=True,
+                     help='path to the review JSON, validated against review-output.schema.json')
+    rec.set_defaults(fn=cmd_review)
+
+    p = sub.add_parser('range', help='the authored-range store (requirement 3): one row per task')
+    gsub = p.add_subparsers(dest='action', required=True)
+    rec = gsub.add_parser('record', help='append one (arc, track, task) -> party, start, end row')
+    common(rec, track=False)
+    rec.add_argument('--track', required=True)
+    rec.add_argument('--task', required=True, help='the task label this range implements')
+    rec.add_argument('--party', required=True, choices=PARTIES, help='who authored these commits')
+    rec.add_argument('--start-sha', dest='start_sha', required=True,
+                     help='the sha HEAD was at before the author touched the tree')
+    rec.add_argument('--end-sha', dest='end_sha', required=True, help='the sha HEAD is at now')
+    rec.set_defaults(fn=cmd_range)
+
+    p = sub.add_parser('converge',
+                       help='declare the arc converged and write convergence.json (every round '
+                            'closed, every finding dispositioned, every range non-author reviewed)')
+    p.add_argument('--arc')
+    p.add_argument('--range', required=True, metavar='BASE..HEAD',
+                   help='the commit range the pull request will carry')
+    p.add_argument('--repo', help='worktree to resolve --range in (default: the current directory)')
+    p.add_argument('--out', help='where to write convergence.json (default: <repo>/convergence.json)')
+    p.set_defaults(fn=cmd_converge)
+
+    p = sub.add_parser('run-summary',
+                       help="persist a grading run's result, so a baseline can exist (§4.4)")
+    rssub = p.add_subparsers(dest='action', required=True)
+
+    rsr = rssub.add_parser('record', help='append one run summary under the (arc, runId) key')
+    common(rsr, track=False)
+    rsr.add_argument('--run-id', dest='run_id', required=True,
+                     help='this run\'s id, unique within the arc')
+    rsr.add_argument('--scores', required=True,
+                     help='JSON document holding escapeScores[], cleanFalseAlarms{} and '
+                          'caseManifestHash; the summary is built from it through '
+                          'review_eval.build_run_summary and never field by field')
+    rsr.add_argument('--judge-model', dest='judge_model',
+                     help='the near-miss judge\'s model identity (§3.10 provenance)')
+    rsr.add_argument('--judge-effort', dest='judge_effort', help="that judge's effort")
+    rsr.add_argument('--no-judge', dest='no_judge', action='store_true',
+                     help='state that this run judged no near misses')
+    rsr.set_defaults(fn=cmd_run_summary)
+
+    rsb = rssub.add_parser('baseline',
+                           help='the most recently recorded summary, or a refusal naming the arc')
+    common(rsb, track=False)
+    rsb.set_defaults(fn=cmd_run_summary)
 
     p = sub.add_parser('note', help='declare why a stretch of wall-clock has no job (a human wait, a sleep)')
     p.add_argument('--arc')

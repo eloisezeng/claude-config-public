@@ -223,7 +223,12 @@ if [ "$SCHEDULED" -eq 0 ]; then
     # blocked by nor block a real arc -- while still queueing on the same worktree lock as one.
     if git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       ARC="${CC_ONEOFF_ARC:-${TMPDIR:-/tmp}/cc-one-off-$(id -u)}"
-      TRACK="one-off"; ROUND=1
+      # The reserved track name is READ from loop.py rather than spelled here: loop.py exempts
+      # exactly this track from its review-name-collision rule, and a second spelling of a
+      # reserved name is how that exemption comes to cover a track this launcher no longer uses.
+      TRACK="$(python3 "$HERE/loop.py" one-off-track)" || TRACK=""
+      [ -n "$TRACK" ] || { echo "run-codex: cannot read the reserved one-off track name from $HERE/loop.py — refusing rather than guessing it." >&2; exit 2; }
+      ROUND=1
       mkdir -p "$ARC" || { echo "run-codex: cannot create the one-off arc directory $ARC" >&2; exit 2; }
     fi
   else
@@ -770,6 +775,39 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
           git -C "$WORKDIR" status --porcelain >&2
           exit 4
         fi
+        # >>> range-record-block (loop_test.py EXTRACTS and EXECUTES these exact lines; see
+        # TestTheLauncherRecordsItsAuthoredRange for why a text test would not do)
+        # Requirement 3: the range this run AUTHORED is recorded by the tool that created it, in
+        # the same block that already fails the run over a dirty tree -- and a row that cannot be
+        # written fails the run rather than leaving a silent gap. The coupling is the point: a
+        # codex range nobody recorded falls into loop.py's COMPLEMENT, where the independence gate
+        # then demands a CODEX review of CODEX's own code, which is the one substitution the gate
+        # exists to refuse. So a missing row is a RED RUN, never a quiet hole --
+        # memory couple-an-effect-to-its-write-at-the-chokepoint.
+        #
+        # The identity comes from the loop handshake (loop.py exports CC_LOOP_TRACK/ROUND/NAME
+        # beside CC_LOOP_JOB/ARC) rather than from parsing CC_LOOP_JOB, whose shape
+        # <track>.r<round>.<name>.<ms>.<pid> is ambiguous because a track label and a job name may
+        # both contain a dot. `--write --one-off` is refused above, so every write run that reaches
+        # here was scheduled and does carry the handshake; an absent one is a bug, not a mode.
+        END_SHA="$(git -C "$WORKDIR" rev-parse HEAD)"
+        if [ -z "${CC_LOOP_ARC:-}" ] || [ -z "${CC_LOOP_TRACK:-}" ] || [ -z "${CC_LOOP_NAME:-}" ]; then
+          echo "run-codex: WRITE RUN CANNOT RECORD ITS AUTHORED RANGE: the loop handshake supplied" >&2
+          echo "run-codex: no CC_LOOP_ARC/CC_LOOP_TRACK/CC_LOOP_NAME, so the row has no identity to" >&2
+          echo "run-codex: be filed under. Task FAILED rather than silently unattributed." >&2
+          exit 4
+        fi
+        if ! python3 "$HERE/loop.py" range record --arc "$CC_LOOP_ARC" --track "$CC_LOOP_TRACK" \
+               --task "$CC_LOOP_NAME" --party codex \
+               --start-sha "$START_SHA" --end-sha "$END_SHA" >&2; then
+          echo "run-codex: WRITE RUN COULD NOT RECORD ITS AUTHORED RANGE $START_SHA..$END_SHA." >&2
+          echo "run-codex: the commits are real and in the tree; the row saying CODEX wrote them is" >&2
+          echo "run-codex: not. Task FAILED on purpose -- see the comment above this check. Record it" >&2
+          echo "run-codex: by hand before closing the round:" >&2
+          echo "run-codex:   python3 $HERE/loop.py range record --arc $CC_LOOP_ARC --track $CC_LOOP_TRACK --task $CC_LOOP_NAME --party codex --start-sha $START_SHA --end-sha $END_SHA" >&2
+          exit 4
+        fi
+        # <<< range-record-block
       fi
       exit 0
     fi

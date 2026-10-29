@@ -1,0 +1,42 @@
+[
+  {
+    "label": "S8-M1-yes-never-promotes",
+    "why": "Maps a valid `yes` to `unjudged`, which is exactly the judge that satisfies every failure-path row and promotes nothing. The whole reason the success half exists is that this mutant is invisible to a suite of failure paths alone.",
+    "old": "        parsed = parse_judge_result(raw)\n        if parsed is not None:",
+    "new": "        parsed = parse_judge_result(raw)\n        if parsed is not None and parsed != JUDGE_YES:",
+    "expect": "killed",
+    "test": "test_a_yes_promotes_exactly_one_case_named_by_id"
+  },
+  {
+    "label": "S8-M2-promotion-counts-findings",
+    "why": "Counts promoted FINDINGS rather than promoting the CASE, which is the per-finding reading of §3.1.1. It passes the single-`yes` row and must be killed by the second-`yes` row.",
+    "old": "        if outcome.result == JUDGE_YES:\n            promoted.add(outcome.case_id)",
+    "new": "        if outcome.result == JUDGE_YES:\n            promoted.add(f'{outcome.case_id}#{outcome.finding_index}')",
+    "expect": "killed",
+    "test": "test_a_second_yes_in_the_same_case_changes_nothing"
+  },
+  {
+    "label": "S8-M3-retries-unbounded",
+    "why": "Raises the retry ceiling. A judge that retries without a bound turns a dead launcher into a hang rather than into an `unjudged`.",
+    "old": "MAX_RETRIES = 2",
+    "new": "MAX_RETRIES = 5",
+    "expect": "killed",
+    "test": "test_at_most_two_retries_after_the_first_attempt"
+  },
+  {
+    "label": "S8-M4-catch-is-re-judged",
+    "why": "Drops the refusal that keeps `catch` and `miss` off the judging path. §3.9 decides those four mechanically so the grade does not drift when the judge changes; a judgement silently applied to a catch is a judge that CAN move a mechanical verdict.",
+    "old": "        if verdict != NEAR_MISS:",
+    "new": "        if False:",
+    "expect": "killed",
+    "test": "test_refuses_a_judgement_about_a_catch_or_a_miss"
+  },
+  {
+    "label": "S8-M5-model-may-say-unjudged",
+    "why": "Lets the model return the harness's own failure word. A model declining and a launcher failing are two different facts, and one spelling records them as the same one.",
+    "old": "    if result in (JUDGE_YES, JUDGE_NO):",
+    "new": "    if result in JUDGE_RESULTS:",
+    "expect": "killed",
+    "test": "test_refuses_unjudged_from_the_model_itself"
+  }
+]

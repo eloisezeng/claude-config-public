@@ -1,0 +1,34 @@
+[
+ {
+  "label": "C1-launch-gate-stripped",
+  "why": "Deletes the launch gate's VERDICT at the one call site on the launch path: round N+1 then launches with round N open, closing a round buys nothing again and skipping it is free \u2014 the exact incentive the audit found inverted. The both-directions test is the killer because its first half asserts the refusal and its second asserts the pass after a close.",
+  "old": "            ok, msg = gate(arc, args.track, args.round)\n",
+  "new": "            ok, msg = True, ''\n",
+  "expect": "killed",
+  "test": "test_round_two_refuses_while_round_one_is_open_then_passes_once_it_closes"
+ },
+ {
+  "label": "C1-one-off-carve-out-flipped",
+  "why": "Flips the carve-out so the gate applies ONLY to the reserved one-off track: every one-off past its first open round is then refused forever, and since close-round refuses on that track by design and the arc is shared per user, the first session to leave a round open wedges every later codex-opinion call on the machine. This is the regression the change most plausibly causes, which is why it is a mutant and not only a comment.",
+  "old": "        if args.kind in GATED_KINDS and str(args.track) != ONE_OFF_TRACK:\n",
+  "new": "        if args.kind in GATED_KINDS and str(args.track) == ONE_OFF_TRACK:\n",
+  "expect": "killed",
+  "test": "test_the_reserved_one_off_track_launches_round_two_with_round_one_open"
+ },
+ {
+  "label": "C3-independence-party-comparison-stripped",
+  "why": "Strips the party comparison, so every range reads as reviewed and a Codex verdict over Codex's own range satisfies requirement 3 \u2014 the one substitution SKILL.md calls theatre. Every other range check (ambiguity, the complement, the commit table) still works, so only the test that files a codex review and no claude review can see it.",
+  "old": "        entry['reviewed'] = entry['reviewParty'] in seen\n",
+  "new": "        entry['reviewed'] = True\n",
+  "expect": "killed",
+  "test": "test_a_codex_range_with_only_codex_reviews_refuses_and_names_the_range"
+ },
+ {
+  "label": "C4-exactly-once-check-stripped",
+  "why": "Strips the claimed-exactly-once check: a commit claimed by two rows no longer refuses, so two rows may disagree about who wrote it and the independence gate answers from whichever row it read first. The complement and the party comparison are untouched, so the ambiguity test is the only one that can fail.",
+  "old": "    ambiguous = [(c, sorted(claims[c])) for c in want if len(claims[c]) > 1]\n",
+  "new": "    ambiguous = []\n",
+  "expect": "killed",
+  "test": "test_a_commit_claimed_by_two_rows_is_ambiguous_and_refuses"
+ }
+]

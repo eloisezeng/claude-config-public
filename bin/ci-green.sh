@@ -95,6 +95,28 @@ if ! gh api "repos/$REPO/commits/$FULL/check-runs" --paginate \
   sed 's/^/  /' $D/err >&2; sed 's/^/  /' $D/err
   rm -rf $D; exit 2
 fi
+# `github.event.pull_request.draft`, for a job `if:` that gates on it (measured 2026-10-08 on
+# a repo whose claude-review.yml carries `if: github.event.pull_request.draft
+# == false`). The draft flag is a FACT about the pull request, read from GitHub, never inferred from
+# the sha: a gate must not decide its own required set from a guess. Written ONLY when exactly one
+# pull request has this commit as its head -- zero, several, a non-boolean answer, or a failed read
+# all leave the file ABSENT, and ci-derive.py then refuses a condition needing it BY NAME rather
+# than defaulting it (a defaulted `false` would require a draft-only job forever).
+#
+# The API call is made only when some workflow file dumped above actually names that context, so a
+# repo with no such condition pays nothing. That matters: this gate runs on every merge poll.
+if ls "$D"/*.yml >/dev/null 2>&1 && \
+   grep -qF 'github.event.pull_request.draft' "$D"/*.yml 2>/dev/null; then
+  if draft_flags=$(gh api "repos/$REPO/commits/$FULL/pulls" \
+       --jq '.[] | select(.head.sha == "'"$FULL"'") | .draft' 2>/dev/null); then
+    n=$(printf '%s' "$draft_flags" | grep -c . || true)
+    if [ "$n" = "1" ]; then
+      case "$draft_flags" in
+        true|false) printf '%s\n' "$draft_flags" > "$D/pr_draft.txt" ;;
+      esac
+    fi
+  fi
+fi
 python3 "$(dirname "$0")/ci-derive.py" "$FULL" "$D"
 rc=$?; rm -rf $D
 

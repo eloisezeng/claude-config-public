@@ -1,0 +1,10 @@
+[
+ {
+  "label": "C3-launcher-range-write-removed",
+  "why": "Removes the write-mode range recording from the launcher. The write run then exits 0 having committed real work with no row saying CODEX wrote it, those commits fall into loop.py's complement, and the independence gate goes on to demand a CODEX review of CODEX's own code \u2014 a fail-open that wears the costume of a passing run. This is the mutant the addendum's gap-2 mitigation names: a missing row must be a RED run, so the test that asserts the row exists after a successful write block is the one that has to kill it.",
+  "old": "        if ! python3 \"$HERE/loop.py\" range record --arc \"$CC_LOOP_ARC\" --track \"$CC_LOOP_TRACK\" \\\n               --task \"$CC_LOOP_NAME\" --party codex \\\n               --start-sha \"$START_SHA\" --end-sha \"$END_SHA\" >&2; then\n",
+  "new": "        if false; then\n",
+  "expect": "killed",
+  "test": "test_a_successful_write_run_records_the_range_it_authored"
+ }
+]

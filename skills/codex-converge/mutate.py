@@ -19,10 +19,14 @@ before and after, and a changed hash fails the run regardless of the mutants.
 
 Usage (paths relative to --root, which defaults to the cwd):
 
-  mutate.py --src plugins/x/foo.ts --test plugins/x/foo.test.ts \
-            --copy-dir plugins/mutation-<arc>-tmp \
-            --rewrite '@/plugins/x/foo=./foo' \
+  mutate.py --src <dir>/foo.ts --test <dir>/foo.test.ts \
+            --copy-dir <dir>/mutation-<arc>-tmp \
+            --rewrite '@/<dir>/foo=./foo' \
             --mutants mutants.json [--census 'REGEX=N']... [--keep-copy]
+
+`<dir>` is a placeholder and stays one: this module is published to a public mirror, so a real
+project directory written here would publish the private tree's shape. These three lines named one
+until 2026-10-26, and `publishing_guard_test.py` is what now keeps them from naming one again.
 
 mutants.json is a list of objects:
   {"label": "G4 dash-family drop", "old": "exact source text", "new": "replacement",
@@ -76,7 +80,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from loop import (Locks, arc_dir, ledger_append, tests_ran, now as _now,  # noqa: E402
+from loop import (Locks, arc_dir, ledger_append, node_test_counts, strip_ansi, tests_ran,  # noqa: E402
+                  now as _now,
                   GATED_KINDS, admission_decision, gate, ledger_corrupt, ledger_read,
                   lock_dir_ready, path_lock_name,
                   round_lock, round_status)
@@ -113,6 +118,54 @@ def selected_tests(summary_line: str) -> int | None:
     if not nums:
         return None
     return sum(int(n) for n in nums)
+
+
+def summary_line(output: str) -> str:
+    """vitest's own `Tests ...` summary line, found on the ANSI-STRIPPED text.
+
+    The line has to be LOCATED before `selected_tests` can parse it, and vitest colourises
+    its summary even when stdout is a pipe, so the real bytes are
+    `\x1b[2m      Tests \x1b[22m1 passed | 8 skipped (9)`.  A `.strip()` leaves the escape
+    at the front, `startswith('Tests ')` matches nothing, and the summary reads as ABSENT —
+    at which point `selected_tests` returns None and every mutant carrying a `test` filter is
+    reported MULTI-SELECT rather than run.  Measured 2026-10-03 on a five-mutant battery:
+    0/5 matched, with a green baseline and five correct mutants.
+
+    This is the same ANSI-blindness class `loop.py`'s `Test Files` counter had, surviving here
+    because `selected_tests` strips its argument and the caller that produced that argument did
+    not.  A parser that strips is not a lookup that strips, and `mutate_test.py`'s cases were all
+    hand-typed uncoloured strings, which is exactly why it stayed invisible.
+
+    Returns '' when there is no such line, which `selected_tests` reads as None.
+    """
+    for line in output.splitlines():
+        text = strip_ansi(line).strip()
+        if text.startswith('Tests '):
+            return text
+    # `node --test` prints one counter per line instead of one summary line, so there is no
+    # single line to return; synthesise vitest's shape from its counters rather than teach
+    # `selected_tests` a second grammar.  See `loop.node_test_counts`.
+    counts = node_test_counts(output)
+    if counts is not None:
+        return f"Tests {counts['pass']} passed | {counts['fail']} failed"
+    return ''
+
+
+def failing_lines(output: str, limit: int = 4) -> list[str]:
+    """The first few assertion lines of a failing run, on the ANSI-STRIPPED text.
+
+    Same class as `summary_line`, and the cost of getting it wrong is the one a tail window
+    has: a mutant that mismatched prints no reason at all, so the run says a mutant behaved
+    unexpectedly and nothing about what it did.
+    """
+    out: list[str] = []
+    for line in output.splitlines():
+        text = strip_ansi(line).strip()
+        if text.startswith('\u00d7') or text.startswith('FAIL '):
+            out.append(text)
+            if len(out) >= limit:
+                break
+    return out
 
 
 def worktree_of(path: str) -> str | None:
@@ -671,8 +724,8 @@ def _main(batch_stack: contextlib.ExitStack) -> int:
                 outcome = 'survived' if proc.returncode == 0 else 'killed'
                 want = 'survived' if m['expect'] == 'unobservable' else m['expect']
                 matched = outcome == want
-                summary = next((ln.strip() for ln in out.splitlines() if ln.strip().startswith('Tests ')), '')
-                failing = [ln.strip() for ln in out.splitlines() if ln.strip().startswith('×') or ln.strip().startswith('FAIL ')][:4]
+                summary = summary_line(out)
+                failing = failing_lines(out)
                 # `test` is a SUBSTRING filter, so a name that selects more than one test lets ANY
                 # of them do the killing — the mutant then reads "killed by its named test" whether
                 # or not the intended one ever ran. Require exactly one selected test whenever a

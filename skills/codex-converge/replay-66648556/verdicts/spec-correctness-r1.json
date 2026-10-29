@@ -1,0 +1,156 @@
+{
+ "reviewed": {
+  "base": null,
+  "head": null,
+  "files": [
+   "<elided: derived fixture, see README.md>"
+  ]
+ },
+ "verdict": "needs-attention",
+ "summary": "<elided: derived fixture, see README.md>",
+ "next_steps": [
+  "<elided: derived fixture, see README.md>"
+ ],
+ "findings": [
+  {
+   "severity": "critical",
+   "title": "spec-correctness-r1 finding 0",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  },
+  {
+   "severity": "high",
+   "title": "spec-correctness-r1 finding 1",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  },
+  {
+   "severity": "high",
+   "title": "spec-correctness-r1 finding 2",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  },
+  {
+   "severity": "high",
+   "title": "spec-correctness-r1 finding 3",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  },
+  {
+   "severity": "high",
+   "title": "spec-correctness-r1 finding 4",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  },
+  {
+   "severity": "high",
+   "title": "spec-correctness-r1 finding 5",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  },
+  {
+   "severity": "high",
+   "title": "spec-correctness-r1 finding 6",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  },
+  {
+   "severity": "high",
+   "title": "spec-correctness-r1 finding 7",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  },
+  {
+   "severity": "high",
+   "title": "spec-correctness-r1 finding 8",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  },
+  {
+   "severity": "high",
+   "title": "spec-correctness-r1 finding 9",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  },
+  {
+   "severity": "medium",
+   "title": "spec-correctness-r1 finding 10",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  },
+  {
+   "severity": "medium",
+   "title": "spec-correctness-r1 finding 11",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  },
+  {
+   "severity": "medium",
+   "title": "spec-correctness-r1 finding 12",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  },
+  {
+   "severity": "low",
+   "title": "spec-correctness-r1 finding 13",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  }
+ ]
+}

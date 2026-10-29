@@ -1,0 +1,73 @@
+[
+  {
+    "label": "S1-M1-catches-settable",
+    "why": "Turns the derived `catches` back into a supplied field, which is what let a per-finding sum be passed where a per-case count belongs. A defaulted field declared LAST keeps the module importable, which the first version of this mutant did not.",
+    "old": "    @property\n    def catches(self) -> int:\n        \"\"\"Cases caught. Derived, so a per-finding total can never be supplied here.\"\"\"\n        return len(self.caught_case_ids)",
+    "new": "    catches: int = 0",
+    "expect": "killed",
+    "test": "test_catches_is_derived_from_the_caught_set_and_cannot_be_supplied"
+  },
+  {
+    "label": "S1-M2-no-subset-check",
+    "why": "Removes the producer-side subset refusal, making an incoherent summary constructible again.",
+    "old": "            if stray:\n                raise ValueError(",
+    "new": "            if False:\n                raise ValueError(",
+    "expect": "killed",
+    "test": "test_an_impossible_count_is_now_unconstructible_rather_than_refused"
+  },
+  {
+    "label": "S1-M3-scorable-gate-dropped",
+    "why": "Drops the scorable-subset comparison, so two runs with different denominators compare as like with like.",
+    "old": "        ('scorable case subsets', baseline.scorable_case_ids, candidate.scorable_case_ids),\n",
+    "new": "",
+    "expect": "killed",
+    "test": "test_a_different_scorable_subset_refuses_even_when_the_case_sets_match"
+  },
+  {
+    "label": "S1-M4-gate-conditional-again",
+    "why": "Restores the truthiness conjunction. UNOBSERVABLE, measured: every empty-set state is refused per run BEFORE the comparison, so the two forms are equivalent today. Recorded rather than chased, because the test that would arm it would have to construct a state the per-run refusals make unreachable. The unconditional form stays for the day a per-run refusal moves.",
+    "old": "        if set(b_ids) != set(c_ids):",
+    "new": "        if b_ids and c_ids and set(b_ids) != set(c_ids):",
+    "expect": "unobservable"
+  },
+  {
+    "label": "S1-M5-manifest-hash-ignored",
+    "why": "Ignores the case manifest hash, so two runs over cases corrected in place compare.",
+    "old": "    if baseline.case_manifest_hash != candidate.case_manifest_hash:",
+    "new": "    if False:",
+    "expect": "killed",
+    "test": "test_a_different_case_manifest_hash_refuses_and_quotes_both"
+  },
+  {
+    "label": "S1-M6-manifest-optional-again",
+    "why": "Restores the diff_files fail-open: a caller with no manifest gets MISS for a finding the reviewer was never shown.",
+    "old": "    if diff_files is None:\n        raise ValueError(",
+    "new": "    if False:\n        raise ValueError(",
+    "expect": "killed",
+    "test": "test_a_missing_file_manifest_RAISES_rather_than_scoring_a_miss"
+  },
+  {
+    "label": "S1-M7-depth-not-total",
+    "why": "Makes the depth rule answer a word outside the enum for one reachable corner, which no runner can dispatch on.",
+    "old": "    return STANDARD, 'ordinary change'",
+    "new": "    return 'unknown', 'ordinary change'",
+    "expect": "killed",
+    "test": "test_property_the_rule_is_TOTAL_over_every_combination_of_its_three_inputs"
+  },
+  {
+    "label": "S1-M4b-empty-scorable-allowed",
+    "why": "Deletes the per-run refusal of a run that scored nothing. This is the guard that actually closes the all-empty hole; the set comparison cannot, because two empty subsets are equal.",
+    "old": "        if not run.scorable_case_ids:",
+    "new": "        if False:",
+    "expect": "killed",
+    "test": "test_a_run_that_scored_NOTHING_refuses_on_either_side"
+  },
+  {
+    "label": "S1-M1b-catches-counts-cases",
+    "why": "Counts cases COVERED rather than cases CAUGHT \u2014 the plausible wrong derivation, and the half of the derived-catches claim a single-site mutant can arm.",
+    "old": "        return len(self.caught_case_ids)",
+    "new": "        return len(self.case_ids)",
+    "expect": "killed",
+    "test": "test_catches_is_derived_from_the_caught_set_and_cannot_be_supplied"
+  }
+]

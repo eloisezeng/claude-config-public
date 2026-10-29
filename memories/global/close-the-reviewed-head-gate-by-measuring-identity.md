@@ -16,6 +16,8 @@ git show $REVIEWED:path | strip | md5
 git show $HEAD:path     | strip | md5
 ```
 
+**When the measurement is a DIFF rather than a file's content, the BASE is a second moving part — measure each head against ITS OWN merge base.** A branch's own contribution is `git diff $(git merge-base origin/main <head>) <head>`, and `origin/main` moves while you work. Reusing the *current* merge base for the *old* reviewed head silently folds in a **reversal** of everything that landed on main meanwhile, so the two hashes differ and the gate reads FAILED on a branch that changed nothing. Measured 2026-09-17 on PR #502: against its own base each head hashed `f7d7a4a6…`, but the reviewed head measured against the new base hashed `1f6e8c88…` — a mismatch manufactured entirely by the base, on a diff that was identical. A differing hash is therefore not yet a finding: re-measure with each head's own base before believing it.
+
 **The measurement is worthless without a control.** A blind comparator returns "identical" for everything, so mutate a copy by one token and confirm the diff fires — otherwise you have proved only that your `strip` collapsed both inputs to the same mush ([[absence-needs-a-probe-that-could-see-presence]]).
 
 **Why:** measured 2026-08-30 on PR #317. Round 18 found 7 real findings; round 19 fixed them; the resulting head was CI-green but unreviewed, and the gate blocked. The stripped production file was byte-identical at both shas (1107 lines, same md5) — every change was a comment the review itself had *demanded*, plus test code and documents. The gate had never actually been protecting anything, and one measurement replaced an unbounded review spend.

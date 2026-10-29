@@ -45,3 +45,18 @@ been masking — so repair the worktree BEFORE concluding a suite is phantom-red
 A red whose count MOVES between runs of identical bytes is measuring the machine:
 [[a-red-suite-with-no-failing-test-lost-a-worker]] and
 [[a-build-dir-in-the-tree-reddens-whole-tree-guards]] are the same family.
+
+**A shared real `node_modules` that siblings symlink into is one `git merge --abort` from gone,
+and the ignore pattern will not save you.** `node_modules/` with a trailing slash matches
+DIRECTORIES only, and a worktree's `node_modules` is a symlink, which git sees as a FILE — so one
+`git add <dir>` commits a 120000-mode blob onto a feature branch. Merging that branch then stages
+the symlink over the sibling's REAL directory, and `git merge --abort` deletes it, because abort
+removes what the merge added and the path is not in HEAD. Measured 2026-10-12: that destroyed the
+installed tree three worktrees were pointing at; `npm ci` restored it in 6 s, which is the cheap
+half — the expensive half was two commits rebuilt to get the blob off the branch. Ignore it in the
+form it actually takes (`node_modules`, no slash) in EVERY ignore file, and never `git add <dir>`
+wholesale in a worktree. **`git check-ignore` cannot audit this**: it answers from what EXISTS, so
+where the path is a real directory both forms of the pattern report "ignored" and the obvious probe
+passes either way — read the ignore FILE and prove the two forms differ in a scratch repo holding a
+real symlink, both directions. Same family as [[a-mention-is-not-a-property]] and
+[[absence-needs-a-probe-that-could-see-presence]].

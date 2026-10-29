@@ -162,6 +162,33 @@ no copy, so running the missing file exited non-zero and printed `CAUGHT` — a 
 built reads exactly like one the suite killed. Check the build's own exit status and fail loudly,
 and control that check with a deliberately stale anchor.
 
+**Reading a verdict out of a FOREIGN append-only log fails open on the JOIN KEY, not just the
+field name — enumerate the log's event kinds before writing the predicate.**
+Measured 2026-10-03 gating three `codex-converge` review verdicts. The gate had to reject a lens
+whose job exited non-zero, and the job's exit lives in `loop.py`'s `jobs.jsonl`. The predicate
+filtered rows on `track` and `round` — the two fields the query was *about* — and then looked for an
+exit under three guessed names (`exit`, `rc`, `returncode`). It found no terminal row, printed
+`terminal: 0`, and reported **GATE: PASS**. The real record is `ev: "end"` carrying `rc`, keyed by
+`job` and carrying neither `track` nor `round`, so the join silently returned nothing and "no
+terminal record" was byte-indistinguishable from "zero rows matched". All three jobs happened to
+have `rc=0`, so the gate was right by luck on the only run that mattered.
+
+Two rules, and the first is thirty seconds of work: before writing any predicate over someone
+else's log, **print the event kinds and the key set per kind** (`Counter` over the discriminator,
+union of `keys()` per value) — here that one command showed `queued/start/child/end/round-close`
+and that only `end` carries `rc`, and that `end` carries no `track`. Second, **an absent terminal
+record is a FAIL, never a skip**: a job still running is exactly the case the gate exists to
+reject, so the missing-row branch must be written explicitly and controlled by deleting that row
+from a copy of the log. Both the "no `end` row" and "N jobs matched, not 1" cases are now distinct
+refusals.
+
+This is also where the ten-condition control earned itself: the gate passed all three verdicts on
+its first run, which is precisely when a probe you wrote ninety seconds ago to confirm what you
+expected deserves the least trust. Forcing each condition on a COPY — wrong base, wrong head,
+omitted file, duplicated file, line past EOF, line zero, absent findings array, empty file,
+unparseable JSON, stripped terminal record — plus one unmutated run that must still PASS, is what
+turned the fail-open up. Nine of those ten already rejected; the tenth was the whole finding.
+
 **How to apply.** Prefer a structural terminal condition over string-matching a summary line
 (the exit status or a state enum over prose), read the per-commit API rather than a PR rollup,
 require presence as well as non-pendingness, and never collapse rows by a key the API does not
@@ -182,3 +209,26 @@ was right; the wrapper destroyed it. So: when two verdict tokens are substrings 
 the negative first AND anchor (`grep -q '^VERDICT: GREEN'`), and control the wrapper the same way
 you controlled the tool — here, running it against one sha that was genuinely green and one that was
 still running proved each matched exactly one arm.
+
+**A tool may print the status field ONLY in the bad state, which makes a predicate detect failure
+forever and success never.** Measured 2026-10-27: two orphaned freeze pollers tested
+`grep -q '^STATE: CLEAR'` against `scripts/deploy-freeze.sh status`, which prints `STATE: FROZEN`
+plus an `owner:` line when frozen and `🟢 No deploy freeze. Deploys will run on push to main.` —
+with no `STATE:` line at all — when clear. Both had polled 13 times over 84 minutes, correctly
+logging FROZEN each time, and would have run their full 12-hour ceiling past a freeze that lifted
+at minute 89. The asymmetry is the trap: the author captured the state they were WAITING OUT, which
+is the state that prints the field, and never captured the state they were waiting FOR. Capture
+both, and prefer a structural terminal condition — here the tool's own exit code, or the raw marker
+(`git show origin/deploy-control:.deploy-freeze`) whose first line is the enum.
+
+**When a correctly fail-closed detector refuses a PR you believe is mergeable, adjudicate against
+the authoritative requirement list, never against a predecessor's note.** `ci-green.sh` reports
+NOT-GREEN whenever an expected job never registers, which is right: a job a path filter skips
+publishes no status at all. But "never registers" is not the same as "blocks the merge". Read the
+ruleset (`gh api repos/<o>/<r>/rulesets/<id>`) and check whether that job is one of the required
+contexts — and check `bypass_actors` and `current_user_can_bypass` while you are there, so you know
+whether the green ones are a real block. Measured 2026-10-27: `your-module provider data` never
+registered on a path-filtered run, and the ruleset required exactly two other contexts, both green.
+Overriding the detector was correct; overriding it because a handoff file said to would not have
+been, and the two are indistinguishable from the outcome. Related:
+[[a-declared-branch-rule-may-enforce-nothing]].

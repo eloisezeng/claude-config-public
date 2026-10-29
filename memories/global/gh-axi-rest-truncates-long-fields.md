@@ -43,6 +43,15 @@ So: never scrape `gh-axi` with a regex written for `gh`, and give every poll loo
 (`if [ -z "$STATUS" ]; then exit 3; fi`) plus an identity arm (the SHA it read must equal the SHA you
 expect) — a poller with no blind arm cannot distinguish "done" from "read nothing".
 
+The `--jq` half of that recurred 2026-10-09 in a shape worth naming: a stall watcher counting
+`[ "$(gh-axi api .../check-runs/<id> --jq '.status')" = "completed" ]` compared the WHOLE record
+against one word, so it answered "not done" on every poll and would have read `0/2` straight through
+both jobs finishing. A settle detector built this way fails in the silent direction — it looks
+exactly like work still running, forever. The fix is one grep against the real printed shape
+(`^status: `), and the test is a POSITIVE control: a check-run known `completed` must read done,
+because the in-progress arm alone passes for a predicate that can never say yes —
+`[[control-a-settle-detector-on-captured-output]]`, `[[a-guard-must-be-satisfiable-not-just-failable]]`.
+
 **Indent depth depends on the SHAPE of the response, and a grep that assumes one depth silently returns nothing.** Measured 2026-08-30, twice in one session: `gh-axi api repos/.../actions/runs/<id>` prints a single object's fields at **zero** indent (`id:`, `status:`, `head_sha:`), while a LIST response indents item fields (`- id:` on the list-item line, nested objects deeper). So `grep -E '^\s+status:'` matches nothing on a single-run read, and the watcher polls blind forever printing empty values that read as "not started yet" rather than as a parse failure — the second time, it cost a full background watcher that had to be killed and re-armed. Read the raw head of the response once and write the grep against what it actually prints; make an empty extraction FAIL LOUDLY rather than loop.
 
 **`run list --branch <b>` does not order by recency.** Measured 2026-09-04 on
@@ -54,3 +63,22 @@ you need the run YOUR push triggered — which is the only run worth watching
 (`[[watch-the-run-you-triggered]]`) — select it by `head_sha` or by workflow, never by branch plus
 recency. A branch listing that silently omits the run you are looking for is the same confident-zero
 failure as the truncation above.
+
+**The truncation also eats JOB LOGS and ARTIFACT DOWNLOADS, and GraphQL is NOT the route for
+those — plain `gh` is.** The prescription above sends a reader to GraphQL, which has no endpoint for
+either, so following it on a CI diagnosis dead-ends. Measured 2026-10-28 on
+`your-org/your-other-project` run `40766022076`: `gh-axi api .../actions/jobs/<id>/logs` returned
+**4,131 B** where `/opt/homebrew/bin/gh` returned **71,669 B** — and the 4 KB held only the runner's
+boot banner, so the entire cause of the failure (a `next dev` memory-threshold restart, named in the
+dev-server output tail) was invisible. `gh-axi run view <id> --log-failed` returned **zero lines
+mentioning the failed e2e job at all**, which is the confident-zero shape again: it reads as "that
+job printed nothing" rather than as "this client dropped it". The artifact route is worse because it
+corrupts rather than shortens: `gh-axi api .../actions/artifacts/<id>/zip` wrote **9,838 B** of a
+**1,189,962 B** zip, and `file` called the result `data` rather than reporting a truncated archive.
+`gh run download <run> --name <artifact> --dir <d>` fetched all 2.6 MB correctly.
+
+So for anything whose payload is LARGE or BINARY — job logs, artifact zips, trace files — use plain
+`gh` (check `gh auth status` and confirm the ACTIVE account can read the repo; a wrong account 404s
+identically to "absent"). Keep `gh-axi` for the short structured fields it renders faithfully.
+A corollary worth holding onto: a CI red you cannot explain may be a red you cannot READ, and the
+instrument is the first thing to rule out — `[[a-tail-window-is-not-a-failure-report]]`.

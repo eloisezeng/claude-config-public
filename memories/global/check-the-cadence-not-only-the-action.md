@@ -20,6 +20,16 @@ The aggregate is a DIFFERENT OBJECT from the step, and only the aggregate carrie
 checking one and calling it verification is measuring the wrong level, the same shape as quoting a
 total as a per-item figure ([[surprising-result-check-metric-identity]]).
 
+**The sharpest form: a periodic job whose SUBJECT has not moved.**
+Where a scheduled run verifies an artifact, gate it on the ARTIFACT having changed, never on the clock alone — and put both facts in the key of whatever records "already done", so a new subject and a new period each miss for their own legible reason.
+Measured 2026-10-26 on `your-other-project`: the nightly full suite was 1,081 of the repository's 1,177 Actions minutes over thirty days, 92% of the whole bill, and every one of the 20 nights sampled ran against the SAME commit because nothing had merged in 39 days.
+Its own purpose made this decidable rather than a matter of taste — the run existed to catch failures a per-change test selection had skipped, which is a property of code ARRIVING, so on an unchanged tree it was buying a second measurement of a result already in hand.
+
+Three things that case settles for the next one.
+Name what the period still buys, because it is rarely nothing: a suite can change verdict on an unchanged subject when the failure is a function of TIME (an expired certificate, a date-bomb test, a vendor response that changed shape), so keep a FLOOR and report the resolution you traded (one day to seven), rather than presenting the saving as free.
+Measure the floor instead of assuming the skip is free — step timings gave checkout 7 s, setup 3 s, install 15 s, suite 2,399 s, so the suite was 99% of the run and a skipped night bills the 1-minute minimum, which is what makes 1,081 minutes become ~190.
+And fail OPEN toward running, sweeping every value that is not the single skip-permitting one: a wrongly-skipped run reports SUCCESS having verified nothing and is indistinguishable in a run list from one that passed, while a wrongly-run one costs its minutes visibly — the cheap failure is the loud one.
+
 **Do this instead.**
 At every loop or task boundary, ask the SECOND question out loud before continuing — *is this
 cadence correct?* — and answer it with a COUNT, never an impression: how many times will this run

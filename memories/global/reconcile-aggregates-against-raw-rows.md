@@ -9,11 +9,13 @@ metadata:
 
 An aggregate that reads plausibly is not an aggregate that is correct. Whenever code rolls many rows into one summary line — a count, a sum, a representative timestamp, a "…and N more" — write the test that compares the summary against the raw rows it claims to describe, and verify it fails if the arithmetic drifts.
 
-Three defects from one review, all the same shape, none caught by tests that only asserted the rendered text:
+Four defects, all the same shape, none caught by tests that only asserted the rendered text:
 
 - **A count that multiplied.** `SUM(COALESCE(payload.count, 1))` was applied to every event type, but `count` meant "multiplicity" for only one of them. Three retries of 100-item chunks rendered as "300 retries." Fix: allowlist which types carry a multiplicity, everything else counts rows.
 - **A timestamp that lied.** A daily rollup stamped itself with the day-bucket start, so an event two minutes old rendered "12h ago" — and sorted below everything else that day, where a cap could truncate it away entirely. Fix: `MAX(created_at)`, not the bucket boundary.
 - **A cap that hid rows the UI promised to count.** Items were dropped before the truncation counter saw them, so "…and N more" understated by the dropped amount.
+
+- **A total that agreed EXACTLY while one of its members was wrong.** A degree row read 27 of 27 units against the registrar's own 27 of 27, by crediting a 9-unit course the row's own label does not name in place of the 9-unit course the student took. Equal-unit substitution is invisible to ANY totals comparison, and the row the displaced course fell to was also unchanged, so no number anywhere moved. An agreeing aggregate is therefore not even weak evidence about its members: assert the MEMBER LIST, and reconcile the aggregate from the members' own values (sum of each credited course's units == the row's earned figure) rather than against a second copy of the total. All 19 rows reconciled once that was asserted, and the one that did not was the defect.
 
 **Why:** the rendered string looks right in every test that asserts the string. The failure is in the relationship between the summary and its inputs, which only a reconciliation test can see. This is the aggregate-side twin of [[verify-claims-against-artifacts]].
 

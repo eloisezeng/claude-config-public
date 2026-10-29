@@ -289,7 +289,7 @@ class TestCpuClass(unittest.TestCase):
     # are the ones that matter: a repo with a package per directory has dozens of them, and a
     # pattern that lost its `^` would turn every one of them into a full-suite run.
     NOT_ROOT_CONFIGS = [('sub/vitest.config.ts', ['sub/vitest.config.ts']),
-                        ('packages/app/vite.config.ts', ['packages/app/vite.config.ts']),
+                        ('packages/web/vite.config.ts', ['packages/web/vite.config.ts']),
                         ('a/b/package.json', []),
                         ('x/tsconfig.json', []),
                         ('sub/.github/workflows/ci.yml', []),
@@ -324,12 +324,81 @@ class TestTestCounting(unittest.TestCase):
         self.assertEqual(loop.tests_ran('Test Files  1 passed (1)'), 0, 'the Test Files line is not the Tests line')
         self.assertEqual(loop.tests_ran(''), 0)
 
+    # The real bytes `node --test` wrote to a PIPE on 2026-10-07, kept verbatim for the same
+    # reason the vitest block below is: the counter glyph U+2139 is Alphabetic in Unicode, so a
+    # `\W+` prefix matches NOTHING and every one of these lines read as absent. A green run of
+    # nine tests was then refused as "the suite executed ZERO tests".
+    NODE_GREEN = (
+        "\x1b[32m\u2714 remaining is never negative\x1b[39m\n"
+        "\x1b[34m\u2139 tests 9\x1b[39m\n\x1b[34m\u2139 suites 0\x1b[39m\n"
+        "\x1b[34m\u2139 pass 9\x1b[39m\n\x1b[34m\u2139 fail 0\x1b[39m\n"
+        "\x1b[34m\u2139 cancelled 0\x1b[39m\n\x1b[34m\u2139 skipped 0\x1b[39m\n"
+        "\x1b[34m\u2139 todo 0\x1b[39m\n\x1b[34m\u2139 duration_ms 56.416167\x1b[39m\n")
+
+    def test_tests_ran_reads_the_node_test_runner(self):
+        self.assertEqual(loop.tests_ran(self.NODE_GREEN), 9)
+        self.assertEqual(loop.tests_ran("\u2139 tests 1\n\u2139 pass 0\n\u2139 fail 1\n"), 1)
+
+    def test_a_node_run_that_selected_nothing_stays_zero(self):
+        # The fail-closed case: a name filter matching nothing exits 0 with every counter at 0,
+        # and that must not be readable as a surviving mutant.
+        self.assertEqual(loop.tests_ran("\u2139 tests 0\n\u2139 pass 0\n\u2139 fail 0\n"), 0)
+        # Skipped tests did not execute, exactly as on vitest.
+        self.assertEqual(
+            loop.tests_ran("\u2139 tests 9\n\u2139 pass 0\n\u2139 fail 0\n\u2139 skipped 9\n"), 0)
+
+    def test_prose_ending_in_a_number_is_not_a_node_summary(self):
+        # Without this, any line whose last word is a number could inflate the executed count.
+        self.assertIsNone(loop.node_test_counts("we ran tests 9\nsome other line 3\n"))
+        self.assertIsNone(loop.node_test_counts("\u2139 duration_ms 56.4\n"))
+        self.assertEqual(loop.tests_ran("Loaded 12 fixtures\nwrote 4\n"), 0)
+
     def test_test_files_ran(self):
         self.assertEqual(loop.test_files_ran('Test Files  1 passed (1)'), 1)
         self.assertEqual(loop.test_files_ran('Test Files  2 failed | 3 passed (5)'), 5)
         self.assertIsNone(loop.test_files_ran('No test files found, exiting with code 0'))
         self.assertIsNone(loop.test_files_ran(''))
         self.assertTrue(loop.no_tests_found('No test files found, exiting with code 0'))
+
+    # The real bytes vitest 2.1.9 wrote to a PIPE on 2026-10-03, kept verbatim because a
+    # hand-typed success case is what let this through: every case above is uncoloured, so
+    # the whole class was invisible to the suite while the detector matched nothing.
+    COLOURED_GREEN = (
+        "\x1b[1m\x1b[7m\x1b[36m RUN \x1b[39m\x1b[27m\x1b[22m \x1b[36mv2.1.9 \x1b[39m\x1b[90m/tmp/t\x1b[39m\n"
+        "\n"
+        " \x1b[32m\u2713\x1b[39m tests/chokepoint.test.ts \x1b[2m(\x1b[22m\x1b[2m18 tests\x1b[22m\x1b[2m)\x1b[22m\x1b[90m 8\x1b[2mms\x1b[22m\x1b[39m\n"
+        " \x1b[32m\u2713\x1b[39m tests/guards.test.ts \x1b[2m(\x1b[22m\x1b[2m14 tests\x1b[22m\x1b[2m)\x1b[22m\x1b[90m 31\x1b[2mms\x1b[22m\x1b[39m\n"
+        "\n"
+        "\x1b[2m Test Files \x1b[22m \x1b[1m\x1b[32m2 passed\x1b[39m\x1b[22m\x1b[90m (2)\x1b[39m\n"
+        "\x1b[2m      Tests \x1b[22m \x1b[1m\x1b[32m32 passed\x1b[39m\x1b[22m\x1b[90m (32)\x1b[39m\n"
+    )
+
+    def test_counts_survive_the_reporter_s_colours(self):
+        # The defect: `.strip().startswith('Test Files')` sees the escape, not the label,
+        # so a run of 2 files and 32 tests counted as None and read as NO-TESTS (rc 5).
+        self.assertEqual(loop.test_files_ran(self.COLOURED_GREEN), 2)
+        self.assertEqual(loop.tests_ran(self.COLOURED_GREEN), 32)
+        self.assertEqual(loop.vitest_verdict(0, self.COLOURED_GREEN, False, False), (0, '2 test file(s), 32 test(s)'))
+
+    def test_colour_does_not_make_an_empty_run_pass(self):
+        # Controls in the FAILING PROBE'S SHAPE — coloured output, not bare strings — or
+        # the fix above would equally be satisfied by "believe every green child".
+        empty = "\x1b[33mNo test files found, exiting with code 0\x1b[39m\n"
+        self.assertTrue(loop.no_tests_found(empty))
+        self.assertIsNone(loop.test_files_ran(empty))
+        rc, why = loop.vitest_verdict(0, empty, False, False)
+        self.assertEqual(rc, loop.RC_FAILCLOSED)
+        self.assertIn('NO-TESTS', why)
+
+        zero = ("\x1b[2m Test Files \x1b[22m \x1b[32m1 passed\x1b[39m (1)\n"
+                "\x1b[2m      Tests \x1b[22m \x1b[32m0 passed\x1b[39m | 5 skipped (5)\n")
+        rc, why = loop.vitest_verdict(0, zero, True, True)
+        self.assertEqual(rc, loop.RC_FAILCLOSED)
+        self.assertIn('MISARMED', why)
+
+    def test_strip_ansi_leaves_ordinary_text_alone(self):
+        self.assertEqual(loop.strip_ansi('Test Files  2 passed (2)'), 'Test Files  2 passed (2)')
+        self.assertEqual(loop.strip_ansi(''), '')
 
     def test_verdict_truth_table(self):
         V = loop.vitest_verdict
@@ -2984,6 +3053,1730 @@ class TestCadence(unittest.TestCase):
               dict(ev='queued', job='r', kind='review', cpu='none'), dict(ev='end', job='r', span_s=900.0)]
         self.assertEqual(loop.cadence_bill(ev, 'vitest'), (1, 5.0, 5.0),
                          "the review's 900 s must not appear in the suite's bill")
+
+
+# ----------------------------------------------------------- finding outcomes (§5.2-§5.4, S5)
+class TestFindingOutcomeStore(unittest.TestCase):
+    """Decision 5's "exactly one outcome per finding", enforced by a uniqueness key.
+
+    The subject is `(arc, track, round, findingId)`. An append-only file whose writer does not
+    enforce its key accepts a retry's second row and double-counts it, so the assertions below
+    are about what the WRITER refuses, never about what a reader could later clean up.
+    """
+
+    #: A record for the pure-rule tests, which need no filesystem. The arc is a path that does
+    #: not exist on purpose: `outcome_admission` compares identities and never stats anything.
+    PURE_ARC = '/nonexistent/arc'
+
+    def rec(self, arc, **over):
+        r = dict(arc=arc, track='A', round=1, findingId='F1', severity='high',
+                 file='src/pay.ts', lineStart=10, lineEnd=20, outcome='fixed',
+                 note='the division by zero was fixed in the same commit')
+        r.update(over)
+        return r
+
+    def record(self, s, **over):
+        r = self.rec(s.arc, **over)
+        return s.run('finding', 'record', '--arc', s.arc, '--track', str(r['track']),
+                     '--round', str(r['round']), '--id', r['findingId'],
+                     '--severity', r['severity'], '--file', r['file'],
+                     '--line-start', str(r['lineStart']), '--line-end', str(r['lineEnd']),
+                     '--outcome', r['outcome'], '--note', r['note'])
+
+    # -- the pure rule, exercisable with no filesystem at all
+
+    def test_a_conflicting_second_outcome_is_refused_and_names_both(self):
+        """THE red test of S5. The key's whole job, and the one a dropped check fails."""
+        first = self.rec(self.PURE_ARC)
+        second = dict(first, outcome='reviewer was wrong')
+        verdict, reason = loop.outcome_admission([first], second)
+        self.assertEqual(verdict, 'refuse')
+        self.assertIn("'fixed'", reason, 'the refusal must name the STORED outcome')
+        self.assertIn("'reviewer was wrong'", reason, 'and the one being refused')
+        self.assertIn('outcome', reason, 'and the field that differs')
+
+    def test_a_byte_identical_retry_is_idempotent_and_appends_nothing(self):
+        first = self.rec(self.PURE_ARC)
+        verdict, reason = loop.outcome_admission([first], dict(first))
+        self.assertEqual(verdict, 'idempotent')
+        self.assertIn('F1', reason)
+
+    def test_the_clock_stamp_is_outside_the_identity_so_a_retry_is_still_idempotent(self):
+        """A retry is the same decision recorded again; a clock reading is not part of it."""
+        first = dict(self.rec(self.PURE_ARC), **{loop.OUTCOME_STAMP: 1000.0})
+        later = dict(self.rec(self.PURE_ARC), **{loop.OUTCOME_STAMP: 2000.0})
+        self.assertEqual(loop.outcome_admission([first], later)[0], 'idempotent')
+
+    def test_a_difference_in_any_declared_field_is_a_conflict_not_only_the_outcome(self):
+        """Two readings of one finding. A report counting by severity would answer from either."""
+        first = self.rec(self.PURE_ARC)
+        for field, value in (('severity', 'low'), ('file', 'src/other.ts'),
+                             ('lineStart', 11), ('lineEnd', 21), ('note', 'something else')):
+            with self.subTest(field=field):
+                verdict, reason = loop.outcome_admission([first], dict(first, **{field: value}))
+                self.assertEqual(verdict, 'refuse', f'{field} moved and the row was admitted')
+                self.assertIn(field, reason, 'the refusal names the field that differs')
+
+    def test_the_key_is_all_four_parts(self):
+        """`findingId` alone is not the key: ids recur across rounds and rounds across tracks."""
+        first = self.rec(self.PURE_ARC)
+        for field, value in (('track', 'B'), ('round', 2), ('findingId', 'F2'), ('arc', '/elsewhere')):
+            with self.subTest(field=field):
+                other = dict(first, outcome='deferred', **{field: value})
+                self.assertEqual(loop.outcome_admission([first], other)[0], 'append',
+                                 f'{field} is part of the key, so this is a different finding')
+
+    def test_round_three_and_the_string_three_are_one_key(self):
+        """A JSON round trip or a hand-written row may carry either, and both are one finding."""
+        first = self.rec(self.PURE_ARC, round=3)
+        self.assertEqual(loop.outcome_admission([first], dict(first, round='3'))[0], 'idempotent')
+
+    def test_a_third_row_matching_one_of_two_conflicting_priors_still_refuses(self):
+        """The comparison runs against EVERY prior row, so a hand-edited store cannot look settled."""
+        a = self.rec(self.PURE_ARC)
+        b = dict(a, outcome='deferred')
+        self.assertEqual(loop.outcome_admission([a, b], dict(a))[0], 'refuse')
+
+    def test_duplicate_keys_are_reported_including_identical_rows(self):
+        a = self.rec(self.PURE_ARC)
+        self.assertEqual(loop.outcome_duplicate_keys([a]), [])
+        self.assertEqual(loop.outcome_duplicate_keys([a, dict(a)]), [loop.outcome_key(a)],
+                         'an identical repeat is still a duplicate row')
+        self.assertEqual(loop.outcome_duplicate_keys([a, dict(a), dict(a)]), [loop.outcome_key(a)],
+                         'reported once per key, not once per repeat')
+        self.assertEqual(loop.outcome_duplicate_keys([a, dict(a, findingId='F2')]), [])
+
+    # -- the same rule through the CLI, which is what an agent actually runs
+
+    def test_the_cli_refuses_an_outcome_outside_the_closed_set_of_six(self):
+        s = sbx(self)
+        r = self.record(s, outcome='wont fix')
+        self.assertEqual(r.returncode, loop.RC_FAILCLOSED, r.stdout + r.stderr)
+        self.assertIn('closed set of six', r.stdout + r.stderr)
+        self.assertEqual(loop.outcomes_read(s.arc), [], 'a refused outcome writes no row')
+
+    def test_the_closed_set_is_the_skills_one_closed_set(self):
+        """Not a second tuple here: a seventh value must not be acceptable to one of two readers."""
+        import review_eval
+        self.assertEqual(len(review_eval.FINDING_OUTCOMES), 6)
+        s = sbx(self)
+        for outcome in review_eval.FINDING_OUTCOMES:
+            with self.subTest(outcome=outcome):
+                r = self.record(s, findingId='F-' + outcome.replace(' ', '-'), outcome=outcome)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_the_cli_writes_one_row_then_refuses_the_conflicting_retry(self):
+        s = sbx(self)
+        self.assertEqual(self.record(s).returncode, 0)
+        rows = loop.outcomes_read(s.arc)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['outcome'], 'fixed')
+        self.assertIn(loop.OUTCOME_STAMP, rows[0], 'the row carries its own clock stamp')
+        for field in loop.OUTCOME_FIELDS:
+            self.assertIn(field, rows[0], f'{field} is required by §5.3 and absent')
+
+        again = self.record(s, outcome='intentional')
+        self.assertEqual(again.returncode, loop.RC_FAILCLOSED, again.stdout + again.stderr)
+        self.assertEqual(len(loop.outcomes_read(s.arc)), 1,
+                         'the refused retry must leave the store at one row')
+        self.assertEqual(loop.outcomes_read(s.arc)[0]['outcome'], 'fixed',
+                         'the stored record stands; a correction is a deliberate edit')
+
+    def test_the_cli_retry_is_idempotent_and_leaves_exactly_one_row(self):
+        s = sbx(self)
+        self.assertEqual(self.record(s).returncode, 0)
+        r = self.record(s)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('appends nothing', r.stdout)
+        self.assertEqual(len(loop.outcomes_read(s.arc)), 1)
+
+    def test_an_empty_note_is_refused(self):
+        s = sbx(self)
+        r = self.record(s, note='   ')
+        self.assertEqual(r.returncode, loop.RC_USAGE, r.stdout + r.stderr)
+        self.assertEqual(loop.outcomes_read(s.arc), [])
+
+    def test_an_inverted_line_range_is_refused(self):
+        s = sbx(self)
+        r = self.record(s, lineStart=30, lineEnd=20)
+        self.assertEqual(r.returncode, loop.RC_USAGE, r.stdout + r.stderr)
+        self.assertEqual(loop.outcomes_read(s.arc), [])
+
+    def test_a_corrupt_store_refuses_rather_than_recording_over_a_hole(self):
+        """An unreadable row cannot rule out an existing outcome for this finding."""
+        s = sbx(self)
+        with open(loop.outcomes_path(s.arc), 'w') as fh:
+            fh.write('{not json\n')
+        r = self.record(s)
+        self.assertEqual(r.returncode, loop.RC_FAILCLOSED, r.stdout + r.stderr)
+        self.assertIn('unparseable', r.stdout + r.stderr)
+
+    def test_outcomes_for_round_reads_rows_filed_under_that_round_only(self):
+        s = sbx(self)
+        self.assertEqual(self.record(s, findingId='F1').returncode, 0)
+        self.assertEqual(self.record(s, findingId='F2', round=2).returncode, 0)
+        self.assertEqual(self.record(s, findingId='F3', track='B').returncode, 0)
+        rows = loop.outcomes_read(s.arc)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual([r['findingId'] for r in loop.outcomes_for_round(rows, s.arc, 'A', 1)],
+                         ['F1'])
+        self.assertEqual([r['findingId'] for r in loop.outcomes_for_round(rows, s.arc, 'A', 2)],
+                         ['F2'])
+        self.assertEqual([r['findingId'] for r in loop.outcomes_for_round(rows, s.arc, 'B', 1)],
+                         ['F3'])
+
+    def test_the_store_sits_beside_the_ledger_and_is_not_the_ledger(self):
+        """§5.2: it EXTENDS the ledger's identity and does not pollute the ledger's events."""
+        s = sbx(self)
+        before = len(loop.ledger_read(s.arc))
+        self.assertEqual(self.record(s).returncode, 0)
+        self.assertEqual(len(loop.ledger_read(s.arc)), before,
+                         'an outcome is not a job event and must not appear in jobs.jsonl')
+        self.assertEqual(os.path.basename(loop.outcomes_path(s.arc)), 'outcomes.jsonl')
+        self.assertEqual(os.path.dirname(loop.outcomes_path(s.arc)), s.arc)
+
+    def test_two_concurrent_recorders_of_one_finding_leave_one_row(self):
+        """The read-decide-append transaction. Without it both read "no prior row" and both append."""
+        s = sbx(self)
+        r = self.rec(s.arc)
+        argv = ['finding', 'record', '--arc', s.arc, '--track', 'A', '--round', '1',
+                '--id', 'F1', '--severity', 'high', '--file', r['file'],
+                '--line-start', '10', '--line-end', '20', '--outcome', 'fixed',
+                '--note', r['note']]
+        procs = [s.start(*argv) for _ in range(6)]
+        rcs = []
+        for p in procs:
+            p.communicate(timeout=60)
+            rcs.append(p.returncode)
+        self.assertEqual(set(rcs), {0}, f'every identical recorder should succeed: {rcs}')
+        self.assertEqual(len(loop.outcomes_read(s.arc)), 1,
+                         'six concurrent identical records must leave exactly one row')
+
+
+# ------------------------------------------------- close-round reads outcomes (§5.5, S6)
+class TestCloseRoundRequiresAnOutcomePerFinding(unittest.TestCase):
+    """§5.5. The requirement joins the gate that already decides whether the next round launches.
+
+    The round's finding set is DERIVED from the verdicts the round's reviewers wrote, never from a
+    list anybody types: a typed list can omit the finding nobody wanted to disposition, which is
+    the hole this gate closes.
+    """
+
+    def verdict(self, s, name, n_findings, body=None):
+        """Write a verdict file with `n_findings` findings and return its path."""
+        path = os.path.join(s.arc, f'{name}.verdict.json')
+        if body is None:
+            body = dict(
+                reviewed=dict(base='a' * 40, head='b' * 40, files=['src/pay.ts']),
+                verdict='needs-attention' if n_findings else 'approve',
+                summary='a verdict built by a unit test',
+                findings=[dict(severity='high', title=f'f{i}', body='b', file='src/pay.ts',
+                               line_start=1, line_end=2, confidence=0.9, recommendation='r')
+                          for i in range(n_findings)],
+                next_steps=[])
+        with open(path, 'w') as fh:
+            json.dump(body, fh)
+        return path
+
+    def reviewed(self, s, name='sol', n_findings=2, rc=0, **extra):
+        """Ledger a finished review job for track A round 1, with its verdict on disk."""
+        out = self.verdict(s, name, n_findings) if 'out' not in extra else extra.pop('out')
+        loop.record_job(s.arc, 'A', 1, 'review', name, 1000.0, 1600.0, rc, out=out)
+        return out
+
+    def record(self, s, fid, outcome='fixed'):
+        return s.run('finding', 'record', '--arc', s.arc, '--track', 'A', '--round', '1',
+                     '--id', fid, '--severity', 'high', '--file', 'src/pay.ts',
+                     '--line-start', '1', '--line-end', '2', '--outcome', outcome,
+                     '--note', 'dispositioned by a unit test')
+
+    def close(self, s, *extra):
+        return s.run('close-round', '--arc', s.arc, '--track', 'A', '--round', '1', *extra)
+
+    # -- the pure derivation
+
+    def test_a_findings_id_is_its_job_and_its_index(self):
+        self.assertEqual(loop.finding_id('sol', 0), 'sol#0')
+        self.assertEqual(loop.finding_id('terra', 7), 'terra#7')
+
+    def test_the_round_s_findings_come_from_its_own_verdicts(self):
+        s = sbx(self)
+        self.reviewed(s, 'sol', 2)
+        self.reviewed(s, 'terra', 1)
+        loop.record_job(s.arc, 'A', 2, 'review', 'next-round', 1000.0, 1100.0, 0,
+                        out=self.verdict(s, 'next-round', 5))
+        found, unreadable = loop.round_findings(loop.ledger_read(s.arc), 'A', 1)
+        self.assertEqual(found, ['sol#0', 'sol#1', 'terra#0'],
+                         "round 2's five findings must not appear in round 1's set")
+        self.assertEqual(unreadable, [])
+
+    def test_a_failed_review_contributes_no_findings(self):
+        """It wrote no verdict, and close-round already refuses over a job with no terminal event."""
+        s = sbx(self)
+        loop.record_job(s.arc, 'A', 1, 'review', 'died', 1000.0, 1100.0, 5, out='/nonexistent.json')
+        self.assertEqual(loop.round_findings(loop.ledger_read(s.arc), 'A', 1), ([], []))
+
+    def test_an_unreadable_verdict_is_reported_rather_than_counted_as_zero(self):
+        """Unknown is not zero, and zero is the one value that makes the requirement vacuous."""
+        s = sbx(self)
+        loop.record_job(s.arc, 'A', 1, 'review', 'gone', 1000.0, 1100.0, 0,
+                        out=os.path.join(s.arc, 'gone.verdict.json'))
+        found, unreadable = loop.round_findings(loop.ledger_read(s.arc), 'A', 1)
+        self.assertEqual(found, [])
+        self.assertEqual(len(unreadable), 1)
+        self.assertIn('gone.verdict.json', unreadable[0])
+
+    def test_the_round_counts_findings_from_the_ARC_s_copy_not_the_caller_s_path(self):
+        """The caller's verdict path is not ours to depend on.
+
+        MEASURED 2026-10-26 through the real launcher: `codex-loop.test.sh`'s `launch()` deletes
+        the scratch verdict before every launch so that `[ -s out.json ]` means "this launch
+        landed a verdict", and a later launch on ANOTHER track reused the same path.
+        `review_name_collision` is scoped to one track and one round, so it does not speak for
+        that case, and track A round 1 became permanently unclosable -- over a verdict the loop
+        had already paid for. `keep_verdict` is the copy the refusal had always claimed to keep.
+        """
+        s = sbx(self)
+        out = self.verdict(s, 'sol', 2)
+        kept = loop.keep_verdict(s.arc, 'A.r1.sol.1', out)
+        self.assertTrue(os.path.isfile(kept))
+        start = {'ev': 'start', 'kind': 'review', 'track': 'A', 'round': 1, 'name': 'sol',
+                 'out': out, 'job': 'A.r1.sol.1'}
+        events = [start, {'ev': 'end', 'job': 'A.r1.sol.1', 'rc': 0, 'verdict': kept}]
+        os.remove(out)   # the caller tidies up, as the suite's own launcher does
+        self.assertEqual(loop.round_findings(events, 'A', 1), (['sol#0', 'sol#1'], []))
+        # CONTROL: with no copy kept, the same deleted path is the fail-closed case it always was.
+        bare = [start, {'ev': 'end', 'job': 'A.r1.sol.1', 'rc': 0}]
+        found, unreadable = loop.round_findings(bare, 'A', 1)
+        self.assertEqual(found, [])
+        self.assertEqual(len(unreadable), 1)
+        self.assertIn(out, unreadable[0])
+
+    def test_a_kept_verdict_is_byte_identical_and_lands_under_the_arc(self):
+        s = sbx(self)
+        out = self.verdict(s, 'sol', 3)
+        kept = loop.keep_verdict(s.arc, 'job-1', out)
+        self.assertEqual(kept, loop.verdict_keep_path(s.arc, 'job-1'))
+        self.assertTrue(os.path.abspath(kept).startswith(os.path.abspath(s.arc) + os.sep))
+        with open(out, encoding='utf-8') as a, open(kept, encoding='utf-8') as b:
+            self.assertEqual(a.read(), b.read())
+
+    def test_keeping_a_verdict_that_cannot_be_read_warns_and_never_raises(self):
+        """A bookkeeping failure may not fail a paid review, and may not pass silently either.
+
+        BOTH ways the read can fail, because they are different exception families and only one of
+        them is an `OSError`: the file is missing, and the file is not decodable. The second was a
+        real hole -- `UnicodeDecodeError` is a `ValueError`, so an `except OSError` let it out and
+        crashed a run whose review had already been paid for.
+        """
+        s = sbx(self)
+        self.assertEqual(loop.keep_verdict(s.arc, 'job-2', os.path.join(s.arc, 'nope.json')), '')
+        undecodable = os.path.join(s.arc, 'bytes.json')
+        with open(undecodable, 'wb') as fh:
+            fh.write(b'{"findings": "\xff\xfe not utf-8"}')
+        self.assertEqual(loop.keep_verdict(s.arc, 'job-3', undecodable), '')
+        self.assertFalse(os.path.exists(loop.verdict_keep_path(s.arc, 'job-3')))
+
+    def test_coverage_names_both_directions(self):
+        rows = [dict(findingId='sol#0'), dict(findingId='typo#9')]
+        missing, stray = loop.outcome_coverage(['sol#0', 'sol#1'], rows)
+        self.assertEqual(missing, ['sol#1'])
+        self.assertEqual(stray, ['typo#9'])
+        self.assertEqual(loop.outcome_coverage(['sol#0'], [dict(findingId='sol#0')]), ([], []))
+        self.assertEqual(loop.outcome_coverage([], []), ([], []))
+
+    # -- the gate itself
+
+    def test_a_round_with_findings_and_no_outcomes_cannot_close(self):
+        """THE red test of S6: this round closed before, with nothing recorded."""
+        s = sbx(self)
+        self.reviewed(s, 'sol', 2)
+        r = self.close(s)
+        self.assertEqual(r.returncode, loop.RC_FAILCLOSED, r.stdout + r.stderr)
+        out = r.stdout + r.stderr
+        self.assertIn('2 of 2 finding(s) carry no outcome', out)
+        self.assertIn('sol#0', out)
+        self.assertIn('sol#1', out)
+        self.assertIn('decision 5', out.lower().replace('Decision 5', 'decision 5'))
+        self.assertFalse(loop.round_status(loop.ledger_read(s.arc), 'A', 1)['closed'])
+
+    def test_one_missing_outcome_of_two_still_refuses_and_names_only_it(self):
+        s = sbx(self)
+        self.reviewed(s, 'sol', 2)
+        self.assertEqual(self.record(s, 'sol#0').returncode, 0)
+        r = self.close(s)
+        self.assertEqual(r.returncode, loop.RC_FAILCLOSED, r.stdout + r.stderr)
+        self.assertIn('1 of 2 finding(s) carry no outcome', r.stdout + r.stderr)
+        self.assertIn('sol#1', r.stdout + r.stderr)
+
+    def test_the_round_closes_once_every_finding_carries_an_outcome(self):
+        s = sbx(self)
+        self.reviewed(s, 'sol', 2)
+        for fid in ('sol#0', 'sol#1'):
+            self.assertEqual(self.record(s, fid).returncode, 0)
+        r = self.close(s)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(loop.round_status(loop.ledger_read(s.arc), 'A', 1)['closed'])
+
+    def test_a_round_with_zero_findings_closes_exactly_as_before(self):
+        """The backward-compatibility case, and the one a careless implementation breaks."""
+        s = sbx(self)
+        self.reviewed(s, 'quiet', 0)
+        r = self.close(s)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(loop.round_status(loop.ledger_read(s.arc), 'A', 1)['closed'])
+
+    def test_a_round_that_ran_no_review_at_all_closes_exactly_as_before(self):
+        """Every round of every in-flight arc that predates this store has this shape."""
+        s = sbx(self)
+        loop.record_job(s.arc, 'A', 1, 'vitest', 'suite', 1000.0, 1100.0, 0)
+        r = self.close(s)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_duplicate_key_in_the_store_refuses(self):
+        s = sbx(self)
+        self.reviewed(s, 'sol', 1)
+        self.assertEqual(self.record(s, 'sol#0').returncode, 0)
+        # Appended out of band on purpose: `loop.py finding record` cannot produce a duplicate,
+        # so the only honest way to test the reader's refusal is to write one as something else
+        # would have.
+        row = dict(loop.outcomes_read(s.arc)[0])
+        loop._jsonl_append(loop.outcomes_path(s.arc), loop.outcomes_path(s.arc) + '.dup.lock', row)
+        self.assertEqual(len(loop.outcomes_read(s.arc)), 2)
+        r = self.close(s)
+        self.assertEqual(r.returncode, loop.RC_FAILCLOSED, r.stdout + r.stderr)
+        self.assertIn('duplicate key', r.stdout + r.stderr)
+        self.assertIn('sol#0', r.stdout + r.stderr)
+
+    def test_a_corrupt_outcome_store_refuses(self):
+        s = sbx(self)
+        self.reviewed(s, 'quiet', 0)
+        with open(loop.outcomes_path(s.arc), 'w') as fh:
+            fh.write('{half a row\n')
+        r = self.close(s)
+        self.assertEqual(r.returncode, loop.RC_FAILCLOSED, r.stdout + r.stderr)
+        self.assertIn('unparseable', r.stdout + r.stderr)
+
+    def test_an_unreadable_verdict_refuses_the_close(self):
+        s = sbx(self)
+        loop.record_job(s.arc, 'A', 1, 'review', 'gone', 1000.0, 1100.0, 0,
+                        out=os.path.join(s.arc, 'gone.verdict.json'))
+        r = self.close(s)
+        self.assertEqual(r.returncode, loop.RC_FAILCLOSED, r.stdout + r.stderr)
+        self.assertIn('UNKNOWN', r.stdout + r.stderr)
+
+    def test_a_stray_outcome_is_reported_and_does_not_refuse(self):
+        """Asymmetric on purpose: refusing here would need a hand-edit of an append-only store."""
+        s = sbx(self)
+        self.reviewed(s, 'sol', 1)
+        self.assertEqual(self.record(s, 'sol#0').returncode, 0)
+        self.assertEqual(self.record(s, 'sol#7').returncode, 0)
+        r = self.close(s)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('sol#7', r.stderr)
+        self.assertIn('name no finding this round reported', r.stderr)
+
+    def test_an_outcome_filed_under_another_round_does_not_satisfy_this_one(self):
+        """The key is all four parts, so a round cannot be closed by another round's work."""
+        s = sbx(self)
+        self.reviewed(s, 'sol', 1)
+        r = s.run('finding', 'record', '--arc', s.arc, '--track', 'A', '--round', '2',
+                  '--id', 'sol#0', '--severity', 'high', '--file', 'src/pay.ts',
+                  '--line-start', '1', '--line-end', '2', '--outcome', 'fixed',
+                  '--note', 'filed under the wrong round')
+        self.assertEqual(r.returncode, 0)
+        c = self.close(s)
+        self.assertEqual(c.returncode, loop.RC_FAILCLOSED, c.stdout + c.stderr)
+        self.assertIn('sol#0', c.stdout + c.stderr)
+
+
+# ----------------------------------------------------- the outcome report (§5.6, §5.7, S7)
+class TestFindingReport(unittest.TestCase):
+    """`loop.py finding report`: counts by kind, by severity and by round, read from the ROWS.
+
+    The subject is where the numbers come from. A report that counted what a run returned would
+    agree with the store only until something else wrote it, and the store is append-only with
+    several writers by design — a review round records its findings one at a time, a retry can
+    land mid-report, and a hand-written correction is an ordinary edit of a JSONL file. So every
+    assertion below is about a count moving when the ROWS move, never about a value a command
+    handed back.
+    """
+
+    def rows(self, arc, *over):
+        """One row per `over` mapping, all under `arc`, with the declared fields filled in."""
+        out = []
+        for i, o in enumerate(over):
+            r = dict(arc=arc, track='A', round=1, findingId=f'sol#{i}', severity='high',
+                     file='src/pay.ts', lineStart=1, lineEnd=2, outcome='fixed',
+                     note='n')
+            r.update(o)
+            out.append(r)
+        return out
+
+    def record(self, s, **over):
+        r = self.rows(s.arc, over)[0]
+        return s.run('finding', 'record', '--arc', s.arc, '--track', str(r['track']),
+                     '--round', str(r['round']), '--id', r['findingId'],
+                     '--severity', r['severity'], '--file', r['file'],
+                     '--line-start', str(r['lineStart']), '--line-end', str(r['lineEnd']),
+                     '--outcome', r['outcome'], '--note', r['note'])
+
+    # -- the pure rule
+
+    def test_counts_by_kind_by_severity_and_by_round(self):
+        arc = '/nonexistent/arc'
+        rows = self.rows(arc,
+                         dict(findingId='a', outcome='fixed', severity='high', round=1),
+                         dict(findingId='b', outcome='fixed', severity='medium', round=1),
+                         dict(findingId='c', outcome='intentional', severity='high', round=2))
+        rep = loop.outcome_report(rows, arc)
+        self.assertEqual(rep['total'], 3)
+        self.assertEqual(rep['by_outcome']['fixed'], 2)
+        self.assertEqual(rep['by_outcome']['intentional'], 1)
+        self.assertEqual(rep['by_severity'], {'high': 2, 'medium': 1})
+        self.assertEqual(rep['by_round'], {'A:1': 2, 'A:2': 1})
+
+    def test_every_outcome_of_the_closed_set_appears_even_at_zero(self):
+        """A bucket missing because it is empty cannot be told from a bucket that was dropped."""
+        import review_eval
+        arc = '/nonexistent/arc'
+        rep = loop.outcome_report(self.rows(arc, dict(outcome='fixed')), arc)
+        self.assertEqual(sorted(rep['by_outcome']), sorted(review_eval.FINDING_OUTCOMES))
+        self.assertEqual(rep['by_outcome']['deferred'], 0)
+
+    def test_an_outcome_outside_the_closed_set_is_named_not_silently_bucketed(self):
+        """The writer refuses one, so a row carrying one was written by something else."""
+        arc = '/nonexistent/arc'
+        rows = self.rows(arc, dict(findingId='a', outcome='fixed'),
+                         dict(findingId='b', outcome='wontfix'))
+        rep = loop.outcome_report(rows, arc)
+        self.assertEqual(rep['unknown_outcomes'], ['wontfix'])
+        self.assertEqual(rep['by_outcome']['fixed'], 1)
+        self.assertEqual(rep['total'], 2, 'the row is counted; it is its KIND that is unknown')
+
+    def test_scoping_by_track_and_round_excludes_the_rest(self):
+        arc = '/nonexistent/arc'
+        rows = self.rows(arc, dict(findingId='a', track='A', round=1),
+                         dict(findingId='b', track='A', round=2),
+                         dict(findingId='c', track='B', round=1))
+        self.assertEqual(loop.outcome_report(rows, arc)['total'], 3)
+        self.assertEqual(loop.outcome_report(rows, arc, track='A')['total'], 2)
+        self.assertEqual(loop.outcome_report(rows, arc, track='A', rnd=1)['total'], 1)
+
+    def test_rows_of_another_arc_are_excluded(self):
+        """The store is keyed by arc, and a shared directory is a supported shape."""
+        arc = '/nonexistent/arc'
+        rows = self.rows(arc, dict(findingId='a'), dict(findingId='b', arc='/other/arc'))
+        self.assertEqual(loop.outcome_report(rows, arc)['total'], 1)
+
+    def test_a_repeated_key_is_counted_once_and_named(self):
+        """`outcome_duplicate_keys`' own rule: a report reads validated unique findings."""
+        arc = '/nonexistent/arc'
+        row = self.rows(arc, dict(findingId='a'))[0]
+        rep = loop.outcome_report([row, dict(row)], arc)
+        self.assertEqual(rep['total'], 1, 'a repeat must not inflate a count')
+        self.assertEqual(rep['duplicate_keys'], [loop.outcome_key(row)])
+
+    def test_a_key_whose_rows_DISAGREE_is_excluded_from_the_kind_counts(self):
+        """Which of two readings to count is not a choice a report may make silently."""
+        arc = '/nonexistent/arc'
+        row = self.rows(arc, dict(findingId='a', outcome='fixed'))[0]
+        rep = loop.outcome_report([row, dict(row, outcome='deferred')], arc)
+        self.assertEqual(rep['conflicting_keys'], [loop.outcome_key(row)])
+        self.assertEqual(rep['by_outcome']['fixed'], 0)
+        self.assertEqual(rep['by_outcome']['deferred'], 0)
+        self.assertEqual(rep['total'], 0, 'nothing countable came out of that key')
+
+    # -- the rendered report
+
+    def test_the_rendering_says_in_words_that_counts_begin_after_this_shipped(self):
+        """§5.7. A zero here is an absence of RECORDS, and a reader cannot be left to guess."""
+        arc = '/nonexistent/arc'
+        text = loop.render_outcome_report(loop.outcome_report(self.rows(arc, {}), arc))
+        self.assertIn(loop.OUTCOME_COUNTS_BEGIN_NOTE, text)
+        self.assertIn('1,310', loop.OUTCOME_COUNTS_BEGIN_NOTE,
+                      'the measured number of findings that carry no outcome')
+
+    # -- THE acceptance row: the numbers come from the rows
+
+    def test_a_row_written_OUT_OF_BAND_moves_the_count(self):
+        """The acceptance test of S7, and the one a return-value report fails.
+
+        The second row never passes through the recorder. If the report were counting what a
+        command returned, or a tally the recorder kept, this count would not move.
+        """
+        s = sbx(self)
+        self.assertEqual(self.record(s, findingId='sol#0').returncode, 0)
+        first = s.run('finding', 'report', '--arc', s.arc)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertIn('total 1', first.stdout)
+
+        with open(loop.outcomes_path(s.arc), 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps(dict(arc=s.arc, track='A', round=1, findingId='sol#1',
+                                     severity='low', file='src/pay.ts', lineStart=3, lineEnd=4,
+                                     outcome='deferred', note='appended by hand',
+                                     recordedAt=1.0)) + '\n')
+
+        second = s.run('finding', 'report', '--arc', s.arc)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn('total 2', second.stdout)
+        self.assertIn('deferred', second.stdout)
+        self.assertIn('low', second.stdout, 'the severity of a row no command recorded')
+
+    def test_a_report_over_an_empty_store_is_zero_and_still_says_so(self):
+        """Honest about zero: the one value that makes every later comparison look unchanged."""
+        s = sbx(self)
+        r = s.run('finding', 'report', '--arc', s.arc)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('total 0', r.stdout)
+        self.assertIn(loop.OUTCOME_COUNTS_BEGIN_NOTE, r.stdout)
+
+    def test_a_corrupt_store_refuses_rather_than_reporting_a_smaller_number(self):
+        s = sbx(self)
+        self.assertEqual(self.record(s, findingId='sol#0').returncode, 0)
+        with open(loop.outcomes_path(s.arc), 'a', encoding='utf-8') as fh:
+            fh.write('{half a row\n')
+        r = s.run('finding', 'report', '--arc', s.arc)
+        self.assertEqual(r.returncode, loop.RC_FAILCLOSED, r.stdout + r.stderr)
+        self.assertIn('unparseable', r.stdout + r.stderr)
+
+
+# --------------------------------------------- the run-summary store (§4.4, §4.5, S13)
+class TestRunSummaryStore(unittest.TestCase):
+    """A grading run's result, persisted, so a baseline can exist at all.
+
+    `keep_verdict(baseline, candidate)` refuses when the baseline is `None`, and before this task
+    NOTHING wrote a `RunSummary` anywhere — so the keep rule would have refused every comparison
+    forever, which reads as the gate working rather than as a missing feature. The subject here is
+    therefore the ROUND TRIP: what comes back must be the same summary, including the two sets the
+    keep rule compares and the manifest hash that tells two runs over corrected cases apart.
+    """
+
+    def scores(self, **over):
+        """The scored-run artifact `run-summary record` reads. One file in, one row out."""
+        doc = {
+            'escapeScores': [
+                dict(caseId='325', caught=True, verdicts=['catch'], nearMisses=[],
+                     malformed=0, outOfScope=0, scorable=True),
+                dict(caseId='265', caught=False, verdicts=['miss'], nearMisses=[],
+                     malformed=0, outOfScope=0, scorable=True),
+                dict(caseId='161', caught=False, verdicts=['malformed'], nearMisses=[],
+                     malformed=1, outOfScope=0, scorable=False),
+            ],
+            'cleanFalseAlarms': {'c1': 0, 'c2': 2},
+            'caseManifestHash': 'sha256:abc123',
+        }
+        doc.update(over)
+        return doc
+
+    def write_scores(self, s, name='scores.json', **over):
+        path = os.path.join(s.arc, name)
+        os.makedirs(s.arc, exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as fh:
+            json.dump(self.scores(**over), fh)
+        return path
+
+    def record(self, s, run_id='r1', scores=None, extra=()):
+        return s.run('run-summary', 'record', '--arc', s.arc, '--run-id', run_id,
+                     '--scores', scores or self.write_scores(s),
+                     '--judge-model', 'gpt-5.6-sol', '--judge-effort', 'high', *extra)
+
+    # -- THE red test: the round trip
+
+    def test_a_recorded_summary_reads_back_by_arc_and_run_id(self):
+        """S13's red test. It fails against an absent writer, which is what the task exists for."""
+        s = sbx(self)
+        r = self.record(s)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rows = loop.run_summaries_read(s.arc)
+        self.assertEqual(len(rows), 1)
+        back = loop.run_summary_from_row(rows[0])
+        self.assertEqual(back.caught_case_ids, ('325',))
+        self.assertEqual(back.scorable_case_ids, ('325', '265'))
+        self.assertEqual(back.case_manifest_hash, 'sha256:abc123')
+        self.assertEqual(back.case_ids, ('325', '265', '161'))
+        self.assertEqual(back.clean_case_ids, ('c1', 'c2'))
+        self.assertEqual(back.false_alarms, 2)
+        self.assertEqual(back.malformed_findings, 1)
+        self.assertEqual(back.out_of_scope_findings, 0)
+
+    def test_the_round_trip_is_asserted_on_the_DERIVED_catches(self):
+        """`catches` is a property of `caught_case_ids` (S1), so the count cannot be stored.
+
+        Asserting the stored field count would pass for a writer that persisted an integer
+        somebody supplied, which is the exact shape S1 removed.
+        """
+        s = sbx(self)
+        self.assertEqual(self.record(s).returncode, 0)
+        back = loop.run_summary_from_row(loop.run_summaries_read(s.arc)[0])
+        self.assertEqual(back.catches, 1)
+        self.assertEqual(back.escape_cases, 3)
+        self.assertEqual(back.clean_cases, 2)
+        self.assertNotIn('catches', loop.run_summaries_read(s.arc)[0],
+                         'a derived count must not be persisted beside the set it derives from')
+
+    # -- the producer
+
+    def test_the_summary_is_built_through_build_run_summary(self):
+        """Proved behaviourally: only that producer refuses a duplicate case id.
+
+        A recorder assembling the row field by field would accept this file and write a summary
+        whose denominator counted case 325 twice.
+        """
+        s = sbx(self)
+        dupe = self.scores()
+        dupe['escapeScores'].append(dict(dupe['escapeScores'][0]))
+        path = os.path.join(s.arc, 'dupe.json')
+        os.makedirs(s.arc, exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as fh:
+            json.dump(dupe, fh)
+        r = self.record(s, scores=path)
+        self.assertEqual(r.returncode, loop.RC_FAILCLOSED, r.stdout + r.stderr)
+        self.assertIn('325', r.stdout + r.stderr)
+        self.assertIn('once per run', r.stdout + r.stderr)
+        self.assertEqual(loop.run_summaries_read(s.arc), [], 'and nothing was written')
+
+    def test_an_incoherent_summary_is_refused_at_the_producer(self):
+        """A catch on a case that was never scorable: `RunSummary.__post_init__`'s own refusal."""
+        s = sbx(self)
+        bad = self.scores()
+        bad['escapeScores'][2] = dict(bad['escapeScores'][2], caught=True)
+        path = os.path.join(s.arc, 'bad.json')
+        os.makedirs(s.arc, exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as fh:
+            json.dump(bad, fh)
+        r = self.record(s, scores=path)
+        self.assertEqual(r.returncode, loop.RC_FAILCLOSED, r.stdout + r.stderr)
+        self.assertIn('scorable_case_ids', r.stdout + r.stderr)
+
+    # -- the identity discipline, shared with the finding store
+
+    def test_a_byte_identical_retry_is_idempotent_and_appends_nothing(self):
+        s = sbx(self)
+        self.assertEqual(self.record(s).returncode, 0)
+        again = self.record(s)
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(len(loop.run_summaries_read(s.arc)), 1, 'a retry appends nothing')
+        self.assertIn('appends nothing', again.stdout)
+
+    def test_a_conflicting_second_summary_for_one_run_id_is_refused(self):
+        """One run id, one result. A second reading of one run is two answers, not a correction."""
+        s = sbx(self)
+        self.assertEqual(self.record(s).returncode, 0)
+        other = self.scores()
+        other['escapeScores'][1] = dict(other['escapeScores'][1], caught=True)
+        path = os.path.join(s.arc, 'other.json')
+        with open(path, 'w', encoding='utf-8') as fh:
+            json.dump(other, fh)
+        r = self.record(s, scores=path)
+        self.assertEqual(r.returncode, loop.RC_FAILCLOSED, r.stdout + r.stderr)
+        self.assertIn('r1', r.stdout + r.stderr, 'the refusal names the run')
+        self.assertIn('caughtCaseIds', r.stdout + r.stderr, 'and the field that differs')
+        self.assertEqual(len(loop.run_summaries_read(s.arc)), 1)
+
+    def test_the_shared_admission_rule_is_one_rule(self):
+        """Both stores call `store_admission`; a second copy of the rule would drift."""
+        key, value = ('arc', 'runId'), ('x',)
+        a = dict(arc='/a', runId='r1', x=1)
+        self.assertEqual(loop.store_admission([], a, key, value)[0], 'append')
+        self.assertEqual(loop.store_admission([a], dict(a), key, value)[0], 'idempotent')
+        verdict, prior, differing = loop.store_admission([a], dict(a, x=2), key, value)
+        self.assertEqual(verdict, 'refuse')
+        self.assertEqual(prior, a)
+        self.assertEqual(differing, ['x'])
+
+    # -- the baseline
+
+    def test_the_baseline_refuses_and_names_the_arc_when_none_is_recorded(self):
+        """§4.4's honest first answer. An empty summary here would make the keep rule pass."""
+        s = sbx(self)
+        r = s.run('run-summary', 'baseline', '--arc', s.arc)
+        self.assertEqual(r.returncode, loop.RC_FAILCLOSED, r.stdout + r.stderr)
+        self.assertIn(s.arc, r.stdout + r.stderr, 'the refusal names the arc')
+        self.assertIn('no run summary', (r.stdout + r.stderr).lower())
+
+    def test_the_baseline_is_the_most_recently_recorded_summary(self):
+        s = sbx(self)
+        self.assertEqual(self.record(s, run_id='r1').returncode, 0)
+        later = self.scores()
+        later['escapeScores'][1] = dict(later['escapeScores'][1], caught=True)
+        path = os.path.join(s.arc, 'later.json')
+        with open(path, 'w', encoding='utf-8') as fh:
+            json.dump(later, fh)
+        self.assertEqual(self.record(s, run_id='r2', scores=path).returncode, 0)
+        r = s.run('run-summary', 'baseline', '--arc', s.arc)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('r2', r.stdout)
+        base = loop.run_summary_baseline(loop.run_summaries_read(s.arc), s.arc)
+        self.assertEqual(base['runId'], 'r2')
+        self.assertEqual(loop.run_summary_from_row(base).caught_case_ids, ('325', '265'))
+
+    def test_a_baseline_of_another_arc_is_not_this_arcs_baseline(self):
+        s = sbx(self)
+        rows = [dict(arc='/other/arc', runId='x')]
+        self.assertIsNone(loop.run_summary_baseline(rows, s.arc))
+
+    # -- provenance, which S8 writes into and reads back out of
+
+    def test_the_judge_identity_and_effort_round_trip(self):
+        s = sbx(self)
+        self.assertEqual(self.record(s).returncode, 0)
+        row = loop.run_summaries_read(s.arc)[0]
+        self.assertEqual(row['judge'], {'model': 'gpt-5.6-sol', 'effort': 'high'})
+
+    def test_a_run_that_judged_nothing_must_SAY_so_rather_than_omit_the_field(self):
+        """A missing setting is reported, never silently filled."""
+        s = sbx(self)
+        r = s.run('run-summary', 'record', '--arc', s.arc, '--run-id', 'r1',
+                  '--scores', self.write_scores(s))
+        self.assertEqual(r.returncode, loop.RC_USAGE, r.stdout + r.stderr)
+        self.assertIn('--no-judge', r.stdout + r.stderr)
+        ok = s.run('run-summary', 'record', '--arc', s.arc, '--run-id', 'r1',
+                   '--scores', self.write_scores(s), '--no-judge')
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        self.assertIsNone(loop.run_summaries_read(s.arc)[0]['judge'])
+
+    # -- the store's own integrity
+
+    def test_a_corrupt_store_refuses_rather_than_recording_beside_rows_it_cannot_read(self):
+        s = sbx(self)
+        os.makedirs(s.arc, exist_ok=True)
+        with open(loop.run_summaries_path(s.arc), 'w', encoding='utf-8') as fh:
+            fh.write('{half a row\n')
+        r = self.record(s)
+        self.assertEqual(r.returncode, loop.RC_FAILCLOSED, r.stdout + r.stderr)
+        self.assertIn('unparseable', r.stdout + r.stderr)
+
+    def test_the_store_sits_beside_the_outcome_store_and_not_inside_it(self):
+        """Two stores, one directory. A shared file would make one key check the other's rows."""
+        s = sbx(self)
+        self.assertEqual(self.record(s).returncode, 0)
+        self.assertNotEqual(loop.run_summaries_path(s.arc), loop.outcomes_path(s.arc))
+        self.assertEqual(os.path.dirname(loop.run_summaries_path(s.arc)),
+                         os.path.dirname(loop.outcomes_path(s.arc)))
+        # The relation above is anchored on BOTH sides rather than on one: `outcomes_path`'s own
+        # name and parent are pinned absolutely where that store is tested, and this is the same
+        # pin for the summaries store. Without it a mutant that renamed the summaries file inside
+        # the right directory satisfied every assertion in this file.
+        self.assertEqual(os.path.basename(loop.run_summaries_path(s.arc)), 'run-summaries.jsonl')
+        self.assertEqual(os.path.dirname(loop.run_summaries_path(s.arc)), s.arc)
+        self.assertEqual(loop.outcomes_read(s.arc), [], 'and nothing landed in the other store')
+
+
+
+class TheArcKeyHasOneSpelling(unittest.TestCase):
+    """Three stores key rows on the arc path, and all three compared `abspath` to `abspath`.
+
+    `abspath` normalises a relative prefix and leaves a symlink standing, so a store written
+    through one spelling of an arc and read through another held rows nothing could see. For the
+    launch store that is a money gate: three spent slots read as zero and a fourth was reserved.
+    """
+
+    def test_a_symlinked_and_a_real_spelling_are_one_arc(self):
+        with tempfile.TemporaryDirectory() as root:
+            real = os.path.join(root, 'arc')
+            os.makedirs(real)
+            link = os.path.join(root, 'linked')
+            os.symlink(real, link)
+            # The control: the two spellings really do differ under the rule that was there.
+            self.assertNotEqual(os.path.abspath(link), os.path.abspath(real))
+            self.assertEqual(loop.canonical_arc(link), loop.canonical_arc(real))
+
+    def test_a_relative_spelling_is_the_same_arc(self):
+        with tempfile.TemporaryDirectory() as root:
+            real = os.path.realpath(os.path.join(root, 'arc'))
+            os.makedirs(real)
+            self.assertEqual(loop.canonical_arc(os.path.join(real, '.', '')),
+                             loop.canonical_arc(real))
+
+    def test_an_outcome_recorded_through_a_symlink_is_found_through_the_real_path(self):
+        with tempfile.TemporaryDirectory() as root:
+            real = os.path.join(root, 'arc')
+            os.makedirs(real)
+            link = os.path.join(root, 'linked')
+            os.symlink(real, link)
+            rec = {'arc': link, 'track': 'code', 'round': 1, 'findingId': 'lens#0',
+                   'severity': 'high', 'file': 'a.py', 'lineStart': 1, 'lineEnd': 2,
+                   'outcome': 'fixed', 'note': 'n'}
+            verdict, reason = loop.outcomes_record(link, rec)
+            self.assertEqual(verdict, 'append', reason)
+            rows = loop.outcomes_read(real)
+            self.assertEqual(len(rows), 1)
+            found = loop.outcomes_for_round(rows, real, 'code', 1)
+            self.assertEqual([r['findingId'] for r in found], ['lens#0'])
+
+
+class TheDecidedRowIsTheWrittenRow(unittest.TestCase):
+    """A store's uniqueness key must be checked against the row it stores.
+
+    The launch store computed `attempt` under the lock, checked the key against the row carrying
+    it, and then wrote the SEED row, whose `attempt` was the placeholder 0. The key enforced and
+    the key stored were two different values.
+    """
+
+    def test_a_decide_returning_a_row_writes_that_row(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, 'store.jsonl')
+            seed = {'k': 'a', 'n': 0}
+
+            def decide(records, row):
+                return 'append', '', dict(row, n=7)
+
+            verdict, _reason = loop.store_record(path, seed, decide, 'at', 'row')
+            self.assertEqual(verdict, 'append')
+            rows = loop._jsonl_read(path)
+            self.assertEqual([r['n'] for r in rows], [7])
+
+    def test_a_decide_returning_only_a_verdict_still_writes_the_row_it_was_given(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, 'store.jsonl')
+            verdict, _reason = loop.store_record(path, {'k': 'a', 'n': 0},
+                                                 lambda records, row: ('append', ''), 'at', 'row')
+            self.assertEqual(verdict, 'append')
+            self.assertEqual([r['n'] for r in loop._jsonl_read(path)], [0])
+
+
+class AFindingIdNamesOneFinding(unittest.TestCase):
+    """`<name>#<index>` is the id a human types, so the name must be unique within a round.
+
+    Two reviews of one round writing DIFFERENT verdict files under one name mint one id for two
+    different findings, and `outcome_coverage` then reads one outcome row as covering both. A
+    second review at the SAME path is the other half: it overwrites a verdict that may already be
+    dispositioned, and the round then reads only the file that survived.
+    """
+
+    @staticmethod
+    def _start(name, out, track='code', rnd=1, job=None):
+        return {'ev': 'start', 'kind': 'review', 'track': track, 'round': rnd,
+                'name': name, 'out': out, 'job': job or f'{track}.r{rnd}.{name}.{out}'}
+
+    @classmethod
+    def _ended(cls, name, out, rc, track='code', rnd=1):
+        start = cls._start(name, out, track=track, rnd=rnd)
+        return [start, {'ev': 'end', 'job': start['job'], 'rc': rc}]
+
+    def test_a_second_review_under_one_name_writing_elsewhere_is_a_collision(self):
+        events = [self._start('lens', '/a/one.verdict.json')]
+        self.assertEqual(
+            loop.review_name_collision(events, 'code', 1, 'lens', '/a/two.verdict.json'),
+            (loop.CLASH_ELSEWHERE, '/a/one.verdict.json'))
+
+    def test_the_same_path_after_a_SUCCESSFUL_review_is_refused_as_a_spent_name(self):
+        """The erasing rerun: the first verdict is overwritten and its findings are not re-read."""
+        events = self._ended('lens', '/a/one.verdict.json', 0)
+        self.assertEqual(
+            loop.review_name_collision(events, 'code', 1, 'lens', '/a/one.verdict.json'),
+            (loop.CLASH_AFTER_SUCCESS, '/a/one.verdict.json'))
+
+    def test_the_same_path_after_a_FAILED_review_is_the_re_run_the_exemption_is_for(self):
+        """A failed or quarantined run left no verdict this round can read, so the name is free."""
+        events = self._ended('lens', '/a/one.verdict.json', loop.RC_FAILCLOSED)
+        self.assertIsNone(
+            loop.review_name_collision(events, 'code', 1, 'lens', '/a/one.verdict.json'))
+
+    def test_the_same_path_while_the_first_review_is_still_open_is_left_to_close_round(self):
+        """No terminal event: the job is open, and `close-round` refuses over it already."""
+        events = [self._start('lens', '/a/one.verdict.json')]
+        self.assertIsNone(
+            loop.review_name_collision(events, 'code', 1, 'lens', '/a/one.verdict.json'))
+
+    def test_a_name_held_in_another_round_is_not_a_collision(self):
+        events = self._ended('lens', '/a/one.verdict.json', 0, rnd=2)
+        self.assertIsNone(
+            loop.review_name_collision(events, 'code', 1, 'lens', '/a/two.verdict.json'))
+        self.assertIsNone(
+            loop.review_name_collision(events, 'code', 1, 'lens', '/a/one.verdict.json'))
+
+    def test_a_name_held_in_another_track_is_not_a_collision(self):
+        events = self._ended('lens', '/a/one.verdict.json', 0, track='docs')
+        self.assertIsNone(
+            loop.review_name_collision(events, 'code', 1, 'lens', '/a/one.verdict.json'))
+
+    def test_the_reserved_one_off_track_is_exempt_in_BOTH_directions(self):
+        """ADJUDICATED 2026-10-26; the reasoning is in `review_name_collision`'s docstring.
+
+        Both refusals above are statements about what happens when the round CLOSES, and nothing
+        closes a round on the reserved track -- `cmd_close_round` now refuses to. MEASURED before
+        the exemption: the second one-off under a given verdict basename was refused
+        `RC_FAILCLOSED` for ever, per user and per name, because the one-off arc is shared and
+        round 1 of that track never closes. `codex-opinion`, whose every call is a one-off, would
+        have worked exactly once.
+        """
+        spent = self._ended('lens', '/a/one.verdict.json', 0, track=loop.ONE_OFF_TRACK)
+        self.assertIsNone(loop.review_name_collision(
+            spent, loop.ONE_OFF_TRACK, 1, 'lens', '/a/one.verdict.json'),
+            'a one-off must be re-runnable under the same name')
+        self.assertIsNone(loop.review_name_collision(
+            spent, loop.ONE_OFF_TRACK, 1, 'lens', '/a/two.verdict.json'),
+            'CLASH_ELSEWHERE is about a closing round too, so it is exempt as well')
+        # The other direction, in the same assertion: a real track is unchanged.
+        real = self._ended('lens', '/a/one.verdict.json', 0, track='code')
+        self.assertEqual(
+            loop.review_name_collision(real, 'code', 1, 'lens', '/a/one.verdict.json'),
+            (loop.CLASH_AFTER_SUCCESS, '/a/one.verdict.json'))
+        self.assertEqual(
+            loop.review_name_collision(real, 'code', 1, 'lens', '/a/two.verdict.json'),
+            (loop.CLASH_ELSEWHERE, '/a/one.verdict.json'))
+
+    def test_closing_a_round_on_the_reserved_track_is_refused(self):
+        """The exemption's premise, as a mechanism rather than as a comment.
+
+        The exemption is only safe while nothing closes a round on that track. Left as an
+        assumption, the day somebody does close one is the day a round seals having lost a
+        finding to a reused name.
+        """
+        s = sbx(self)
+        r = s.run('close-round', '--arc', s.arc, '--track', loop.ONE_OFF_TRACK, '--round', '1')
+        self.assertEqual(r.returncode, loop.RC_FAILCLOSED, r.stderr)
+        self.assertIn('reserved', r.stderr)
+        # satisfiable in the other direction: an ordinary track closes (empty, hence --empty-ok)
+        ok = s.run('close-round', '--arc', s.arc, '--track', 'A', '--round', '1', '--empty-ok')
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+
+    def test_the_reserved_name_is_printable_for_the_launcher_to_read(self):
+        """`run-codex.sh` asks for this value instead of carrying a second spelling of it.
+
+        Only the SUBCOMMAND is pinned here. The other half -- that the launcher really does ask,
+        and carries no literal `TRACK="..."` -- is pinned in `tests/codex-loop.test.sh`, which
+        runs in the real checkout. It cannot live here: a mutation copy dir holds only `--src`,
+        `--test` and the `--also-copy` modules, so `run-codex.sh` is absent beside this file by
+        construction, and reading for it reddened every mutation BASELINE instead.
+        """
+        printed = subprocess.run([PY, LOOP, 'one-off-track'], capture_output=True, text=True)
+        self.assertEqual(printed.returncode, 0, printed.stderr)
+        self.assertEqual(printed.stdout.strip(), loop.ONE_OFF_TRACK)
+
+    def test_a_different_name_is_not_a_collision(self):
+        events = self._ended('other', '/a/one.verdict.json', 0)
+        self.assertIsNone(
+            loop.review_name_collision(events, 'code', 1, 'lens', '/a/two.verdict.json'))
+        self.assertIsNone(
+            loop.review_name_collision(events, 'code', 1, 'lens', '/a/one.verdict.json'))
+
+    def test_a_failed_review_retried_under_one_name_yields_the_retry_s_findings_once(self):
+        """The shape the same-path exemption now covers, end to end through `round_findings`."""
+        with tempfile.TemporaryDirectory() as root:
+            out = os.path.join(root, 'v.json')
+            with open(out, 'w', encoding='utf-8') as fh:
+                json.dump({'findings': [{'severity': 'low'}, {'severity': 'low'}]}, fh)
+            events = [
+                {'ev': 'start', 'kind': 'review', 'track': 'code', 'round': 1, 'name': 'lens',
+                 'out': out, 'job': 'j1'},
+                {'ev': 'end', 'job': 'j1', 'rc': loop.RC_FAILCLOSED},
+                {'ev': 'start', 'kind': 'review', 'track': 'code', 'round': 1, 'name': 'lens',
+                 'out': out, 'job': 'j2'},
+                {'ev': 'end', 'job': 'j2', 'rc': 0},
+            ]
+            ids, unreadable = loop.round_findings(events, 'code', 1)
+            self.assertEqual(unreadable, [])
+            self.assertEqual(ids, ['lens#0', 'lens#1'])
+
+    def test_one_verdict_read_twice_in_a_pre_fix_ledger_still_yields_one_id(self):
+        """Two rc=0 events at one path is a shape the launch guard now refuses.
+
+        It survives only in a ledger written before that rule, where this deduplication is the
+        only thing between a replayed read and a doubled id. It is NOT what keeps the erasing
+        rerun from losing a finding: the lost finding is gone from the file, so it is not in the
+        list to deduplicate.
+        """
+        with tempfile.TemporaryDirectory() as root:
+            out = os.path.join(root, 'v.json')
+            with open(out, 'w', encoding='utf-8') as fh:
+                json.dump({'findings': [{'severity': 'low'}, {'severity': 'low'}]}, fh)
+            events = [
+                {'ev': 'start', 'kind': 'review', 'track': 'code', 'round': 1, 'name': 'lens',
+                 'out': out, 'job': 'j1'},
+                {'ev': 'end', 'job': 'j1', 'rc': 0},
+                {'ev': 'start', 'kind': 'review', 'track': 'code', 'round': 1, 'name': 'lens',
+                 'out': out, 'job': 'j2'},
+                {'ev': 'end', 'job': 'j2', 'rc': 0},
+            ]
+            ids, unreadable = loop.round_findings(events, 'code', 1)
+            self.assertEqual(unreadable, [])
+            self.assertEqual(ids, ['lens#0', 'lens#1'])
+
+    def test_a_successful_rerun_at_one_path_erases_what_the_guard_now_refuses(self):
+        """The defect this rule exists to stop, driven through the head functions.
+
+        With the launch guard removed, these are the events `cmd_run` would record, and the first
+        run's finding is then absent from the round with its outcome reported only as a stray.
+        """
+        with tempfile.TemporaryDirectory() as root:
+            out = os.path.join(root, 'v.json')
+            first = [
+                {'ev': 'start', 'kind': 'review', 'track': 'code', 'round': 1, 'name': 'lens',
+                 'out': out, 'job': 'j1'},
+                {'ev': 'end', 'job': 'j1', 'rc': 0},
+            ]
+            with open(out, 'w', encoding='utf-8') as fh:
+                json.dump({'findings': [{'severity': 'high', 'title': 'A'}]}, fh)
+            self.assertEqual(loop.round_findings(first, 'code', 1), (['lens#0'], []))
+            rerun = first + [
+                {'ev': 'start', 'kind': 'review', 'track': 'code', 'round': 1, 'name': 'lens',
+                 'out': out, 'job': 'j2'},
+                {'ev': 'end', 'job': 'j2', 'rc': 0},
+            ]
+            with open(out, 'w', encoding='utf-8') as fh:
+                json.dump({'findings': []}, fh)
+            self.assertEqual(loop.round_findings(rerun, 'code', 1), ([], []))
+            self.assertEqual(loop.outcome_coverage([], [{'findingId': 'lens#0'}]),
+                             ([], ['lens#0']))
+
+
+# ------------------------------------------------------- convergence enforcement (requirements 1-5)
+# The approved plan of 2026-10-28 in five properties: round N+1 cannot launch while round N is open
+# (1), a review by the party that launches no child is an ARTIFACT (2), every commit range is
+# approved by a non-author (3), a round cannot close over an undispositioned finding (4, which
+# `TestCloseRoundRequiresAnOutcomePerFinding` already pins), and every review launch goes through
+# this scheduler (5). Every gate below is proved in BOTH directions, because a guard asserted only
+# where it fails is a guard nobody has seen pass.
+REPLAY = os.path.join(HERE, 'replay-66648556')
+REAL_REPLAY_ARC = '$HOME/.claude/jobs/66648556/tmp'
+
+
+def need_fixture(test, path, what):
+    """Skip LOUDLY when `path` is not beside this test file.
+
+    A mutation COPY holds only what `mutate.py` copied, so a test whose subject is a sibling
+    artifact — the vendored replay arc, the launcher script — has nothing to read there and ERRORS,
+    which reads to the harness as a RED BASELINE and would make every mutant report itself killed.
+    MEASURED 2026-10-28: 7 of the new tests errored in the copy on their first battery run, and the
+    harness refused the whole battery rather than reporting a green. The precedent for the remedy
+    is `TestEveryMutantIsStillArmable.test_the_real_batteries_all_still_arm` in this same file:
+    skip, which is visible in the runner's output, never pass, which is not.
+    """
+    if not os.path.exists(path):
+        test.skipTest(f'no {what} beside this test file -- not a checkout (mutation copy?)')
+
+
+def verdict_doc(name, n, severity='high'):
+    """A verdict that satisfies `review-output.schema.json`, with `n` findings.
+
+    Built from the schema's own required lists rather than from a literal, so a schema change
+    reddens here instead of silently making every fixture below invalid.
+    """
+    contract = loop.review_schema_contract()
+    filler = {'severity': severity, 'title': 't', 'body': 'b', 'file': 'a.ts', 'line_start': 1,
+              'line_end': 2, 'confidence': 0.9, 'recommendation': 'r'}
+    return {'reviewed': {'base': None, 'head': None, 'files': ['a.ts']},
+            'verdict': 'needs-attention' if n else 'approve',
+            'summary': f'{name}: {n} finding(s)',
+            'next_steps': ['none'],
+            'findings': [{k: filler[k] for k in contract['finding']} for _ in range(n)]}
+
+
+def write_verdict(path, name, n, severity='high'):
+    with io.open(path, 'w', encoding='utf-8') as fh:
+        json.dump(verdict_doc(name, n, severity), fh)
+    return path
+
+
+def commits_of(g, rng):
+    return [c for c in subprocess.run(g + ['rev-list', '--reverse', rng], capture_output=True,
+                                      text=True, check=True).stdout.split() if c]
+
+
+def extra_commit(g, repo, text):
+    with io.open(os.path.join(repo, 'a.ts'), 'a', encoding='utf-8') as fh:
+        fh.write(text + '\n')
+    subprocess.run(g + ['commit', '-aqm', text], check=True)
+    return subprocess.run(g + ['rev-parse', 'HEAD'], capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+class TestLaunchGateHoldsTheNextRound(unittest.TestCase):
+    """Requirement 1: round N+1 cannot launch while round N is open.
+
+    MEASURED 2026-10-28 before writing a line: this gate was ALREADY on the launch path and had
+    been since `6dbb6dd` (2026-09-02) — `cmd_run` calls `gate()` under the round lock for every
+    `GATED_KINDS` job. The brief for this work said it was reachable only by typing `loop.py gate`;
+    that was wrong about the tree, and the probe that settled it is this test. What the change
+    actually owed was the one-off carve-out below, and what this class owes is the direction nobody
+    had seen: the gate PASSING once the round is closed.
+    """
+
+    def test_round_two_refuses_while_round_one_is_open_then_passes_once_it_closes(self):
+        s = sbx(self)
+        first = s.run('run', '--arc', s.arc, '--track', 'probe', '--round', '1', '--kind', 'write',
+                      '--name', 'w1', '--', '/bin/echo', 'hi')
+        self.assertEqual(first.returncode, 0, first.stderr)
+        blocked = s.run('run', '--arc', s.arc, '--track', 'probe', '--round', '2', '--kind',
+                        'write', '--name', 'w2', '--', '/bin/echo', 'hi')
+        self.assertEqual(blocked.returncode, loop.RC_GATE, blocked.stderr)
+        self.assertIn('round 1 of track probe is not closed', blocked.stderr)
+        self.assertIn('close-round --arc', blocked.stderr,
+                      'the refusal must print the exact command, because this gate will surprise '
+                      'a live session mid-arc and there is deliberately no escape hatch')
+        closed = s.run('close-round', '--arc', s.arc, '--track', 'probe', '--round', '1')
+        self.assertEqual(closed.returncode, 0, closed.stderr)
+        passes = s.run('run', '--arc', s.arc, '--track', 'probe', '--round', '2', '--kind', 'write',
+                       '--name', 'w2', '--', '/bin/echo', 'hi')
+        self.assertEqual(passes.returncode, 0, passes.stderr)
+        self.assertIn('w2', s.jobs(), 'the identical launch must now be ledgered')
+
+
+class TestLaunchGateCarvesOutTheOneOffTrack(unittest.TestCase):
+    """The regression this change most plausibly causes, pinned in both directions.
+
+    `cmd_close_round` REFUSES on the reserved one-off track by design, so a one-off held to the
+    launch gate could never be unblocked by any command this tool offers: the gate would demand a
+    close that the closer refuses. The arc is shared per user, so the first session to leave a
+    round open there would wedge every later `codex-opinion` call on the machine.
+    """
+
+    def test_the_reserved_one_off_track_launches_round_two_with_round_one_open(self):
+        s = sbx(self)
+        track = loop.ONE_OFF_TRACK
+        first = s.run('run', '--arc', s.arc, '--track', track, '--round', '1', '--kind', 'review',
+                      '--name', 'o1', '--', '/bin/echo', 'hi')
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = s.run('run', '--arc', s.arc, '--track', track, '--round', '2', '--kind', 'review',
+                       '--name', 'o2', '--', '/bin/echo', 'hi')
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertNotIn('GATE REFUSED', second.stderr)
+
+    def test_the_identical_launch_on_a_real_track_is_refused(self):
+        # The complement of the carve-out. Without it this assertion and the one above would both
+        # pass with the gate deleted, which is the shape of a carve-out nobody has measured.
+        s = sbx(self)
+        self.assertEqual(s.run('run', '--arc', s.arc, '--track', 'real', '--round', '1', '--kind',
+                               'review', '--name', 'o1', '--', '/bin/echo', 'hi').returncode, 0)
+        refused = s.run('run', '--arc', s.arc, '--track', 'real', '--round', '2', '--kind',
+                        'review', '--name', 'o2', '--', '/bin/echo', 'hi')
+        self.assertEqual(refused.returncode, loop.RC_GATE, refused.stderr)
+
+
+class TestARecordedClaudeReviewInheritsTheFindingGate(unittest.TestCase):
+    """Requirement 2: a Claude review becomes an artifact, and no second gate is written for it.
+
+    The point of the design is that `review record` writes the SAME ledger events a launched review
+    writes, so `round_findings` counts its findings and §5.5 — already built, already tested —
+    refuses the close while any of them lacks an outcome. This class proves the inheritance rather
+    than re-testing §5.5: if the events were shaped differently the close would pass and this would
+    fail, which is the only way to tell "covered by the old gate" from "needs a new one".
+    """
+
+    def record_review(self, s, n, name='claude-correctness', party='claude', track='code', rnd='1'):
+        path = write_verdict(os.path.join(s.dir, f'{name}.json'), name, n)
+        return s.run('review', 'record', '--arc', s.arc, '--track', track, '--round', rnd,
+                     '--party', party, '--name', name, '--verdict', path)
+
+    def test_a_claude_party_finding_blocks_the_close_until_it_has_an_outcome(self):
+        s = sbx(self)
+        rec = self.record_review(s, 1)
+        self.assertEqual(rec.returncode, 0, rec.stderr)
+        self.assertIn('claude-correctness#0', rec.stdout,
+                      'the command must name the outcome each finding now owes')
+        blocked = s.run('close-round', '--arc', s.arc, '--track', 'code', '--round', '1')
+        self.assertEqual(blocked.returncode, loop.RC_FAILCLOSED, blocked.stderr)
+        self.assertIn('claude-correctness#0', blocked.stderr)
+        out = s.run('finding', 'record', '--arc', s.arc, '--track', 'code', '--round', '1',
+                    '--id', 'claude-correctness#0', '--severity', 'high', '--file', 'a.ts',
+                    '--line-start', '1', '--line-end', '2', '--outcome', 'fixed',
+                    '--note', 'fixed in the same commit')
+        self.assertEqual(out.returncode, 0, out.stderr)
+        closed = s.run('close-round', '--arc', s.arc, '--track', 'code', '--round', '1')
+        self.assertEqual(closed.returncode, 0, closed.stderr)
+
+    def test_the_party_is_recorded_so_the_independence_check_reads_a_field(self):
+        s = sbx(self)
+        self.assertEqual(self.record_review(s, 0).returncode, 0)
+        self.assertEqual(loop.review_artifact_parties(loop.ledger_read(s.arc)), {'claude'})
+
+    def test_a_review_cannot_be_recorded_into_a_closed_round(self):
+        s = sbx(self)
+        self.assertEqual(s.run('close-round', '--arc', s.arc, '--track', 'code', '--round', '1',
+                               '--empty-ok').returncode, 0)
+        late = self.record_review(s, 1)
+        self.assertEqual(late.returncode, loop.RC_GATE, late.stderr)
+        self.assertIn('already CLOSED', late.stderr,
+                      'a review filed after the close adds findings the close accounted as absent')
+
+    def test_a_verdict_failing_the_schema_contract_is_refused_with_every_reason(self):
+        s = sbx(self)
+        bad = os.path.join(s.dir, 'bad.json')
+        with io.open(bad, 'w', encoding='utf-8') as fh:
+            json.dump({'findings': [{'severity': 'catastrophic'}]}, fh)
+        out = s.run('review', 'record', '--arc', s.arc, '--track', 'code', '--round', '1',
+                    '--party', 'claude', '--name', 'lens', '--verdict', bad)
+        self.assertEqual(out.returncode, loop.RC_FAILCLOSED, out.stderr)
+        self.assertIn('missing required top-level field', out.stderr)
+        self.assertIn('catastrophic', out.stderr)
+        self.assertIn('line_start', out.stderr,
+                      'every reason at once: the party fixing it has already finished reviewing')
+
+    def test_two_reviews_of_one_round_cannot_share_a_name(self):
+        # The id of a finding is <name>#<index>, so a shared name mints one id for two findings.
+        # The predicate is `review_name_collision`, IMPORTED rather than re-implemented here.
+        s = sbx(self)
+        self.assertEqual(self.record_review(s, 1, name='lens').returncode, 0)
+        again = self.record_review(s, 1, name='lens')
+        self.assertEqual(again.returncode, loop.RC_FAILCLOSED, again.stderr)
+
+
+class RangeFixture:
+    """An arc with a git repo, a base commit, and helpers to claim ranges and file reviews."""
+
+    def __init__(self, test):
+        self.s = sbx(test)
+        self.repo, self.g = self.s.git_repo()
+        self.base = subprocess.run(self.g + ['rev-parse', 'HEAD'], capture_output=True, text=True,
+                                   check=True).stdout.strip()
+
+    def commit(self, text):
+        return extra_commit(self.g, self.repo, text)
+
+    def claim(self, task, start, end, party='codex', track='code'):
+        return self.s.run('range', 'record', '--arc', self.s.arc, '--track', track, '--task', task,
+                          '--party', party, '--start-sha', start, '--end-sha', end)
+
+    def review(self, party, name, n=0, track='code', rnd='1'):
+        path = write_verdict(os.path.join(self.s.dir, f'{name}.json'), name, n)
+        return self.s.run('review', 'record', '--arc', self.s.arc, '--track', track, '--round', rnd,
+                          '--party', party, '--name', name, '--verdict', path)
+
+    def close(self, *extra, track='code', rnd='1'):
+        return self.s.run('close-round', '--arc', self.s.arc, '--track', track, '--round', rnd,
+                          '--repo', self.repo, *extra)
+
+    def rng(self):
+        return f'{self.base}..HEAD'
+
+
+class TestARangeNeedsANonAuthorReview(unittest.TestCase):
+    """Requirement 3: a verdict over the range its own author wrote is not a verdict.
+
+    MEASURED 2026-10-28 on arc `jobs/66648556/tmp`: 9 Codex-authored ranges, 0 Claude review
+    artifacts, and no store from which either fact could be established — the property `SKILL.md`
+    calls the only thing the loop buys was prose, and this is the first test that can fail over it.
+    """
+
+    def test_a_codex_range_with_only_codex_reviews_refuses_and_names_the_range(self):
+        f = RangeFixture(self)
+        head = f.commit('codex work')
+        self.assertEqual(f.claim('P1', f.base, head).returncode, 0)
+        self.assertEqual(f.review('codex', 'diff-correctness').returncode, 0)
+        out = f.close('--range', f.rng())
+        self.assertEqual(out.returncode, loop.RC_FAILCLOSED, out.stderr)
+        self.assertIn('range P1', out.stderr, 'the refusal must NAME the range, since the remedy '
+                                              'is a review of that range and not of the arc')
+        self.assertIn('party=claude', out.stderr)
+
+    def test_adding_a_claude_artifact_lets_the_same_round_close(self):
+        f = RangeFixture(self)
+        head = f.commit('codex work')
+        f.claim('P1', f.base, head)
+        f.review('codex', 'diff-correctness')
+        self.assertEqual(f.close('--range', f.rng()).returncode, loop.RC_FAILCLOSED)
+        self.assertEqual(f.review('claude', 'claude-correctness').returncode, 0)
+        out = f.close('--range', f.rng())
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_an_arc_with_no_range_rows_closes_with_no_range_flag(self):
+        # ADDITIVE, exactly as the outcome store was: every in-flight arc on this machine has no
+        # range rows, and the one-time migration must not reach them.
+        f = RangeFixture(self)
+        f.commit('some work')
+        f.review('codex', 'diff-correctness')
+        self.assertEqual(f.close().returncode, 0)
+
+    def test_range_rows_present_with_no_range_flag_fails_closed(self):
+        f = RangeFixture(self)
+        head = f.commit('codex work')
+        f.claim('P1', f.base, head)
+        out = f.close()
+        self.assertEqual(out.returncode, loop.RC_FAILCLOSED, out.stderr)
+        self.assertIn('--range BASE..HEAD', out.stderr)
+        self.assertIn('1 authored range', out.stderr,
+                      'the party who would not pass --range is the party with something to hide, '
+                      'so the absent flag must refuse rather than close vacuously')
+
+    def test_a_one_off_review_cannot_discharge_another_arcs_independence(self):
+        # The one-off arc is shared per user, so counting a `codex-opinion` call would let any
+        # session's unrelated call satisfy this gate. Pure, because the rule is.
+        events = [{'ev': 'start', 'kind': 'review', 'track': loop.ONE_OFF_TRACK, 'round': 1,
+                   'name': 'o', 'party': 'claude', 'job': 'j'},
+                  {'ev': 'end', 'job': 'j', 'rc': 0}]
+        self.assertEqual(loop.review_artifact_parties(events), set())
+
+
+class TestEveryCommitOfARangeIsClaimedExactlyOnce(unittest.TestCase):
+    """The completeness half of requirement 3, and the adjudication the plan needed.
+
+    Plan test 4 asks that a commit claimed by ZERO ranges refuse; addendum gap 2 says such a commit
+    "lands in the complement" and is Claude-authored. Both were approved, so both hold: a commit
+    claimed by no row IS the complement and demands a `party=codex` review, which in an arc without
+    one is a refusal — test 4's assertion and test 8's shape at once. A commit claimed TWICE is a
+    different thing entirely and refuses outright, because two rows disagree about who wrote it.
+    """
+
+    def test_a_commit_claimed_by_two_rows_is_ambiguous_and_refuses(self):
+        f = RangeFixture(self)
+        one = f.commit('first')
+        two = f.commit('second')
+        f.claim('P1', f.base, two)
+        f.claim('P2', one, two, party='claude')
+        f.review('codex', 'diff-correctness')
+        f.review('claude', 'claude-correctness')
+        out = f.close('--range', f.rng())
+        self.assertEqual(out.returncode, loop.RC_FAILCLOSED, out.stderr)
+        self.assertIn(two[:12], out.stderr, 'the ambiguous COMMIT must be named')
+        self.assertIn('P1', out.stderr)
+        self.assertIn('P2', out.stderr)
+
+    def test_the_same_ranges_without_the_overlap_close(self):
+        f = RangeFixture(self)
+        one = f.commit('first')
+        two = f.commit('second')
+        f.claim('P1', f.base, one)
+        f.claim('P2', one, two, party='claude')
+        f.review('codex', 'diff-correctness')
+        f.review('claude', 'claude-correctness')
+        self.assertEqual(f.close('--range', f.rng()).returncode, 0)
+
+    def test_a_commit_claimed_by_no_row_is_the_complement_and_claude_authored(self):
+        v = loop.range_verdict(['a', 'b'], [{'task': 'P1', 'party': 'codex', 'commits': ['a']}],
+                               ['claude'])
+        self.assertEqual(v['complement'], ['b'])
+        table = {e['task']: e for e in v['table']}
+        self.assertEqual(table[loop.COMPLEMENT_TASK]['authorParty'], 'claude')
+        self.assertEqual(table[loop.COMPLEMENT_TASK]['reviewParty'], 'codex')
+        self.assertFalse(v['ok'], 'the complement has no codex review here, so this must refuse')
+
+    def test_a_row_claiming_only_commits_outside_the_range_contributes_nothing(self):
+        # The rows of one arc legitimately span branches that already merged. A table including
+        # them could never equal the pull request's own commit list, which is the one thing CI
+        # recomputes.
+        v = loop.range_verdict(['a'], [{'task': 'OLD', 'party': 'codex', 'commits': ['z']}],
+                               ['codex'])
+        self.assertEqual(v['outside'], ['OLD'])
+        self.assertEqual([e['task'] for e in v['table']], [loop.COMPLEMENT_TASK])
+
+    def test_an_unlabelled_row_reads_as_codex_which_is_the_fail_closed_direction(self):
+        v = loop.range_verdict(['a'], [{'task': 'P1', 'commits': ['a']}], ['codex'])
+        self.assertFalse(v['ok'], 'a row with no party must demand a CLAUDE review, not pass')
+        self.assertEqual(v['table'][0]['reviewParty'], 'claude')
+
+    def test_a_range_row_may_not_claim_the_complement_by_naming_it(self):
+        f = RangeFixture(self)
+        head = f.commit('work')
+        out = f.claim(loop.COMPLEMENT_TASK, f.base, head, party='claude')
+        self.assertEqual(out.returncode, loop.RC_FAILCLOSED, out.stderr)
+        self.assertIn('reserved', out.stderr)
+
+
+class TestTheComplementDemandsACodexReview(unittest.TestCase):
+    """Test 8's first half: tracking only Codex ranges does not let Claude's work through.
+
+    Authorship here is binary, so Claude's set is never recorded — it is what is left. The gap
+    The user named is closed by that subtraction rather than by a second store: a Claude commit
+    claimed by no row does not slip through, it lands in the complement and demands a Codex review.
+    """
+
+    def test_two_claude_commits_beside_one_codex_range_refuse_until_codex_reviews_the_complement(self):
+        f = RangeFixture(self)
+        codex_head = f.commit('codex work')
+        f.claim('P1', f.base, codex_head)
+        f.commit('claude work one')
+        f.commit('claude work two')
+        f.review('claude', 'claude-correctness')
+        blocked = f.close('--range', f.rng())
+        self.assertEqual(blocked.returncode, loop.RC_FAILCLOSED, blocked.stderr)
+        self.assertIn('claimed by no range row', blocked.stderr)
+        self.assertIn('party=codex review artifact', blocked.stderr)
+        self.assertEqual(f.review('codex', 'diff-correctness').returncode, 0)
+        self.assertEqual(f.close('--range', f.rng()).returncode, 0)
+
+
+class TestTheLauncherRecordsItsAuthoredRange(unittest.TestCase):
+    """Test 8's second half: a missing range row is a FAILED write run, never a silent gap.
+
+    The subject is `run-codex.sh`'s write-mode block, and this EXTRACTS AND EXECUTES the exact
+    lines between its `range-record-block` sentinels rather than reading them for a mention —
+    memory a-mention-is-not-a-property. A mutant that deletes the `range record` call changes
+    those bytes, so the row stops appearing and this test fails; a test that merely grepped the
+    script for the word would pass on the half-done fix it exists to catch.
+
+    The ordering claim is checked separately and structurally, by line number: the block must sit
+    INSIDE the write-mode branch and AFTER the uncommitted-tree `exit 4`, which is what "the same
+    block that already fails the run" means — memory
+    couple-an-effect-to-its-write-at-the-chokepoint.
+    """
+
+    LAUNCHER = os.path.join(HERE, 'run-codex.sh')
+
+    def setUp(self):
+        need_fixture(self, self.LAUNCHER, 'run-codex.sh')
+
+    def block(self):
+        with io.open(self.LAUNCHER, encoding='utf-8') as fh:
+            lines = fh.read().split('\n')
+        start = [i for i, l in enumerate(lines) if '>>> range-record-block' in l]
+        end = [i for i, l in enumerate(lines) if '<<< range-record-block' in l]
+        self.assertEqual((len(start), len(end)), (1, 1),
+                         'exactly one sentinel pair, or this test executes the wrong bytes')
+        return lines, start[0], end[0]
+
+    def run_block(self, env, workdir):
+        lines, start, end = self.block()
+        script = os.path.join(workdir, 'fragment.sh')
+        with io.open(script, 'w', encoding='utf-8') as fh:
+            fh.write('set -u\n' + '\n'.join(lines[start + 1:end]) + '\n')
+        e = dict(os.environ, **env)
+        return subprocess.run(['bash', script], env=e, capture_output=True, text=True)
+
+    def test_a_successful_write_run_records_the_range_it_authored(self):
+        s = sbx(self)
+        repo, g = s.git_repo()
+        start_sha = subprocess.run(g + ['rev-parse', 'HEAD'], capture_output=True, text=True,
+                                   check=True).stdout.strip()
+        end_sha = extra_commit(g, repo, 'codex work')
+        out = self.run_block(dict(WORKDIR=repo, START_SHA=start_sha, HERE=HERE,
+                                  CC_LOOP_ARC=s.arc, CC_LOOP_TRACK='code', CC_LOOP_NAME='P1'),
+                             s.dir)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        rows = loop.ranges_for_arc(loop.ranges_read(s.arc), s.arc)
+        self.assertEqual(len(rows), 1, f'the launcher must file exactly one row: {rows}')
+        self.assertEqual((rows[0]['task'], rows[0]['party'], rows[0]['startSha'],
+                          rows[0]['endSha']), ('P1', 'codex', start_sha, end_sha))
+
+    def test_a_write_run_that_cannot_record_its_range_fails_the_run(self):
+        s = sbx(self)
+        repo, g = s.git_repo()
+        start_sha = subprocess.run(g + ['rev-parse', 'HEAD'], capture_output=True, text=True,
+                                   check=True).stdout.strip()
+        extra_commit(g, repo, 'codex work')
+        # An arc path that is a FILE: `range record` cannot create the store there, so the row
+        # cannot be written. The run must go red rather than return 0 with no row.
+        blocked = os.path.join(s.dir, 'not-a-dir')
+        with io.open(blocked, 'w', encoding='utf-8') as fh:
+            fh.write('x')
+        out = self.run_block(dict(WORKDIR=repo, START_SHA=start_sha, HERE=HERE,
+                                  CC_LOOP_ARC=blocked, CC_LOOP_TRACK='code', CC_LOOP_NAME='P1'),
+                             s.dir)
+        self.assertEqual(out.returncode, 4, out.stdout + out.stderr)
+        self.assertIn('COULD NOT RECORD ITS AUTHORED RANGE', out.stderr)
+
+    def test_a_write_run_with_no_handshake_identity_fails_rather_than_filing_anonymously(self):
+        s = sbx(self)
+        repo, g = s.git_repo()
+        start_sha = subprocess.run(g + ['rev-parse', 'HEAD'], capture_output=True, text=True,
+                                   check=True).stdout.strip()
+        out = self.run_block(dict(WORKDIR=repo, START_SHA=start_sha, HERE=HERE,
+                                  CC_LOOP_ARC=s.arc, CC_LOOP_TRACK='', CC_LOOP_NAME='P1'), s.dir)
+        self.assertEqual(out.returncode, 4, out.stdout + out.stderr)
+        self.assertIn('CANNOT RECORD ITS AUTHORED RANGE', out.stderr)
+
+    def test_the_range_block_sits_inside_write_mode_after_the_uncommitted_tree_refusal(self):
+        lines, start, end = self.block()
+        dirty = [i for i, l in enumerate(lines) if 'WRITE RUN LEFT AN UNCOMMITTED TREE' in l]
+        write_mode = [i for i, l in enumerate(lines) if 'if [ "$WRITE_MODE" -eq 1 ]; then' in l]
+        self.assertEqual(len(dirty), 1)
+        self.assertTrue(any(w < dirty[0] for w in write_mode),
+                        'the uncommitted-tree refusal must be inside a write-mode branch')
+        self.assertLess(dirty[0], start,
+                        'the range row is written in the same block, AFTER the dirty-tree exit: '
+                        'before it, the row would claim a tree the run then failed over')
+        self.assertLess(start, end)
+
+
+class TestConvergeCannotBeDeclaredWithAnOpenRound(unittest.TestCase):
+    """Gap 1: gating the next launch cannot gate the LAST round, which is the one that matters.
+
+    The final round has no successor launch by definition, so it is the one round the launch gate
+    can never reach — and convergence is declared on it. The answer is not another gate on the
+    round; it is to make the artifact a merge already requires be unobtainable while anything is
+    open. `converge` therefore re-runs the close checks across EVERY track and writes
+    `convergence.json` only when all of them pass.
+    """
+
+    def arc_with_one_open_round(self, test_self):
+        f = RangeFixture(test_self)
+        head = f.commit('codex work')
+        f.claim('P1', f.base, head)
+        f.review('codex', 'diff-correctness')
+        f.review('claude', 'claude-correctness')
+        return f
+
+    def test_an_open_last_round_refuses_and_closing_it_lets_the_identical_call_succeed(self):
+        f = self.arc_with_one_open_round(self)
+        out = os.path.join(f.s.dir, 'convergence.json')
+        blocked = f.s.run('converge', '--arc', f.s.arc, '--range', f.rng(), '--repo', f.repo,
+                          '--out', out)
+        self.assertEqual(blocked.returncode, loop.RC_GATE, blocked.stderr)
+        self.assertIn('round 1 of track code is not closed', blocked.stderr)
+        self.assertIn('close-round --arc', blocked.stderr)
+        self.assertFalse(os.path.exists(out), 'a refused converge must write NO artifact')
+        self.assertEqual(f.close('--range', f.rng()).returncode, 0)
+        passes = f.s.run('converge', '--arc', f.s.arc, '--range', f.rng(), '--repo', f.repo,
+                         '--out', out)
+        self.assertEqual(passes.returncode, 0, passes.stderr)
+        self.assertTrue(os.path.exists(out))
+
+    def test_the_written_artifact_claims_every_commit_of_the_range_exactly_once(self):
+        f = self.arc_with_one_open_round(self)
+        f.commit('claude work')
+        f.review('codex', 'diff-lifecycle')
+        f.close('--range', f.rng())
+        out = os.path.join(f.s.dir, 'convergence.json')
+        self.assertEqual(f.s.run('converge', '--arc', f.s.arc, '--range', f.rng(), '--repo',
+                                 f.repo, '--out', out).returncode, 0)
+        with io.open(out, encoding='utf-8') as fh:
+            doc = json.load(fh)
+        claimed = [c for entry in doc['rangeTable'] for c in entry['commits']]
+        self.assertEqual(sorted(claimed), sorted(commits_of(f.g, f.rng())),
+                         'the table is what CI recomputes from git, so it must equal the range')
+        self.assertEqual(len(claimed), len(set(claimed)), 'each commit exactly once')
+        self.assertEqual(doc['base'], f.base)
+        self.assertEqual({e['task'] for e in doc['rangeTable']}, {'P1', loop.COMPLEMENT_TASK})
+
+    def test_converge_refuses_an_undispositioned_finding_in_a_closed_round(self):
+        # The round can CLOSE and still fail here when it was closed before §5.5 shipped, which is
+        # precisely the history the replay below replays.
+        f = RangeFixture(self)
+        f.review('codex', 'diff-correctness', n=2)
+        loop.ledger_append(f.s.arc, dict(ev='round-close', track='code', round=1, triggered=[],
+                                         empty=False))
+        out = f.s.run('converge', '--arc', f.s.arc, '--range', f.rng(), '--repo', f.repo,
+                      '--out', os.path.join(f.s.dir, 'c.json'))
+        self.assertEqual(out.returncode, loop.RC_GATE, out.stderr)
+        self.assertIn('carry no outcome', out.stderr)
+        self.assertIn('diff-correctness#0', out.stderr)
+
+    def test_an_arc_that_ran_nothing_has_not_converged(self):
+        f = RangeFixture(self)
+        f.commit('work')
+        out = f.s.run('converge', '--arc', f.s.arc, '--range', f.rng(), '--repo', f.repo,
+                      '--out', os.path.join(f.s.dir, 'c.json'))
+        self.assertEqual(out.returncode, loop.RC_FAILCLOSED, out.stderr)
+        self.assertIn('has not started', out.stderr)
+
+
+class TestTheMotivatingArcIsRefusedByTheNewGates(unittest.TestCase):
+    """Test 6, mandatory and free: replay the history that motivated this change.
+
+    A fix that passes its own motivating case is not a fix. Arc `jobs/66648556/tmp` declared
+    convergence, merged and deployed while 60 of the 80 findings its ledger recorded carried no
+    outcome, so `converge` must refuse it.
+
+    The fixture under `replay-66648556/` is DERIVED from that arc and vendored so this test cannot
+    silently stop running when a job directory is reaped: the ledger, the round closes, the review
+    job names, the per-verdict finding COUNTS and the outcome keys are the real ones, while every
+    prose field (a finding's body, a commit message, a command line, a note) is elided — this
+    module publishes to a public mirror, and none of those fields is read by any gate under test.
+    `test_the_vendored_fixture_still_matches_the_real_arc` is the control for that claim.
+
+    MEASURED while building it, and worth recording because the brief's number differs: the arc
+    holds 86 findings across 25 verdict FILES, but only 80 in the 15 reviews its LEDGER recorded.
+    The missing 6 are `process-critique.verdict.json`, a verdict that exists on disk and was never
+    launched through `loop.py run` — so no gate here or before could see it. That is a real hole
+    and `review record` is now its remedy: a verdict obtained outside the loop has somewhere to go.
+    """
+
+    FINDINGS_IN_LEDGERED_REVIEWS = 80
+    OUTCOME_ROWS = 20
+    UNDISPOSITIONED = 60
+
+    def setUp(self):
+        need_fixture(self, REPLAY, os.path.basename(REPLAY) + '/')
+
+    def load(self, test_self, src=REPLAY):
+        """Copy the replay arc into a sandbox, repointing what is path-shaped at the copy."""
+        f = RangeFixture(test_self)
+        with io.open(os.path.join(src, 'jobs.jsonl'), encoding='utf-8') as fh:
+            rows = [json.loads(l) for l in fh if l.strip()]
+        for r in rows:
+            out = r.get('out')
+            if r.get('ev') == 'start' and r.get('kind') == 'review' and out:
+                r['out'] = os.path.join(src, out) if not os.path.isabs(out) else out
+            loop.ledger_append(f.s.arc, r)
+        with io.open(os.path.join(src, 'outcomes.jsonl'), encoding='utf-8') as fh:
+            for line in fh:
+                if line.strip():
+                    row = json.loads(line)
+                    # The outcome store KEYS on the arc, so a row read through another spelling
+                    # counts as nobody's -- `canonical_arc` exists for exactly this.
+                    row['arc'] = loop.canonical_arc(f.s.arc)
+                    loop.outcomes_record(f.s.arc, row)
+        return f
+
+    def test_replaying_the_arc_refuses_with_its_undispositioned_findings_named(self):
+        f = self.load(self)
+        events = loop.ledger_read(f.s.arc)
+        reported = covered = 0
+        for track, rnds in loop.arc_rounds(events).items():
+            for rnd in rnds:
+                found, unreadable = loop.round_findings(events, track, rnd)
+                self.assertEqual(unreadable, [], 'the fixture must be readable, or the refusal '
+                                                 'below would be about the fixture')
+                missing, _ = loop.outcome_coverage(
+                    found, loop.outcomes_for_round(loop.outcomes_read(f.s.arc), f.s.arc, track, rnd))
+                reported += len(found)
+                covered += len(found) - len(missing)
+        self.assertEqual(reported, self.FINDINGS_IN_LEDGERED_REVIEWS)
+        self.assertEqual(covered, self.OUTCOME_ROWS)
+        self.assertEqual(reported - covered, self.UNDISPOSITIONED)
+        out = f.s.run('converge', '--arc', f.s.arc, '--range', f.rng(), '--repo', f.repo,
+                      '--out', os.path.join(f.s.dir, 'c.json'))
+        self.assertEqual(out.returncode, loop.RC_GATE, out.stderr[:4000])
+        self.assertIn('carry no outcome', out.stderr)
+        self.assertIn('spec-correctness-r1#0', out.stderr,
+                      'the refusal must name findings, so the remedy is a command and not a hunt')
+        self.assertFalse(os.path.exists(os.path.join(f.s.dir, 'c.json')))
+
+    def test_the_arcs_nine_codex_ranges_are_refused_for_want_of_a_claude_review(self):
+        """The second half of the same history: 9 Codex-authored ranges, 0 Claude artifacts.
+
+        The arc recorded no ranges because the store did not exist, so the rows are synthesised
+        here from its own 9 `write` jobs — which is exactly the row `run-codex.sh` now writes for
+        each of them. Nothing else about the arc is changed.
+        """
+        f = self.load(self)
+        events = loop.ledger_read(f.s.arc)
+        tasks = sorted({str(ev['name']) for ev in events
+                        if ev.get('ev') == 'start' and ev.get('kind') == 'write'})
+        self.assertEqual(len(tasks), 9, f'the arc had 9 write tasks: {tasks}')
+        head = f.base
+        for task in tasks:
+            start, head = head, f.commit(f'{task} work')
+            self.assertEqual(f.claim(task, start, head, track='P').returncode, 0)
+        self.assertEqual(loop.review_artifact_parties(events), {'codex'},
+                         'every review this arc recorded was Codex\'s')
+        verdict, errs = loop.check_ranges(f.s.arc, f.repo, f.rng(), events,
+                                          loop.ranges_read(f.s.arc))
+        self.assertEqual(errs, [])
+        self.assertFalse(verdict['ok'])
+        self.assertEqual(sorted(e['task'] for e in verdict['missing']), tasks,
+                         'all nine ranges must be refused, each by name')
+        text = loop.render_range_refusal(verdict)
+        self.assertIn('party=claude', text)
+
+    @unittest.skipUnless(os.path.isdir(REAL_REPLAY_ARC), 'the original job directory is gone')
+    def test_the_vendored_fixture_still_matches_the_real_arc(self):
+        """The control for the elision: the fixture's STRUCTURE is the real arc's, field by field.
+
+        Without this, "derived from the real arc" is an assertion about a file nobody re-reads.
+        """
+        def shape(arc, resolve):
+            with io.open(os.path.join(arc, 'jobs.jsonl'), encoding='utf-8') as fh:
+                rows = [json.loads(l) for l in fh if l.strip()]
+            reviews, closes = {}, []
+            for r in rows:
+                if r.get('ev') == 'round-close':
+                    closes.append((r.get('track'), r.get('round')))
+                if r.get('ev') == 'start' and r.get('kind') == 'review':
+                    with io.open(resolve(arc, r['out']), encoding='utf-8') as fh:
+                        n = len(json.load(fh)['findings'])
+                    reviews[(r['track'], r['round'], r['name'])] = n
+            with io.open(os.path.join(arc, 'outcomes.jsonl'), encoding='utf-8') as fh:
+                keys = sorted((o['track'], o['round'], o['findingId'])
+                              for o in (json.loads(l) for l in fh if l.strip()))
+            return reviews, sorted(closes), keys
+
+        real = shape(REAL_REPLAY_ARC, lambda a, p: p)
+        fixture = shape(REPLAY, lambda a, p: os.path.join(a, p))
+        self.assertEqual(fixture, real, 'the vendored fixture has drifted from the arc it claims '
+                                        'to replay')
 
 
 if __name__ == '__main__':

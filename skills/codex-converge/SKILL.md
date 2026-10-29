@@ -102,20 +102,20 @@ codex exec -p solx -s read-only -C <worktree> ...
 ```
 
 `-p <name>` layers `$CODEX_HOME/<name>.config.toml` over the base config, and an explicit `-m` / `-c` on the same command line still wins over the profile.
-**On the user's Mac there are currently NO profiles at all** (re-measured 2026-09-09: `~/.codex` holds only `config.toml`, and `ls ~/.codex/*.config.toml` matches nothing).
-Every `-p` route below is therefore unavailable here and `run-codex.sh` refuses it with rc 2 — correctly, since codex would otherwise fall through to the base config and hand back a verdict from a tier nobody chose.
-**Until they are reinstalled, pass the tier explicitly:** `-m gpt-5.6-sol -c model_reasoning_effort="high"` for the review route, and read the tier back off codex's own banner line.
+**On the user's Mac NO profile files exist** (re-measured **2026-10-28**: `ls ~/.codex/*.config.toml` matches nothing, and `run-codex.sh` therefore refuses every `-p` route with rc 2 before spending anything — measured live on `-p terra`).
+So pass the tier and the effort explicitly: `-m gpt-5.6-terra -c model_reasoning_effort="high"`, `-m gpt-5.6-sol -c model_reasoning_effort="xhigh"`.
+This claim has now flipped three times — no profiles on 2026-09-09, all four on 2026-10-26, none on 2026-10-28 — so the table below is a record of what the names MEAN, never a promise that they resolve.
 
-The four profiles this table used to promise — and which the stage-routing table below still names — were:
-
-| Profile | model | effort | present 2026-09-09? |
+| Profile | model | effort | present 2026-10-28? |
 | --- | --- | --- | --- |
-| `luna` | `gpt-5.6-luna` | `low` | no |
-| `terra` | `gpt-5.6-terra` | `high` | no |
-| `sol` | `gpt-5.6-sol` | `high` | no |
-| `solx` | `gpt-5.6-sol` | `xhigh` | no |
+| `luna` | `gpt-5.6-luna` | `low` | **no** |
+| `terra` | `gpt-5.6-terra` | `high` | **no** |
+| `sol` | `gpt-5.6-sol` | `high` | **no** |
+| `solx` | `gpt-5.6-sol` | `xhigh` | **no** |
 
-Always run `ls ~/.codex/*.config.toml` rather than trusting any of this: the set differs per machine and, as this correction shows, per week on one machine.
+**The date on that claim is load-bearing, not bookkeeping** (spec §9.5.1 of the reviewer-escape arc): the launcher's tier selection reads it, a stale claim routes a run to a tier nobody chose, and this very note has now been wrong in BOTH directions within seven weeks.
+So always run `ls ~/.codex/*.config.toml` rather than trusting any of this, write the date beside any answer you record, and read the tier back off codex's own banner line rather than off the flag you passed.
+The set differs per machine and, as both corrections show, per month on one machine.
 
 A profile name with no matching file is not a codex error — it silently falls back to the base config, so `run-codex.sh` refuses it instead (see the preflight above).
 Route through `run-codex.sh`; a bare `codex exec -p <name>` has no such guard.
@@ -663,6 +663,22 @@ A **scoped** run — eight files or fewer, the `light` CPU class `loop.py` alrea
 That is the whole difference between a gate and a nuisance, and it is not a courtesy: running the changed test files after each edit is the pattern this skill asks for, so a gate that priced it as waste would only teach you to route around the gate.
 The bill was never the scoped run; it was the whole-project repeat.
 
+**Every finding of a round owes exactly ONE recorded outcome, and `close-round` refuses without it.**
+This is new machinery and it will stop your round if you have not read this paragraph: `python3 "$SKILL/loop.py" close-round` now derives the round's finding set from the verdict files its own review jobs wrote — a finding's id is `<lens job name>#<index in that verdict's findings array>` — and refuses to close while any of them has no row in `<arc>/outcomes.jsonl`.
+File each one with
+
+```bash
+python3 "$SKILL/loop.py" finding record --arc "$ARC" --track T --round N \
+  --id '<lens>#<index>' --severity high --file src/pay.ts --line-start 10 --line-end 20 \
+  --outcome fixed --note 'what happened to it'
+```
+
+`--outcome` is one of six and nothing else: `fixed`, `reviewer was wrong`, `intentional`, `didn't matter`, `deferred`, `not reachable`.
+A byte-identical retry appends nothing; a second row claiming anything different for one finding is REFUSED, because the store's claim is exactly one outcome per finding.
+A round with twenty-eight findings therefore owes twenty-eight calls, so script the loop rather than typing them — `loop.round_findings(loop.ledger_read(arc), track, rnd)` hands you the ids.
+`loop.py finding report --arc "$ARC"` counts them by kind, by severity and by round, reading the rows and never a value a run returned, and every report says in words that its counts begin at the first round after this shipped.
+A grading run's own result is persisted separately by `loop.py run-summary record`, and `loop.py run-summary baseline` either returns the most recent one or refuses naming the arc — it never hands back an empty summary, because the keep rule's like-with-like gate would pass vacuously over one.
+
 **Profile the loop at EVERY round boundary — the launcher now refuses to skip it.**
 Every review or `--write` launch is attributed (`--arc DIR --track T --round N`) and runs through `loop.py`, which writes an exact per-job ledger (`<arc>/jobs.jsonl`: requested / started / ended, queue wait, CPU class, tree state, exit code) and holds two locks.
 The per-tree lock is shared by readers and exclusive for a `--write`, so a write waits for the reviews reading that tree and a review never starts on a tree mid-edit; a read-only job whose tree changes underneath it anyway exits 5 and quarantines its verdict as `<out>.tree-moved` (the fail-open the old SHA assertion gave you, now mechanical).
@@ -713,6 +729,20 @@ The one-run-at-a-time, nothing-else-dirties-the-tree constraint is a property of
 Give each track its own linked worktree and run their implementations concurrently, committing with `-o <paths>` while siblings are live.
 Measured on the same lane: three tracks with disjoint file sets ran strictly sequentially for no reason but a shared cleanliness check.
 Read-only review lenses never had this constraint — keep running them panel-wide.
+
+**But do NOT fix the first verdict's findings while the rest of the panel is still reading.**
+Readers do not block each other, so "panel-wide" is right — and YOU are a writer.
+Editing the reviewed artifact the moment the first lens lands moves the tree under every lens still
+running, each of which then exits 5 and quarantines a complete verdict it had already written.
+Measured 2026-10-27 on a 594-line plan: `plan-trace` landed first, its three findings were fixed at
+once, and `plan-correct` (6m31s) and `plan-tests` (8m29s) both finished with `rc=0` children and
+verdicts written on attempt 1, then had BOTH envelopes quarantined `TREE MOVED` — HEAD never moved
+(`b9525e88ed6c→b9525e88ed6c`), only the content.
+The round was recoverable without re-running anything, because a quarantined envelope is a statement
+about PROVENANCE and the findings inside it are claims you must reproduce by hand anyway.
+Recovering it is still a cost nobody needed to pay, so the rule is: wait for the LAST lens to exit,
+then fix the round as one batch.
+An untracked artifact is the sharp case, since it moves the tree with no commit to notice.
 
 **Ship the independent slice rather than the whole document.**
 When a spec has two halves joined only by a shared dependency and every blocking finding sits in one half, split at the seam and ship the clean half now.

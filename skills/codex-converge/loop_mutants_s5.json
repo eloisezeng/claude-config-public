@@ -1,0 +1,18 @@
+[
+ {
+  "label": "S5-M1-no-uniqueness-check",
+  "why": "Deletes the uniqueness check of §5.4: every record becomes an append, so a second conflicting outcome for one finding is stored beside the first and decision 5's 'exactly one' becomes prose. This is the mutant the task's acceptance names, and the conflicting-refusal test is the one that has to kill it — a test that only counted rows after a happy-path record would not.",
+  "old": "    prior = [r for r in existing if outcome_key(r) == key]",
+  "new": "    prior = []",
+  "expect": "killed",
+  "test": "test_a_conflicting_second_outcome_is_refused_and_names_both"
+ },
+ {
+  "label": "S5-M2-idempotent-becomes-append",
+  "why": "Collapses the idempotent answer into the append answer, which is the OTHER half of the key: a retried recorder (an interrupted agent re-running its own command) then writes a second row and the finding is counted twice. Three answers rather than two is the property, and this mutant removes one of them while leaving every refusal intact.",
+  "old": "        return 'idempotent', (",
+  "new": "        return 'append', (",
+  "expect": "killed",
+  "test": "test_a_byte_identical_retry_is_idempotent_and_appends_nothing"
+ }
+]

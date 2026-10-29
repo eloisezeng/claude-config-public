@@ -1,6 +1,6 @@
 ---
 name: ops-lane-ledger
-description: Open work lives as LANES in ~/.claude/ops/ — a dispatch registers one automatically, a seat dying never closes one, and only an explicit disposition (--close completed/cancelled/superseded) removes it
+description: Open work lives as LANES in ~/.claude/ops/ — a dispatch registers one automatically, a seat dying never closes one, only an explicit disposition removes it, and a lane CLOSING never means its seat stopped, so the symlink is not a done/quiet predicate
 scope: global
 metadata:
   type: feedback
@@ -15,6 +15,15 @@ metadata:
 
 **Invariants:**
 - **A seat dying, stalling, or being killed never closes its lane.** Worker termination ≠ completion; a lane leaves the open set only via explicit disposition.
+- **And the converse, which is the one that bites a WAITER: a lane closing never means its seat stopped.** The symlink's
+  disappearance is a bookkeeping event, so it is not a done/quiet predicate for any other session. Measured 2026-10-27: a
+  hold armed to wait for a peer stream to go quiet fired the moment its `dispatches/` symlink vanished, and at that instant
+  the seat was still `working` with its own `state.json` detail reading `deploy dispatched; watching run, checking
+  rowRelevance next`; the seat actually finished 84 seconds later. Acting on that signal would have merged into a live
+  deploy stream. When you need "has that seat STOPPED", read the daemon's own `state` in `~/.claude/jobs/<id>/state.json`
+  (`working` → anything else) and confirm it twice; the lane answers "is this work still owned", a different question.
+  Age a seat from its last ASSISTANT TURN and never from silence alone — a seat inside one long shell command produced no
+  turn for 16 minutes while fully alive, so a silence threshold reads a busy seat as finished.
 - **Close = `handoff.sh --close <lane> <completed|cancelled|superseded> ["note"]`** — writes the disposition into the record first (audit line), removes the symlink second; every refusal errs OPEN. Handing off onward with handoff.sh supersedes the dispatcher's own lane automatically (coupled to retirement; a `--no-retire` side dispatch does not touch it).
 - **Worker locality:** a dispatched seat carries `CLAUDE_HANDOFF_LANE` and its session-start view shows only its own lane plus a count of others — leave other lanes to their owners.
 - **Coordinator reconstruction:** any fresh session's boot (SessionStart hook `inject-ops-lanes.sh`) lists the open set, so a coordinator death is recoverable without transcripts.
@@ -32,6 +41,13 @@ see [[a-guard-must-be-satisfiable-not-just-failable]]. The fix is one symlink pe
 record under an unused root is not merely hard to find, it is invisible AND it reads as "clear".
 Before trusting an empty open set, count the lanes and confirm the path you read is the one with
 the history in it.
+
+A lane file is only in the ledger if its frontmatter carries the **`lane:` key**, matching the
+slug. A file written with `state:` and `pointer:` but no `lane:` sits in `lanes/` looking filed and
+is read by nothing — measured: two lanes written that way were both absent from the census
+`handoff.sh --close` prints of lanes with nobody on them, which is the only reason I caught it. So
+read a new lane back through the ledger's own reader (the close census, or the boot listing),
+never by confirming the file exists. Copy the frontmatter from a lane the listing already shows.
 
 **How to apply:** trust the boot listing; when finishing a dispatched objective, close the lane in the same breath as the final report; when discovering new unresolved work, write a `lanes/` file immediately, not at session end; never delete a dangling `dispatches/` link without reading what happened to its record.
 

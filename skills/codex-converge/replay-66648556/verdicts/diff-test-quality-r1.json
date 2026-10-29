@@ -1,0 +1,46 @@
+{
+ "reviewed": {
+  "base": null,
+  "head": null,
+  "files": [
+   "<elided: derived fixture, see README.md>"
+  ]
+ },
+ "verdict": "needs-attention",
+ "summary": "<elided: derived fixture, see README.md>",
+ "next_steps": [
+  "<elided: derived fixture, see README.md>"
+ ],
+ "findings": [
+  {
+   "severity": "medium",
+   "title": "diff-test-quality-r1 finding 0",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  },
+  {
+   "severity": "medium",
+   "title": "diff-test-quality-r1 finding 1",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  },
+  {
+   "severity": "medium",
+   "title": "diff-test-quality-r1 finding 2",
+   "body": "<elided: derived fixture, see README.md>",
+   "file": "<elided: derived fixture, see README.md>",
+   "line_start": 1,
+   "line_end": 1,
+   "confidence": 0.9,
+   "recommendation": "<elided: derived fixture, see README.md>"
+  }
+ ]
+}

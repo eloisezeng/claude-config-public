@@ -694,6 +694,155 @@ pr21_line "$d" "$PR21_IF" "    if: github.event_name == 'push' && github.base_re
 case_absent "false && <base_ref not given> is false whatever it holds -> not required, GREEN" 0 \
   "VERDICT: GREEN" "could not read job condition" "$d"
 
+# 45. `github.event.pull_request.draft == false`, a real condition carried by a claude-review.yml in
+#     one of her repos. Measured 2026-10-08: EVERY sha in that repo answered NOT-GREEN with
+#     "expected <context> ==|!= '<literal>'", because `false` matched the `ident` pattern so both
+#     sides of the comparison read as identifiers. Two defects sat behind that one message -- the
+#     missing boolean literal, and `github.event.pull_request.draft` not being a context `operand()`
+#     evaluates, which would have refused on the very next line -- so all four directions are pinned
+#     here: required, not required, refused for want of the fact, and refused for a type this file
+#     does not model.
+#
+#     The draft flag is a FACT, written by ci-green.sh from the pull request GitHub names for the
+#     sha, never inferred: a gate must not decide its own required set from a guess. `pr_draft.txt`
+#     carries it; ABSENT is deliberately not `false`, because defaulting it would put a draft-only
+#     job into the required set forever -- the permanent NOT-GREEN this file exists to prevent.
+mk_draft() { # <dirname> <the review job's if:> [pr_draft.txt contents]
+  local d="$T/$1"; mkdir -p "$d"
+  {
+    printf 'name: review\non:\n  pull_request:\n    types: [opened, synchronize, reopened]\n'
+    printf 'jobs:\n  review:\n    name: review\n'
+    printf '    if: %s\n' "$2"
+    printf '    steps:\n      - run: true\n  always:\n    name: always runs\n    steps:\n      - run: true\n'
+  } > "$d/head.yml"
+  cp "$d/head.yml" "$d/base.yml"
+  printf 'always runs\tcompleted\tsuccess\n' > "$d/runs.tsv"
+  [ "$#" -ge 3 ] && printf '%s\n' "$3" > "$d/pr_draft.txt"
+  printf '%s' "$d"
+}
+
+# 45a. SATISFIABILITY in the direction that matters: the pull request is READY, so the review job
+#      RUNS and its absence from runs.tsv must read NOT-GREEN naming it. Before the fix this case
+#      could not be reached at all.
+d=$(mk_draft draft_ready "github.event.pull_request.draft == false" false)
+case_run "draft == false with a READY pull request -> review required, NOT-GREEN by name" 1 \
+  "never registered: ['review']" "$d"
+
+# 45b. The CONTROL for 45a, and the whole point of reading the flag: on a DRAFT pull request that job
+#      does not run, so it is not required and the same fixture is GREEN. case_absent, because a run
+#      can be green for other reasons and only the negative pins "no longer required".
+d=$(mk_draft draft_draft "github.event.pull_request.draft == false" true)
+case_absent "draft == false with a DRAFT pull request -> not required, GREEN" 0 \
+  "VERDICT: GREEN" "never registered" "$d"
+
+# 45c. The comparison is not a tautology in either direction: `== true` inverts both answers.
+d=$(mk_draft draft_eq_true_ready "github.event.pull_request.draft == true" false)
+case_absent "draft == true with a READY pull request -> not required, GREEN" 0 \
+  "VERDICT: GREEN" "never registered" "$d"
+d=$(mk_draft draft_eq_true_draft "github.event.pull_request.draft == true" true)
+case_run "draft == true with a DRAFT pull request -> review required, NOT-GREEN by name" 1 \
+  "never registered: ['review']" "$d"
+
+# 45d. ...and `!=` is read, not ignored.
+d=$(mk_draft draft_ne_true "github.event.pull_request.draft != true" false)
+case_run "draft != true with a READY pull request -> review required, NOT-GREEN by name" 1 \
+  "never registered: ['review']" "$d"
+
+# 45e. FAIL CLOSED when the fact was not established -- no pr_draft.txt at all. Guessing either way
+#      is wrong: `false` requires a job a draft pull request never runs, `true` is a fail-OPEN hole.
+d=$(mk_draft draft_unknown "github.event.pull_request.draft == false")
+case_run "draft condition with NO pr_draft.txt -> NOT-GREEN, naming the context" 1 \
+  "github.event.pull_request.draft" "$d"
+
+# 45f. A non-boolean file is the same as no file: only the literals `true` and `false` are a fact.
+d=$(mk_draft draft_garbage "github.event.pull_request.draft == false" "maybe")
+case_run "a pr_draft.txt that is not true/false -> NOT-GREEN, naming the context" 1 \
+  "was not determined" "$d"
+
+# 45g. GitHub coerces across types (`'' == false` is TRUE there) and this file does not model that,
+#      so a boolean literal against a STRING-valued context is refused by name rather than answered
+#      by rules nothing here implements. Without this the new `bool` token would silently make
+#      `github.event_name == false` a confident False.
+d=$(mk_draft draft_type_mismatch "github.event_name == false" false)
+case_run "a boolean literal against a string context -> NOT-GREEN, refusing the coercion" 1 \
+  "coercion is not modelled" "$d"
+
+# 45h. ...and the mirror: a STRING literal against the boolean-valued draft context.
+d=$(mk_draft draft_string_literal "github.event.pull_request.draft == 'false'" false)
+case_run "a string literal against the boolean draft context -> NOT-GREEN, refusing the coercion" 1 \
+  "coercion is not modelled" "$d"
+
+# 45i. Teaching this file ONE path under `github.event.` must not make it claim the others. A
+#      near-miss name is still an operand it does not evaluate, and is refused as one.
+#      (The `(?![A-Za-z0-9_.-])` guard on the boolean token is deliberately NOT pinned by a case:
+#      with or without it, `draft == falsey` is refused as unreadable -- the tokenization differs but
+#      the outcome does not, so no outcome test can see it. It is defensive, and stays commented as
+#      intent rather than being pinned by a test that would pass either way.)
+d=$(mk_draft draft_near_miss_name "github.event.pull_request.drafted == false" false)
+case_run "a near-miss context name under github.event. -> refused as an operand" 1 \
+  "is not a context this tool evaluates" "$d"
+
+# 46. `on: pull_request: types: [...]` WITHOUT `synchronize`. Measured 2026-10-08: a review workflow
+#     declaring `types: [opened, reopened, ready_for_review]` registered its job on a pull request's
+#     opening head and never again, so a one-line comment push left this gate reading
+#     "workflow jobs never registered: ['review']" on a head whose other checks were all green --
+#     unfixable by any rerun, and contradicted by the repo's own ruleset, which requires the two
+#     `unit` contexts and not `review`. The drop is only safe because PRESENCE still counts, which
+#     46c pins: the verdict loop walks every check-run on the sha, not just the expected ones.
+mk_types() { # <dirname> <the types: value, or '-' for no types: key> [extra runs.tsv row]
+  local d="$T/$1"; mkdir -p "$d"
+  {
+    printf 'name: review\non:\n  pull_request:\n'
+    [ "$2" = "-" ] || printf '    types: %s\n' "$2"
+    printf 'jobs:\n  review:\n    name: review\n    steps:\n      - run: true\n'
+  } > "$d/head.yml"
+  cp "$d/head.yml" "$d/base.yml"
+  {
+    printf 'name: CI\non:\n  pull_request:\n'
+    printf 'jobs:\n  always:\n    name: always runs\n    steps:\n      - run: true\n'
+  } > "$d/head.ci.yml"
+  cp "$d/head.ci.yml" "$d/base.ci.yml"
+  printf 'always runs\tcompleted\tsuccess\n' > "$d/runs.tsv"
+  [ "$#" -ge 3 ] && printf '%s\n' "$3" >> "$d/runs.tsv"
+  printf '%s' "$d"
+}
+
+# 46a. No `synchronize` -> the job cannot register on a pushed head, so it is NOT required and the
+#      sha reads GREEN off the checks that did register. case_absent pins the absence of the demand.
+d=$(mk_types types_once_per_pr "[opened, reopened, ready_for_review]")
+case_absent "pull_request types without synchronize -> once per PR, not required, GREEN" 0 \
+  "VERDICT: GREEN" "never registered" "$d"
+
+# 46b. The CONTROL, and the reason 46a is not simply "stop requiring review jobs": the DEFAULT type
+#      set includes `synchronize`, so a file with no `types:` key stays required on every head.
+d=$(mk_types types_default "-")
+case_run "pull_request with NO types: key -> default set includes synchronize, still required" 1 \
+  "never registered: ['review']" "$d"
+# ...and naming `synchronize` explicitly is the same answer, so the rule reads the LIST, not the
+# presence of the key.
+d=$(mk_types types_explicit_sync "[opened, synchronize, reopened]")
+case_run "pull_request types WITH synchronize -> still required" 1 \
+  "never registered: ['review']" "$d"
+
+# 46c. The safety property of the drop, stated as a test: a once-per-PR workflow's check that DID
+#      register and FAILED still fails the verdict. Without this the drop would be a fail-open hole,
+#      excusing a red review on the head where the review actually ran.
+d=$(mk_types types_present_but_red "[opened, reopened, ready_for_review]" "review	completed	failure")
+case_run "a once-per-PR job that registered and FAILED is still NOT-GREEN" 1 \
+  "not successful: review (failure)" "$d"
+
+# 46d. The block-sequence spelling of the same list is read, not refused.
+d=$(mk_types types_block_form "
+      - opened
+      - reopened")
+case_absent "types: as a block sequence without synchronize -> once per PR, GREEN" 0 \
+  "VERDICT: GREEN" "never registered" "$d"
+
+# 46e. FAIL CLOSED on a list this parser cannot read, rather than assuming either answer.
+d=$(mk_types types_unreadable "{opened: yes}")
+case_run "an unreadable types: list -> NOT-GREEN, refusing to decide" 1 \
+  "could not read the \`types:\` list" "$d"
+
 echo "----"
 echo "$PASS passed, $FAIL failed  (derive under test: $DERIVE)"
 SUITE_RC=0; [ "$FAIL" -eq 0 ] || SUITE_RC=1
@@ -791,6 +940,23 @@ if os.path.exists(cpath):'
   # check on the others), and drop an unresolvable template instead of refusing (fail-open hole).
   mutate expand-only-first-leg 'names = [pat.sub(v, n) for n in names for v in mtx[k]]' 'names = [pat.sub(mtx[k][0], n) for n in names]'
   mutate ignore-unresolved-template 'if unresolved: why.append' 'if False: why.append'
+  # The two ways the types: rule goes wrong: ignoring the list (back to the permanent NOT-GREEN it
+  # was written for) and dropping a workflow whose list DOES name synchronize (a fail-open hole).
+  mutate ignore-pr-types 'if ts is UNREADABLE: return None' 'if ts is UNREADABLE: return None
+    return True'
+  mutate types-always-once-per-pr 'return PR_HEAD_MOVING_TYPE in ts' 'return False'
+  # The three ways the draft-flag reading goes wrong, one mutant each. All three are the SAME shape
+  # of error -- answering a question whose fact was not established -- and each one reads GREEN or
+  # reads a confident verdict on a repo it has no business deciding for.
+  #   1. defaulting the absent fact to "ready" requires a job a draft pull request never runs;
+  #   2. dropping the type guard answers `github.event_name == false` by a coercion rule this file
+  #      does not implement;
+  #   3. the pre-2026-10-08 comparison shape, which could not read a boolean literal at all.
+  mutate draft-defaults-to-ready 'draft = None
+if os.path.exists(dpath):' 'draft = "false"
+if os.path.exists(dpath):'
+  mutate ignore-bool-type-mismatch 'if (lit_kind == "bool") != (name in BOOL_CONTEXTS):' 'if False:'
+  mutate reject-boolean-literal 'sorted({a[0], b[0]}) not in (["ident", "lit"], ["bool", "ident"])' 'sorted({a[0], b[0]}) != ["ident", "lit"]'
   AFTER=$(md5 -q "$DERIVE_DEFAULT" 2>/dev/null || md5sum "$DERIVE_DEFAULT" | cut -d' ' -f1)
   if [ "$BEFORE" = "$AFTER" ]; then
     echo "ok    the real ci-derive.py is byte-identical after the mutant run ($BEFORE)"

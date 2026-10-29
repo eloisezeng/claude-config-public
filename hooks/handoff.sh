@@ -116,17 +116,387 @@ lesson_ok() {
   return 1
 }
 
+# ----------------------------------------------------------- the done-check
+# `--close <lane> completed` is a CLAIM ABOUT WORK, and until now it checked
+# nothing about any: a seat that finished its own slice closed the lane on a
+# named lesson alone, dispatched no successor, and left the parent arc with a
+# quarter of its tasks unbuilt and no commits for any of them. Nobody was told,
+# because nothing in the close path could have told anyone — the disposition
+# was the seat's own word for its own work, which is the shape
+# `a-gate-may-not-read-its-verdict-from-the-gated-party` forbids.
+#
+# So a handoff file may declare ONE done-check: a single line
+#
+#   done-check: <shell command>
+#
+# and `--close <lane> completed` RUNS it, from the lane's recorded cwd, under a
+# hard deadline, and refuses the close when it exits non-zero. The command is
+# the LANE OWNER's own — whoever wrote the handoff file wrote the test for its
+# objective, before the work started and before anyone had an interest in the
+# answer. That is the whole of the design: the verdict comes from a sentence
+# written by the party that set the objective, not by the party reporting on it.
+#
+# WHERE IT RUNS, AND WHERE IT MUST NOT. Only here, at `--close`, once, in the
+# foreground, with the operator reading the output. Never in `watch_loop`, never
+# from a poll: a command out of a file, re-run every POLL_SEC for twelve hours
+# by a detached watchdog, is a cron job nobody wrote and nobody can see.
+#
+# `cancelled` and `superseded` are UNCHANGED and run nothing. They are the two
+# dispositions that already say the work did not finish, so a check of whether
+# it finished has no question to answer.
+DONE_CHECK_TIMEOUT_SEC="${CLAUDE_HANDOFF_DONE_CHECK_TIMEOUT:-900}"
+# A done-check that runs a repository's own suite is the common case and the
+# suites on this machine run in minutes, so the default deadline is generous;
+# what it bounds is the pathological case (a check that waits on input, a hung
+# mount), where an unbounded wait would park the close forever in a state that
+# looks exactly like a slow test run.
+#
+# The handoff file is hand-written, so the scan for the declaration is BOUNDED,
+# the same reason inject-ops-lanes.sh bounds its lane-file read: a handoff file
+# is routinely tens of kilobytes and has been measured at half a megabyte, and
+# an unbounded read of one is a stall with no artifact. The declaration belongs
+# near the top of the file by convention, and the bound is named here so a
+# refusal can say that the scan was bounded rather than that the line is absent.
+DONE_CHECK_SCAN_BYTES="${CLAUDE_HANDOFF_DONE_CHECK_SCAN_BYTES:-65536}"
+
+# done_check_read <handoff-path> -> DONE_CHECK_CMD, DONE_CHECK_N
+#   0 = the file was read (DONE_CHECK_N is how many declarations it carries,
+#       DONE_CHECK_CMD the first one's command)
+#   1 = the file could not be read at all, which is NOT "it declares none":
+#       `absence-needs-a-probe-that-could-see-presence`, so the caller refuses
+#       rather than treating an unreadable file as a waiver.
+# A `done-check:` line whose value is blank is not counted as a declaration: it
+# declares nothing to run, and the no-declaration refusal below prints the
+# syntax, which is exactly what an operator who typed the empty form needs.
+DONE_CHECK_CMD=""
+DONE_CHECK_N=0
+done_check_read() {
+  DONE_CHECK_CMD=""; DONE_CHECK_N=0
+  [ -f "$1" ] && [ -r "$1" ] || return 1
+  # `|| true` and then VALIDATE THE OUTPUT, never the status: `grep -c` prints
+  # `0` and exits 1 when it matches nothing, which is the overwhelmingly common
+  # case here -- most handoff files declare no done-check. Keying on the status
+  # made every such file read as UNREADABLE, i.e. as the hard refusal, which is
+  # the same `judge iconv by its output, not its exit code` shape this
+  # repository's own hooks were already bitten by. A grep that really errored
+  # prints nothing, so the numeric test below is what separates the two.
+  _dcn="$(head -c "$DONE_CHECK_SCAN_BYTES" "$1" 2>/dev/null \
+          | grep -c '^done-check:[[:blank:]]*[^[:blank:]]' || true)"
+  _dcn="${_dcn##*[[:space:]]}"
+  case "$_dcn" in ''|*[!0-9]*) return 1 ;; esac
+  DONE_CHECK_N="$_dcn"
+  [ "$_dcn" = 0 ] && return 0
+  DONE_CHECK_CMD="$(head -c "$DONE_CHECK_SCAN_BYTES" "$1" 2>/dev/null \
+                    | sed -n 's/^done-check:[[:blank:]]*//p' | head -1 | tr -d '\015')" || DONE_CHECK_CMD=""
+  # Strip Markdown code formatting around the command. A handoff file is MARKDOWN
+  # and the documented format is bare, so a lane owner writing `` `cmd` `` is the
+  # likely mistake rather than the unlikely one — and it is the WORST possible
+  # mistake here, because `eval` reads a backtick as command substitution: the
+  # check RUNS, its stdout is then executed as a command, and the close refuses
+  # with `PASS: command not found` and exit 127, which names neither the check nor
+  # the quoting. Measured on lane handoff-practice-run-d83248a7, whose check
+  # passed all five of its own assertions in the same breath as the close refused.
+  #
+  # Only a MATCHED pair is removed, and only the outermost one, so a command that
+  # legitimately contains a backtick is untouched. Stripping it here rather than at
+  # authoring time is deliberate: the file is already written on every machine that
+  # wrote one, and this is the party that reads it.
+  case "$DONE_CHECK_CMD" in
+    '`'*'`') DONE_CHECK_CMD="${DONE_CHECK_CMD#\`}"; DONE_CHECK_CMD="${DONE_CHECK_CMD%\`}" ;;
+  esac
+  return 0
+}
+
+# why_ok <text> — true when a waiver names a REASON rather than a word.
+# Same shape and same purpose as lesson_ok: the one machine-checkable property
+# of a reason is that somebody wrote a sentence. Twelve bytes with a space in
+# them is satisfiable by every honest reason and failable by "n/a", "skip",
+# "later" and the empty string, which are the four things the flag exists to
+# refuse (`a-guard-must-be-satisfiable-not-just-failable`).
+why_ok() {
+  [ "${#1}" -ge 12 ] || return 1
+  case "$1" in *[[:blank:]]*) ;; *) return 1 ;; esac
+  return 0
+}
+
+# Reached ONLY inside timed_to_file's child, which has closed fds 9/8/7 and is
+# killed on the deadline. `2>&1` INSIDE the function is what captures the
+# command's stderr: timed_to_file points the child's stdout at the output file
+# and discards its stderr, so a check that reports its failure on stderr —
+# which most of them do — would otherwise fail with nothing to show for it.
+_done_check_raw() { # $1=cwd  $2=command
+  cd "$1" 2>/dev/null || return 125
+  eval "$2" 2>&1
+}
+
+# done_check_show <output-file> — print the check's output, BOUNDED, naming the
+# bytes it dropped. A refusal whose diagnostics are a tail window is fail-open
+# reporting (`a-tail-window-is-not-a-failure-report`): a check that prints a
+# megabyte on its way out would evict the one line naming the cause. So the
+# whole output while it fits, and otherwise BOTH ends — never one — with the
+# omitted byte count named between them, and the full file named either way.
+#
+# This goes to STDOUT, not stderr, and the stream split is the contract: the
+# close's narration and the command's own output are stdout, and the VERDICT —
+# every `die` below — is stderr. A caller reading only stderr gets the refusal
+# and the path to the full output; one reading both gets everything in order.
+DONE_CHECK_SHOW_BYTES=4000
+done_check_show() { # $1=output file
+  _dcs_n="$(wc -c < "$1" 2>/dev/null | tr -d ' ')" || _dcs_n=""
+  case "$_dcs_n" in ''|*[!0-9]*) _dcs_n="" ;; esac
+  if [ -n "$_dcs_n" ]; then _dcs_lbl="$_dcs_n bytes"; else _dcs_lbl="size unreadable"; fi
+  printf -- '--- done-check output (%s) ---\n' "$_dcs_lbl"
+  if [ -n "$_dcs_n" ] && [ "$_dcs_n" -gt $(( DONE_CHECK_SHOW_BYTES * 2 )) ]; then
+    head -c "$DONE_CHECK_SHOW_BYTES" "$1" 2>/dev/null || true
+    printf '\n--- %s bytes omitted here; the full output is in %s ---\n' \
+      "$(( _dcs_n - DONE_CHECK_SHOW_BYTES * 2 ))" "$1"
+    tail -c "$DONE_CHECK_SHOW_BYTES" "$1" 2>/dev/null || true
+  else
+    cat "$1" 2>/dev/null || true
+  fi
+  printf -- '--- end done-check output ---\n'
+}
+
+# ------------------------------------------- what a close LEAVES BEHIND
+# A close is the one moment somebody is looking at this ledger, and the one
+# moment "is anything still owed in this repository, and is anyone on it?" is
+# both cheap to ask and answerable. The stranding that put this here: a seat
+# closed its own dispatched slice `completed`, the PARENT lane stayed
+# `status: open` in lanes/ with no seat and no successor, and the only place
+# that fact ever appeared was as one row among forty at the next session start
+# — which is where nobody read it.
+#
+# BEST-EFFORT BY CONSTRUCTION. All of this runs AFTER the lane has left the open
+# set, so it can refuse nothing and must break nothing: every failure is
+# reported in words and the close still exits 0. The one thing it may never do
+# is report "nothing is seatless" when it could not tell — an unreadable agent
+# list is UNKNOWN, never "none live", which is the rule read_agents already
+# enforces for the watchdog.
+CLOSE_SCAN_BYTES="${CLAUDE_HANDOFF_LANE_SCAN_BYTES:-65536}"
+
+# repo_root_of <path> -> REPO_ROOT ('' when the path is in no git repository)
+#
+# Walks UP from the path looking for `.git`, and resolves a WORKTREE to its MAIN
+# repository. That last part is the whole reason this is not one `git rev-parse
+# --show-toplevel`: the stranding happened in a worktree, where `.git` is a FILE
+# whose `gitdir:` line points into the main repository's `.git/worktrees/`, so a
+# worktree-local answer would have put the closing seat and the lane it stranded
+# in two different "repositories" and found nothing.
+#
+# No `git` is run at all. This is reached from a tool whose PATH is a hook's and
+# not the interactive shell's, and a `git` that is not on PATH would report
+# every lane as unplaceable while reading green.
+#
+# A path that does not EXIST still has existing ancestors, and the walk simply
+# fails each test until it reaches one — which is what makes a lane whose
+# pointer names a file somebody has since moved still placeable.
+#
+# THE ANSWER IS PHYSICAL. Two spellings of one directory compare unequal as
+# strings, and the two inputs to this are spelled by different writers: a
+# record's `cwd` was written by `pwd -P`, and a lane file's `pointer:` was typed
+# by a person. On this machine that is exactly `/private/var/...` against
+# `/var/...` — the same directory through a symlinked ancestor — and the whole
+# scan silently matched nothing. So the root is resolved before it is returned,
+# and only an unresolvable one falls back to the literal (where comparing
+# spellings is all there is).
+REPO_ROOT=""
+_repo_root_set() { # $1=the root as walked
+  REPO_ROOT="$( exec 9>&- 8>&- 7>&-; cd "$1" 2>/dev/null && pwd -P )" || REPO_ROOT=""
+  [ -n "$REPO_ROOT" ] || REPO_ROOT="$1"
+  return 0
+}
+repo_root_of() {
+  REPO_ROOT=""
+  _rr="$1"
+  case "$_rr" in /*) ;; *) return 1 ;; esac
+  while [ -n "$_rr" ] && [ "$_rr" != / ]; do
+    if [ -d "$_rr/.git" ]; then _repo_root_set "$_rr"; return 0; fi
+    if [ -f "$_rr/.git" ]; then
+      _rrg="$(sed -n 's/^gitdir:[[:blank:]]*//p' "$_rr/.git" 2>/dev/null | head -1)" || _rrg=""
+      case "$_rrg" in
+        */.git/worktrees/*) _repo_root_set "${_rrg%/.git/worktrees/*}" ;;
+        *) _repo_root_set "$_rr" ;;
+      esac
+      return 0
+    fi
+    _rr="${_rr%/*}"
+  done
+  return 1
+}
+
+# lane_is_dispatched_as <lane-file lane value> <space-separated dispatch keys>
+# -> 0 when one of those keys IS this lane file's dispatched twin.
+#
+# A lane file and a dispatch of the same work are two rows for one lane: the
+# file's `lane:` is the hand-written slug, and the dispatch key is that slug
+# plus `-<8 hex>` because lane_key derives identity from the hash of the
+# RESOLVED handoff path. So the match is derived from lane_key's own shape
+# rather than guessed, and without it every dispatched lane that also has a
+# lane file would be reported as seatless beside its own live seat.
+lane_is_dispatched_as() {
+  for _lid in $2; do
+    [ "$_lid" = "$1" ] && return 0
+    case "$_lid" in
+      "$1"-????????)
+        case "${_lid##*-}" in *[!0-9a-f]*) ;; *) return 0 ;; esac ;;
+    esac
+  done
+  return 1
+}
+
+# close_report_seatless <the lane just closed> <its record>
+close_report_seatless() {
+  rec_read "$2" cwd || true
+  _cs_cwd="$REC_VAL"
+  if ! repo_root_of "$_cs_cwd"; then
+    printf 'handoff: the closed lane records cwd %s, which is in no git repository, so the other open lanes could not be checked against it. Read %s/lanes/ before you stop.\n' \
+      "${_cs_cwd:-(none recorded)}" "$OPS_DIR"
+    return 0
+  fi
+  _cs_repo="$REPO_ROOT"
+  # ONE bounded read of the session list for the whole scan. A failure here is
+  # carried as `_cs_live_known=0` and every dispatched lane is then reported as
+  # UNKNOWN rather than quietly as attended: `absence-needs-a-probe-that-could-
+  # see-presence`, in the direction that costs a false alarm instead of a
+  # silence.
+  _cs_live_known=0
+  read_agents && _cs_live_known=1
+  _cs_keys=""; _cs_out=""; _cs_names=""; _cs_n=0; _cs_unplaced=0; _cs_dangling=""
+
+  # Pass 1: the open DISPATCHED lanes. Their keys are also what tells a lane
+  # FILE in pass 2 that its work is already being carried by a seat.
+  for _cs_l in "$OPS_DIR"/dispatches/*; do
+    [ -L "$_cs_l" ] || continue
+    _cs_k="${_cs_l##*/}"
+    [ "$_cs_k" = "$1" ] && continue
+    _cs_keys="$_cs_keys $_cs_k"
+    _cs_r="$(readlink "$_cs_l" 2>/dev/null)" || _cs_r=""
+    if [ -z "$_cs_r" ] || [ ! -f "$_cs_r" ]; then
+      # Its OWN bucket, out of the repository-scoped count: with no record there
+      # is no cwd, so this lane cannot be placed in any repository and counting
+      # it here would make EVERY close in EVERY repository report a stranding.
+      # It is still said, in its own line — a lane link whose record has
+      # vanished is a defect in the ledger itself, which is worse than a
+      # seatless lane and belongs to nobody in particular.
+      _cs_dangling="$_cs_dangling $_cs_k"
+      continue
+    fi
+    rec_read "$_cs_r" cwd || true; _cs_rcwd="$REC_VAL"
+    repo_root_of "$_cs_rcwd" || continue
+    [ "$REPO_ROOT" = "$_cs_repo" ] || continue
+    rec_read "$_cs_r" session_id || true; _cs_sid="$REC_VAL"
+    if [ -z "$_cs_sid" ]; then
+      _cs_out="$_cs_out  - $_cs_k — its record names no session, so no seat was ever confirmed for it
+"
+      _cs_names="$_cs_names $_cs_k"; _cs_n=$((_cs_n + 1)); continue
+    fi
+    if [ "$_cs_live_known" = 0 ]; then
+      _cs_out="$_cs_out  - $_cs_k — seat $_cs_sid: the session list could not be read, so whether it is still running is UNKNOWN
+"
+      _cs_names="$_cs_names $_cs_k"; _cs_n=$((_cs_n + 1)); continue
+    fi
+    _cs_st="$(lookup "$AGENTS_JSON" "$_cs_sid" state)"
+    case "$LIVE_STATES" in
+      *" $_cs_st "*) continue ;;
+    esac
+    _cs_out="$_cs_out  - $_cs_k — seat $_cs_sid is not running (${_cs_st:-the session list does not name it at all})
+"
+    _cs_names="$_cs_names $_cs_k"; _cs_n=$((_cs_n + 1))
+  done
+
+  # Pass 2: the lane FILES, which is where the stranded parent lane lived. A
+  # lane file has no seat by construction — nothing was ever dispatched for it —
+  # so being OPEN and in this repository is the whole test.
+  #
+  # Without the shared rule there is no way to tell an open lane file from a
+  # disposed one, and guessing in BOTH directions is wrong: calling them all
+  # open floods the report, calling them all closed hides the exact lane this
+  # exists to find. So the pass is skipped and the skip is SAID, with the
+  # dispatched lanes above still checked.
+  _cs_files_unread=0
+  if [ "$LANE_STATUS_LOADED" != 1 ]; then _cs_files_unread=1; fi
+  for _cs_f in "$OPS_DIR"/lanes/*.md; do
+    [ "$_cs_files_unread" = 1 ] && break
+    [ -f "$_cs_f" ] || continue
+    lane_file_read "$_cs_f" "$CLOSE_SCAN_BYTES" || continue
+    [ -n "$LANE_FM_LANE" ] || continue
+    lane_status_is_closed "$LANE_FM_STATUS" && continue
+    [ "$LANE_FM_LANE" = "$1" ] && continue
+    [ "$LANE_FM_LANE" = "${1%-*}" ] && continue
+    lane_is_dispatched_as "$LANE_FM_LANE" "$_cs_keys" && continue
+    # The anchor: where this lane's work LIVES. `pointer:` is the only field a
+    # lane file has that names a path, and a lane without one cannot be placed
+    # in any repository — so it is COUNTED rather than dropped, because the size
+    # of what this scan could not see is the one thing that makes the rest of
+    # the answer readable.
+    case "$LANE_FM_POINTER" in
+      /*) ;;
+      *) _cs_unplaced=$((_cs_unplaced + 1)); continue ;;
+    esac
+    repo_root_of "$LANE_FM_POINTER" || { _cs_unplaced=$((_cs_unplaced + 1)); continue; }
+    [ "$REPO_ROOT" = "$_cs_repo" ] || continue
+    _cs_out="$_cs_out  - $LANE_FM_LANE [$(lane_status_shown)] — no session was ever dispatched for it ($_cs_f)
+"
+    _cs_names="$_cs_names $LANE_FM_LANE"; _cs_n=$((_cs_n + 1))
+  done
+
+  if [ -n "$_cs_dangling" ]; then
+    printf 'handoff: and these lane links have NO dispatch record, so they belong to no repository and nothing can say whether a seat is on them —%s. Investigate; do not delete them.\n' "$_cs_dangling"
+  fi
+  if [ "$_cs_files_unread" = 1 ]; then
+    printf 'handoff: the lane FILES in %s/lanes were NOT checked — lib/lane-status.sh is not beside %s, so which statuses mean closed could not be established, and only the dispatched lanes were looked at. Read %s/lanes/ by hand.\n' \
+      "$OPS_DIR" "$0" "$OPS_DIR"
+  fi
+  if [ "$_cs_unplaced" -gt 0 ]; then
+    _cs_tail="  ...and $_cs_unplaced other open lane file(s) name no pointer, so they could not be placed in any repository at all — read $OPS_DIR/lanes/.
+"
+  else
+    _cs_tail=""
+  fi
+  if [ "$_cs_n" = 0 ]; then
+    printf 'handoff: every other open lane in %s has a live seat.\n%s' "$_cs_repo" "$_cs_tail"
+    return 0
+  fi
+  printf 'handoff: %s open lane(s) in %s now have NOBODY on them:\n%s%s' \
+    "$_cs_n" "$_cs_repo" "$_cs_out" "$_cs_tail"
+  printf 'handoff: pick one up, dispatch a successor for it, or close it with a disposition — a lane with no seat is work nobody is doing and nobody is tracking.\n'
+  # The short form for the alert, which is a notification bubble and not a
+  # report: three names and a count of the rest.
+  _cs_short=""; _cs_i=0
+  for _cs_nm in $_cs_names; do
+    _cs_i=$((_cs_i + 1))
+    if [ "$_cs_i" -gt 3 ]; then _cs_short="$_cs_short and $((_cs_n - 3)) more"; break; fi
+    _cs_short="${_cs_short:+$_cs_short, }$_cs_nm"
+  done
+  # The SAME channel the watchdog raises for a blocked successor, and for the
+  # same reason: this is the other way a relay goes quiet, and it has to arrive
+  # where the first one does. `notify` writes its log line first and
+  # unconditionally, so the durable record survives a notifier that reaches
+  # nobody; alert_once's marker machinery is deliberately not used, because that
+  # is a per-generation retry for a repeating poll and a close happens once.
+  notify "closed $1 — $_cs_n open lane(s) in ${_cs_repo##*/} have no live seat: $_cs_short"
+}
+
 close_lane() {
   _cl_lane="${1:-}"; _cl_disp="${2:-}"
-  [ $# -ge 2 ] || die "usage: handoff.sh --close <lane-key> <completed|cancelled|superseded> --lesson <memory-slug | 'none: <why>'> [one-line note]"
+  [ $# -ge 2 ] || die "usage: handoff.sh --close <lane-key> <completed|cancelled|superseded> --lesson <memory-slug | 'none: <why>'> [--no-done-check='<why>'] [one-line note]"
   shift 2
-  # --lesson may appear anywhere after the disposition; everything else is the
-  # free-form note, so an existing call's note keeps working unchanged.
-  _cl_lesson=""; _cl_note=""
+  # --lesson and --no-done-check may appear anywhere after the disposition;
+  # everything else is the free-form note, so an existing call's note keeps
+  # working unchanged.
+  _cl_lesson=""; _cl_note=""; _cl_nodc=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --lesson) need_val "$1" $# "${2:-}"; _cl_lesson="$2"; shift 2 ;;
       --lesson=*) _cl_lesson="${1#--lesson=}"; shift ;;
+      --no-done-check) need_val "$1" $# "${2:-}"; _cl_nodc="$2"; shift 2 ;;
+      --no-done-check=*) _cl_nodc="${1#--no-done-check=}"; shift ;;
+      # `--note` is in the documented usage and had no arm, so it fell through
+      # to the catch-all and the recorded note began with the literal word
+      # `--note`. The bare trailing form still works, which is why nothing
+      # noticed: the note was written, just with its own flag name inside it.
+      --note) need_val "$1" $# "${2:-}"; _cl_note="${_cl_note:+$_cl_note }$2"; shift 2 ;;
+      --note=*) _cl_note="${_cl_note:+$_cl_note }${1#--note=}"; shift ;;
       *) _cl_note="${_cl_note:+$_cl_note }$1"; shift ;;
     esac
   done
@@ -154,6 +524,52 @@ close_lane() {
   [ -L "$_cl_link" ] || die "--close: no open dispatched lane named $_cl_lane in $OPS_DIR/dispatches — already closed, or never registered (non-dispatched lanes close by editing their file in $OPS_DIR/lanes)"
   _cl_rec="$(readlink "$_cl_link" 2>/dev/null)" || _cl_rec=""
   [ -n "$_cl_rec" ] && [ -f "$_cl_rec" ] || die "--close: lane $_cl_lane points at a record that is missing (${_cl_rec:-unreadable link}) — refusing to silently drop the lane; investigate, then remove $_cl_link by hand if the work is truly closed"
+  # ---- THE DONE-CHECK. `completed` is the only disposition that claims the
+  # objective is MET, so it is the only one that has to prove it; see the design
+  # note above done_check_read.
+  #
+  # It runs BEFORE the dispatch lock is taken, and that order is deliberate: the
+  # command is the lane owner's and may run a whole suite, and a user command
+  # executing while this process holds the lock that serializes dispatch would
+  # park every re-dispatch of this handoff behind it. What that costs is a close
+  # whose check PASSED and is then refused by an in-flight dispatch below — the
+  # check's time, and nothing decided wrongly. Running it under the lock would
+  # instead let a slow check block a dispatch, which is the worse failure.
+  # It also keeps the check out of the claim closure (tests/claim-census.js):
+  # nothing here runs while fd 9, 8 or 7 is held.
+  _cl_dckey=""; _cl_dcval=""
+  if [ "$_cl_disp" = completed ]; then
+    rec_read "$_cl_rec" handoff || true; _cl_ho="$REC_VAL"
+    # One physical line, with no leading `||`: the die/notify census splits its
+    # own rows on `|`, so a source line STARTING with `||` arrives with an empty
+    # third field and reads as a row that says nothing.
+    done_check_read "$_cl_ho" || die "--close completed: the handoff file this lane was dispatched from (${_cl_ho:-no handoff path recorded in $_cl_rec}) cannot be read, so whether it declares a done-check is UNKNOWN. An unreadable file is not a file that waives the check, and --no-done-check cannot speak for a declaration nobody can see — that is the cheap way around this gate. Restore the file and re-run, or close the lane as cancelled/superseded"
+    if [ -n "$_cl_nodc" ]; then
+      why_ok "$_cl_nodc" || die "--close: --no-done-check needs a REASON, not a word — at least a dozen characters with a space in them, saying why this lane's objective cannot be checked by a command. Got: ${_cl_nodc:-empty}"
+      [ "$DONE_CHECK_N" = 0 ] || die "--close: $_cl_ho DECLARES a done-check, so --no-done-check cannot waive it — the waiver is for a handoff that declares none, never for a check the closing seat would rather not run. Run the check, or close as cancelled/superseded"
+      _cl_dckey=no_done_check; _cl_dcval="$_cl_nodc"
+    elif [ "$DONE_CHECK_N" = 0 ]; then
+      die "--close completed: $_cl_ho declares no done-check, so this close would assert the objective is met on the closing seat's own word about its own work — which is how an arc gets stranded one stage early with nobody told. Add ONE line to the handoff file, 'done-check: <shell command that exits 0 only when the objective is met>' (it is looked for in the file's first $DONE_CHECK_SCAN_BYTES bytes), then re-run. If the objective truly has no such command, pass --no-done-check='<why>' and the reason is recorded in $_cl_rec"
+    elif [ "$DONE_CHECK_N" != 1 ]; then
+      die "--close completed: $_cl_ho declares $DONE_CHECK_N done-check lines and this lane has one objective — refusing to choose one of them, because the one it chose would be the one nobody checked. Leave exactly one 'done-check:' line, joining the commands with && if they are all required"
+    else
+      rec_read "$_cl_rec" cwd || true; _cl_dcwd="$REC_VAL"
+      [ -n "$_cl_dcwd" ] && [ -d "$_cl_dcwd" ] || die "--close completed: the done-check runs from the directory this lane was dispatched in, and $_cl_rec records ${_cl_dcwd:-no cwd at all}, which is not a directory now — a check run from anywhere else answers about a different tree. Restore that directory, or close as cancelled/superseded"
+      _cl_dcout="$_cl_rec.donecheck.out"
+      : >|"$_cl_dcout" 2>/dev/null || die "--close completed: the done-check's output file $_cl_dcout cannot be created, so the check could not be RUN — refusing, because a check that did not run is not a check that passed"
+      printf 'handoff: running the done-check for lane %s (deadline %ss, from %s):\n  %s\n' \
+        "$_cl_lane" "$DONE_CHECK_TIMEOUT_SEC" "$_cl_dcwd" "$DONE_CHECK_CMD"
+      timed_to_file "$DONE_CHECK_TIMEOUT_SEC" "$_cl_dcout" _done_check_raw "$_cl_dcwd" "$DONE_CHECK_CMD"
+      _cl_dcrc=$?
+      if [ "$_cl_dcrc" != 0 ]; then
+        done_check_show "$_cl_dcout"
+        die "--close completed: the done-check exited $_cl_dcrc, so the objective is NOT met and the lane stays open (a status of 143 or 137 is the ${DONE_CHECK_TIMEOUT_SEC}s deadline killing it, not the work failing). The full output is in $_cl_dcout. Finish the work and re-run, or close as cancelled/superseded if this lane is being abandoned"
+      fi
+      done_check_show "$_cl_dcout"
+      printf 'handoff: the done-check passed.\n'
+      _cl_dckey=done_check; _cl_dcval="$DONE_CHECK_CMD"
+    fi
+  fi
   # The lock path derives from the record, so the record had to be read first;
   # that read is therefore UNLOCKED and is re-verified below, under the lock.
   # Test seam: the recheck closes a two-instruction race — a colliding dispatch
@@ -174,13 +590,47 @@ close_lane() {
   [ "$_cl_rec2" = "$_cl_rec" ] || die "--close: lane $_cl_lane was re-registered while this close was taking the lock (it now points at ${_cl_rec2:-nothing}, was $_cl_rec) — a re-dispatch owns it again; re-run --close only if the NEW dispatch is also to be closed"
   rec_put "$_cl_rec" disposition "$_cl_disp" || die "--close: cannot write the disposition into $_cl_rec — refusing to remove the lane from the open set without an audit line"
   rec_put "$_cl_rec" lesson "$_cl_lesson" || die "--close: the disposition landed in $_cl_rec but the lesson did not — the lane is still open; re-run --close to finish"
+  # The done-check's verdict is recorded with the disposition, so the record
+  # says WHY this lane was allowed to close: the command that passed, or the
+  # waiver's reason. A `completed` with neither key is a close that predates
+  # this gate, which is a fact a later reader needs to be able to see.
+  if [ -n "$_cl_dckey" ]; then
+    rec_put "$_cl_rec" "$_cl_dckey" "$_cl_dcval" || die "--close: the disposition and the lesson landed in $_cl_rec but the done-check line did not — the lane is still open; re-run --close to finish"
+  fi
   if [ -n "$_cl_note" ]; then
     rec_put "$_cl_rec" disposition_note "$_cl_note" || die "--close: the disposition landed in $_cl_rec but the note did not — the lane is still open; re-run --close to finish"
+  fi
+  # The lane's OWN FILE is the second record of its state, and the one the
+  # listings read — so it is written here, before the lane leaves the open set,
+  # by the same call that wrote the disposition. Left to the closing seat it is
+  # the step that gets skipped, and the lane then reads open in its own file
+  # for as long as anybody looks. Two candidates, because a lane is dispatched
+  # either from its lane file or from a handoff elsewhere while a lane file of
+  # the same name sits in lanes/; each is touched only if it SAYS it is this
+  # lane. A handoff with no front matter is not a lane file and is left alone.
+  if [ "$LANE_STATUS_LOADED" = 1 ]; then
+    rec_read "$_cl_rec" handoff || true; _cl_lf1="$REC_VAL"
+    _cl_lf2="$OPS_DIR/lanes/$_cl_lane.md"
+    [ -n "$_cl_lf1" ] && [ "$_cl_lf1" -ef "$_cl_lf2" ] && _cl_lf2=""
+    for _cl_lf in "$_cl_lf1" "$_cl_lf2"; do
+      [ -n "$_cl_lf" ] && [ -f "$_cl_lf" ] || continue
+      lane_file_read "$_cl_lf" "$CLOSE_SCAN_BYTES" || continue
+      [ "$LANE_FM_LANE" = "$_cl_lane" ] || continue
+      lane_file_set_status "$_cl_lf" "$_cl_disp — closed $(date +%Y-%m-%d) by handoff.sh --close" || die "--close: the disposition is recorded in $_cl_rec but the lane's own file $_cl_lf could not be given its status line — the lane is still open; make the file writable and re-run --close to finish, because a lane closed in its record and open in its file is listed as open work by every session that starts"
+    done
   fi
   rec_stamp "$_cl_rec" closed_at || true
   if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then rec_put "$_cl_rec" closed_by "${CLAUDE_CODE_SESSION_ID%%-*}" || true; fi
   rm -f "$_cl_link" || die "--close: the disposition is recorded in $_cl_rec but the link $_cl_link could not be removed — the lane still reads open; remove it by hand"
   printf 'closed lane %s (%s)\n  record: %s\n' "$_cl_lane" "$_cl_disp" "$_cl_rec"
+  # The lane is out of the open set, so the dispatch lock now protects nothing —
+  # and the scan below reads `claude agents --json`, bounded at
+  # AGENTS_TIMEOUT_SEC. Held across that, the bound would be time a re-dispatch
+  # of this same handoff spent queued behind a close that had already finished.
+  # Dropping it here also keeps the scan outside the claim closure, so nothing
+  # it forks has to be accounted for as work under a held claim.
+  lock_drop 9
+  close_report_seatless "$_cl_lane" "$_cl_rec"
 }
 
 POLL_SEC=60
@@ -235,6 +685,28 @@ LIVE_STATES=" running busy working active starting queued "
 DONE_STATES=" done complete completed stopped failed error "
 
 die() { printf 'handoff: %s\n' "$*" >&2; exit 2; }
+
+# The rule for which lane statuses mean CLOSED, and the one reader of a
+# lanes/*.md front matter, are SOURCED and never reimplemented here: this file
+# and inject-ops-lanes.sh both have to agree about it, and two copies of
+# "which statuses mean closed" drift in the one direction no diff can show — a
+# status one of them calls closed and the other calls open makes a lane either
+# reported twice or dropped by everybody. There is deliberately no local
+# fallback copy, because a local copy IS that drift.
+#
+# ITS ABSENCE IS REPORTED AT THE ONE PLACE THAT NEEDS IT, not refused here.
+# `--status`, `--watch`, `--retire-exec` and `dispatch` never ask which statuses
+# mean closed, and this script is legitimately COPIED away from its directory —
+# every mutant control in its own suite does exactly that, which is the house
+# rule for arming a fault (`never-arm-a-fault-in-an-auto-syncing-tree`). A
+# startup refusal made all of those copies refuse to run at all, which is a
+# whole tool broken by a dependency one of its functions has. The one consumer,
+# close_report_seatless, says in words that it could not read the lane files.
+LANE_STATUS_LOADED=0
+HANDOFF_DIR="$( exec 9>&- 8>&- 7>&-; cd "$(dirname "$0")" 2>/dev/null && pwd -P )" || HANDOFF_DIR=""
+if [ -n "$HANDOFF_DIR" ] && [ -r "$HANDOFF_DIR/lib/lane-status.sh" ]; then
+  . "$HANDOFF_DIR/lib/lane-status.sh" && LANE_STATUS_LOADED=1
+fi
 
 # Hooks don't inherit the interactive shell's PATH; node lives under nvm.
 NODE="$(command -v node 2>/dev/null || true)"
@@ -1450,7 +1922,17 @@ resolve_path() { # $1=path  $2=noun for the messages -> RESOLVED
 # class is the other part and is NOT in that list: it is closed by construction
 # and countable instead of readable:
 #
-#     grep -c '^[^#]*( exec 9>&- 8>&- 7>&-' hooks/handoff.sh   # SPAWN_SUBSHELLS=20
+#     grep -c '^[^#]*( exec 9>&- 8>&- 7>&-' hooks/handoff.sh   # SPAWN_SUBSHELLS=22
+#
+# 20 -> 22 on 2026-10-04: the prologue's resolution of this script's own
+# directory, for sourcing lib/lane-status.sh, and `_repo_root_set`, which
+# resolves a repository root to its physical path at close time. Neither can
+# run under a claim today -- the first is the prologue, before any mode is
+# chosen, and the second is reached only after close_lane has dropped fd 9 --
+# but both open with the closes anyway, because the value of this class is
+# that it is CLOSED BY CONSTRUCTION, and a substitution exempted on a
+# reviewer's reasoning about where it sits is one a later move silently
+# un-exempts.
 #
 # (anchored past a leading `#` so this very line does not count itself — a
 # self-counting probe is a probe that can never fall behind the code)
@@ -3007,6 +3489,26 @@ dispatch() {
   rec_ok_value "$FILE_ABS" || die "the handoff file's resolved path spans lines (it contains a newline or carriage return) — refusing, because a record value that spans lines can forge another field such as finished=1 and defeat the duplicate-dispatch check"
   rec_ok_value "$CWD_ABS" || die "the resolved --cwd spans lines (it contains a newline or carriage return) — refusing, for the same reason: a multi-line record value can forge a field"
 
+  # A handoff that declares no done-check can only ever be closed on the
+  # successor's own word, and the moment to say so is NOW — while the person
+  # dispatching it is still looking, and while the objective is still being
+  # written down. Said at close time it is three hours too late and lands on a
+  # seat that cannot amend the objective it was given.
+  #
+  # A WARNING and not a refusal: a handoff whose objective genuinely has no
+  # command that decides it exists (a judgement call, a conversation, a
+  # one-off), and refusing to dispatch those would make the gate something
+  # people route around. The close is where it becomes a hard question, and
+  # there it takes an explicit, recorded --no-done-check reason.
+  if done_check_read "$FILE_ABS" && [ "$DONE_CHECK_N" = 0 ]; then
+    # `>&2` stays on the SAME physical line as the format string on purpose: the
+    # die/notify census (tests/handoff.test.sh case DY) recognises a stderr site
+    # by both tokens appearing on one line, so a continuation would hide this
+    # sentence from the ledger that exists to make every operator-facing
+    # sentence a reviewed one.
+    printf 'handoff: WARNING — %s declares no done-check, so `--close %s completed` will refuse unless it is given --no-done-check=<why>. Add one line to the handoff file now: done-check: <shell command that exits 0 only when the objective is met>\n' >&2 "${FILE_ABS##*/}" "$LANE"
+  fi
+
   if [ "$DRY" = 1 ]; then
     # EVERY OPERAND GOES THROUGH shq. This line is the answer `--dry-run` exists
     # to give — "here is the command I would run" — and unquoted it could not
@@ -3130,7 +3632,7 @@ dispatch() {
   PROMPT="Read the handoff file at $FILE_ABS. It is your only context: nothing from the session that wrote it carries over.
 Objective: $OBJ
 Record progress back into that file as you go, so a stall is legible from the artifact.
-This work is lane $LANE in the operational ledger (~/.claude/ops/ — read its README.md once). Your session ending does NOT close the lane: when the objective is COMPLETE (or the work is cancelled or superseded), run: ~/dotfiles/claude/hooks/handoff.sh --close $LANE completed (or cancelled/superseded) --lesson '<what this lane taught, naming the memory you wrote — or none: <why nothing general is owed>>' with a one-line note; the --lesson is REQUIRED and the close refuses without it, because a lesson that stays in a lane gets learned again by the next session; handing off onward with handoff.sh moves the lane automatically. Anything unresolved you discover and are NOT handing forward must be written to ~/.claude/ops/lanes/ before your window ends."
+This work is lane $LANE in the operational ledger (~/.claude/ops/ — read its README.md once). Your session ending does NOT close the lane: when the objective is COMPLETE (or the work is cancelled or superseded), run: ~/dotfiles/claude/hooks/handoff.sh --close $LANE completed (or cancelled/superseded) --lesson '<what this lane taught, naming the memory you wrote — or none: <why nothing general is owed>>' with a one-line note; the --lesson is REQUIRED and the close refuses without it, because a lesson that stays in a lane gets learned again by the next session; handing off onward with handoff.sh moves the lane automatically. Closing as completed also RUNS the done-check the handoff file declares on its \`done-check:\` line, from the directory you were dispatched in, and refuses the close if it exits non-zero — so read that line first and treat it as the definition of done; if the file declares none, the close refuses until you pass --no-done-check='<why no command can decide this objective>'. Anything unresolved you discover and are NOT handing forward must be written to ~/.claude/ops/lanes/ before your window ends."
 
   # ADVISORY, not enforced: this is prose in a system prompt, and a same-user
   # session can do anything the user could. The launcher enforces ownership,
@@ -3397,7 +3899,7 @@ This work is lane $LANE in the operational ledger (~/.claude/ops/ — read its R
 }
 
 # ---------------------------------------------------------------------- main
-[ $# -gt 0 ] || die "usage: handoff.sh <handoff-file> <objective> [options] | --status | --watch <record> | --close <lane> <completed|cancelled|superseded> --lesson <memory-slug | 'none: <why>'> [note]"
+[ $# -gt 0 ] || die "usage: handoff.sh <handoff-file> <objective> [options] | --status | --watch <record> | --close <lane> <completed|cancelled|superseded> --lesson <memory-slug | 'none: <why>'> [--no-done-check='<why>'] [note]"
 
 MODE_TAKEN=""
 case "$1" in
@@ -3465,6 +3967,6 @@ esac
 # reporting a shell error instead of the actual failure. Worse, with arguments
 # left over it would have DISPATCHED a successor nobody asked for.
 [ -z "$MODE_TAKEN" ] || die "$MODE_TAKEN did not complete (it failed before it could exit; see $LOG) — refusing to fall through to a dispatch"
-[ $# -gt 0 ] || die "usage: handoff.sh <handoff-file> <objective> [options]   (also --status, --watch <record>, --watch-once <record>, --close <lane> <disposition> --lesson <memory-slug | 'none: <why>'> [note], --help; --no-retire keeps this seat alive)"
+[ $# -gt 0 ] || die "usage: handoff.sh <handoff-file> <objective> [options]   (also --status, --watch <record>, --watch-once <record>, --close <lane> <disposition> --lesson <memory-slug | 'none: <why>'> [--no-done-check='<why>'] [note], --help; --no-retire keeps this seat alive)"
 
 dispatch "$@"

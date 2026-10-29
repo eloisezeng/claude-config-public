@@ -33,5 +33,13 @@ a record was ANSI-clean by counting `033` in `od -c` output — but `od -c` prin
 fix in both cases is the same shape: run the probe against a dirty control and a clean control and
 require them to disagree.
 
+The same rule the other way round: **a command that both PRINTS an answer and signals a predicate
+must be judged by the answer.** `grep -c` prints a perfectly valid `0` and exits **1** when it matches
+nothing, so `n="$(... | grep -c PATTERN)" || n=""` collapses "none" into "unreadable" — and a gate that
+treats unreadable as a hard refusal then refuses every input that legitimately has zero of the thing,
+which is the exact population it was written to wave through. Write `|| true` and then **validate the
+output's shape** (`case "$n" in ''|*[!0-9]*) ... ;; esac`), never the status. `wc -l`, `jq`, `iconv` and
+`sed -n ... | head -1` all have a reading of their status that is not the question you asked.
+
 Related: [[absence-needs-a-probe-that-could-see-presence]], [[verify-claims-against-artifacts]],
 [[a-probe-is-part-of-the-population-it-measures]], [[worker-liveness-must-reflect-progress]].

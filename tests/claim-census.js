@@ -194,7 +194,17 @@ const BINARIES = 'date|osascript|notify-send|basename|mktemp|cat|rm|perl|awk|gre
                // the claim closure today -- lane_key is called before any lock is
                // taken -- so they add no primitive sites; listing them is what lets
                // the audit keep noticing if that ever changes.
-               + '|tr|cut|md5|md5sum';
+               + '|tr|cut|md5|md5sum'
+               // 2026-10-04, the done-check on --close: done_check_show sizes the
+               // check's captured output with `wc -c` so it can name the bytes it
+               // dropped instead of printing a tail window. Like the four above it
+               // this runs OUTSIDE the claim closure -- the done-check is deliberately
+               // executed before the dispatch lock is taken, so no user command and
+               // nothing that reports on one happens while fd 9 is held -- so it adds
+               // no primitive site; listing it is what lets the audit keep noticing
+               // if that ever changes. The audit FOUND this one, which is the list
+               // being a checked invariant rather than an assumption.
+               + '|wc';
 // Common external commands a shell script of this kind might reach for. Being
 // on this list is not permission to use one -- it is the census promising to
 // NOTICE if you do.

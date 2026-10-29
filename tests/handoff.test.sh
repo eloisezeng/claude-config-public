@@ -329,7 +329,14 @@ export CLAUDE_OPS_DIR="$tmp/ops"
 export CLAUDE_HANDOFF_STATE_DIR="$tmp/session-state"
 
 HO="$tmp/work/HANDOFF-thing.md"
-printf '# Handoff\n\nDo the thing.\n' > "$HO"
+# Every fixture handoff file DECLARES a done-check, because `--close completed`
+# now runs one and refuses without it: a fixture that declared none would make
+# every close in this suite exercise the waiver path instead of the ordinary
+# one. `true` is the cheapest check that really runs -- it is executed, from
+# the lane's recorded cwd, under the deadline -- so the LANE-* closes below
+# are the control for the gate, and the cases that need a declaration-free
+# handoff build one explicitly with NEWHO_NODC.
+printf '# Handoff\n\ndone-check: true\n\nDo the thing.\n' > "$HO"
 REC="$HO.dispatch"
 transcript="$tmp/projects/-slug/$UUID.jsonl"
 : > "$transcript"
@@ -340,7 +347,24 @@ GO() { bash "$SCRIPT" "$HO" "$1" --cwd "$tmp/work" "${@:2}"; }
 GOF() { bash "$SCRIPT" "$1" "$2" --cwd "$tmp/work" "${@:3}"; }
 NEWHO() { # $1=name -> a fresh handoff file with a record nobody else touches
   _h="$tmp/work/HANDOFF-$1.md"
+  printf '# Handoff\n\ndone-check: true\n\nDo %s.\n' "$1" > "$_h"
+  rm -f "$_h.dispatch" "$_h.dispatch".* 2>/dev/null
+  printf '%s' "$_h"
+}
+# The same, declaring NO done-check: the fixture for the gate's own refusals and
+# for the dispatch-time warning. It is a SEPARATE helper rather than a flag on
+# NEWHO so that a case reading as an ordinary close cannot silently be one of
+# these -- the declaration-free handoff has to be asked for by name.
+NEWHO_NODC() { # $1=name -> a fresh handoff file that declares no done-check
+  _h="$tmp/work/HANDOFF-$1.md"
   printf '# Handoff\n\nDo %s.\n' "$1" > "$_h"
+  rm -f "$_h.dispatch" "$_h.dispatch".* 2>/dev/null
+  printf '%s' "$_h"
+}
+# A handoff declaring an arbitrary done-check line, written verbatim.
+NEWHO_DC() { # $1=name  $2=the done-check command
+  _h="$tmp/work/HANDOFF-$1.md"
+  printf '# Handoff\n\ndone-check: %s\n\nDo %s.\n' "$2" "$1" > "$_h"
   rm -f "$_h.dispatch" "$_h.dispatch".* 2>/dev/null
   printf '%s' "$_h"
 }
@@ -6274,6 +6298,66 @@ dy_chan()   { dy_sites "$1" | cut -d'|' -f1 | tr ',' '\n' | grep -c "^$2\$" | tr
 # to list --lesson, and the successor prompt now passes it -- count unchanged by
 # those, digest moved, which is the count/digest split working as designed.
 # None of the four names a mechanism it did not see.
+#   149 -> 159, die 105 -> 114 and stderr 3 -> 4 with the 2026-10-04 done-check
+# on --close, every new sentence read before the numbers moved. Nine on the die
+# channel, all in close_lane, all of them the same refusal in different clothes
+# -- a `completed` that cannot be shown to be completed:
+#   * the handoff file cannot be READ, so whether it declares a done-check is
+#     unknown -- and it says why --no-done-check may not speak for it either,
+#     because deleting the file would otherwise be the way around the gate;
+#   * --no-done-check carries a WORD and not a reason (echoes what it got, the
+#     same shape the --lesson refusal already uses);
+#   * --no-done-check was passed while the handoff DECLARES a check -- names the
+#     waiver's actual purpose and gives the two legitimate exits;
+#   * the handoff declares NONE and no waiver was given -- prints the syntax
+#     verbatim and the byte bound the scan used, because a refusal that does not
+#     show the accepted form costs the operator a second round trip;
+#   * the handoff declares MORE THAN ONE -- says the count it saw and why
+#     choosing one is wrong (the one it chose is the one nobody checked);
+#   * the recorded cwd is not a directory -- says what the record holds and why
+#     a check run elsewhere answers about a different tree;
+#   * the output file cannot be created, so the check could not be RUN -- the
+#     distinction the whole gate rests on: a check that did not run is not a
+#     check that passed;
+#   * the check EXITED NON-ZERO -- names the status, says that 143/137 is the
+#     deadline killing it rather than the work failing, and names the file
+#     holding the full output;
+#   * the done-check line could not be written into the record -- the fifth
+#     write-ordering refusal, in the form the other four already use.
+# One on the stderr channel, in dispatch: the handoff declares no done-check, so
+# the close will refuse -- said at DISPATCH, where the person can still amend the
+# objective, with the line to add quoted. Its `>&2` is deliberately on the same
+# physical line as the format string, because this census recognises a stderr
+# site only when both tokens appear on one line.
+#   The three usage lines (close_lane's and both top-level ones) were REWORDED to
+# list --no-done-check -- count unchanged by those, digest moved, which is the
+# count/digest split working as designed. None of the ten names a mechanism it
+# did not see.
+#   159 -> 160 and notify 7 -> 8 with the 2026-10-04 seatless-lane report on
+# --close. ONE new sentence, on the notify channel, read before the numbers
+# moved: the close left N open lanes in this repository with no live seat,
+# named, up to three of them and a count of the rest. It is the channel the
+# watchdog already raises for a blocked successor, because this is the other way
+# a relay goes quiet and it has to arrive where the first one does. alert_once's
+# marker machinery is deliberately NOT used: that is a per-generation retry for
+# a repeating poll, and a close happens once.
+#   Everything else the report says goes to STDOUT and is therefore outside this
+# census by design, which is the stream contract the report states: the per-lane
+# lines are a REPORT and not a refusal, the scan runs after the lane has already
+# left the open set, and it may refuse nothing. The missing shared rule is not a
+# sentence here either, for the same reason -- an EARLIER version of this change
+# refused at startup when lib/lane-status.sh could not be read, which added a
+# stderr site and broke every mutant control in this suite, because each of them
+# runs a COPY of the hook from $tmp with no lib beside it. Case SL-10 is what
+# that cost, and what now pins the degradation.
+# The one sentence names no mechanism it did not see.
+#   160 -> 161 and die 114 -> 115 with the 2026-10-11 lane-file write on
+# --close. ONE new sentence, on the die channel, read before the numbers moved:
+# the disposition is in the record but the lane's own file could not be given
+# its status line, so the lane is still open, and what to do (make the file
+# writable, re-run). It is a refusal and not a notice because a lane closed in
+# its record and open in its file is exactly the disagreement this write
+# exists to end. Case SL-12 pins it.
 # The baseline counts, named ONCE and DERIVED at every control below. They used to
 # be restated at seven sites, and the 2026-09-17 --lesson round bumped only three:
 # the baseline loop moved die 101 -> 105 while both mutant controls went on asserting
@@ -6282,16 +6366,16 @@ dy_chan()   { dy_sites "$1" | cut -d'|' -f1 | tr ',' '\n' | grep -c "^$2\$" | tr
 # message must read the SAME counts as the baseline. That is a RELATIONSHIP, not a
 # coincidence, and arithmetic is the only form of it a half-landed bump cannot
 # survive -- control 1 adds exactly one die site, so it says so.
-DY_SITES_N=149
-DY_DIE_N=105
+DY_SITES_N=161
+DY_DIE_N=115
 assert_eq "$(dy_sites "$SCRIPT" | grep -c . | tr -d ' ')" "$DY_SITES_N" DY
-for _dyc in "die:$DY_DIE_N" alert_once:22 prelaunch_die:6 notify:7 stderr:3 msgvar:6; do
+for _dyc in "die:$DY_DIE_N" alert_once:22 prelaunch_die:6 notify:8 stderr:4 msgvar:6; do
   assert_eq "$(dy_chan "$SCRIPT" "${_dyc%%:*}")" "${_dyc##*:}" "DY ${_dyc%%:*}"
 done
 # every emitted row must carry all three fields and a real source line: a row
 # whose third field is empty or a comment would be a census counting itself.
 assert_eq "$(dy_sites "$SCRIPT" | awk -F'|' 'NF < 3 || $3 == "" || $3 ~ /^#/' | grep -c . | tr -d ' ')" "0" DY
-assert_eq "$(dy_digest "$SCRIPT")" "b9f450bbfc1091282a5af5ce6faface43b7e1736d13ac2df13cc3e783b5b0e7f" DY
+assert_eq "$(dy_digest "$SCRIPT")" "c4b6d68f955a367ebdfd152d63bbf75f632d56e8bfe73dc5d888ef8633c46d7d" DY
 # Four controls, each the surviving mutant of a review round, whole-file.
 # 1. micro-review 8's: a new degraded probe whose refusal names a mount nothing
 #    observed -- the exact shape DU, DW and DX all stayed green on.
@@ -7353,6 +7437,620 @@ LORD_CTRL='rm -f "x/dispatches/y"
 rec_put r disposition superseded
 rec_put r superseded_by z'
 ord_check "$LORD_CTRL" && { echo "FAIL[LANE-ORD]: the order check passed a region with the unlink FIRST, so it cannot see the reorder it exists for"; fail=1; }
+
+
+# ---- DONE-1. the done-check RUNS, and its exit status decides the close --------
+# The stranding this gate exists to stop: a seat finished its own slice, closed
+# the lane `completed` on a named lesson alone, and left the parent arc with a
+# quarter of its tasks unbuilt. `completed` is a claim about work, so it now has
+# to survive a command the LANE OWNER wrote -- and the refusal and the ordinary
+# path are one case here, because a gate that refuses everything and a gate that
+# refuses nothing both look green in isolation.
+live_json "running"
+DC1_FLAG="$tmp/work/dc1-objective-met"
+rm -f "$DC1_FLAG"
+DC1_HO="$(NEWHO_DC dc1 "test -f dc1-objective-met")"
+GOF "$DC1_HO" "for the done-check gate" >/dev/null 2>&1
+DC1_LANE="$(sed -n 's/^lane=//p' "$DC1_HO.dispatch" 2>/dev/null | tail -1)"
+[ -n "$DC1_LANE" ] || { echo "FAIL[DONE-1]: the dispatch registered no lane, so this case asserts nothing"; fail=1; }
+# (a) the objective is NOT met -> the close is refused and the lane survives.
+out="$(bash "$SCRIPT" --close "$DC1_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[DONE-1]: a close whose done-check FAILED still succeeded -- the gate decides nothing"; fail=1; }
+assert_contains "the done-check exited" "$out" DONE-1
+assert_contains "the objective is NOT met" "$out" DONE-1
+[ -L "$CLAUDE_OPS_DIR/dispatches/$DC1_LANE" ] || { echo "FAIL[DONE-1]: a refused close removed the lane link -- the lane must survive every refusal"; fail=1; }
+grep -q '^disposition=' "$DC1_HO.dispatch" && { echo "FAIL[DONE-1]: a refused close wrote a disposition into the record"; fail=1; }
+# ...and the command's OUTPUT is printed, not just its status. A refusal that
+# does not show what the check said costs the operator a second round trip, and
+# a `tail`-shaped report would have evicted it.
+DC1_HO2="$(NEWHO_DC dc1b 'printf "the-widget-is-missing\n"; exit 3')"
+GOF "$DC1_HO2" "for the output half" >/dev/null 2>&1
+DC1_LANE2="$(sed -n 's/^lane=//p' "$DC1_HO2.dispatch" 2>/dev/null | tail -1)"
+out="$(bash "$SCRIPT" --close "$DC1_LANE2" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[DONE-1]: a check exiting 3 did not refuse the close"; fail=1; }
+assert_contains "the-widget-is-missing" "$out" DONE-1
+assert_contains "done-check output" "$out" DONE-1
+assert_contains "the done-check exited 3" "$out" DONE-1
+bash "$SCRIPT" --close "$DC1_LANE2" cancelled --lesson='none: a fixture lane, nothing general owed' "test cleanup" >/dev/null 2>&1
+# (b) THE CONTROL. The same lane, the same command, the objective now met: the
+# close succeeds, the record says which command passed, and the link is gone.
+: > "$DC1_FLAG"
+out="$(bash "$SCRIPT" --close "$DC1_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' "met now" 2>&1)"; code=$?
+assert_eq "$code" "0" DONE-1
+assert_contains "the done-check passed" "$out" DONE-1
+assert_rec "$DC1_HO.dispatch" "disposition=completed" DONE-1
+assert_rec "$DC1_HO.dispatch" "done_check=test -f dc1-objective-met" DONE-1
+[ ! -L "$CLAUDE_OPS_DIR/dispatches/$DC1_LANE" ] || { echo "FAIL[DONE-1]: the control close left the lane link behind"; fail=1; }
+
+# ---- DONE-2. the check runs from the LANE'S recorded cwd ------------------------
+# A check run from anywhere else answers about a different tree, which is the
+# whole failure mode in miniature: a green answer about the wrong directory.
+# `pwd -P` is read back out of the check's own captured output, so this asserts
+# the directory the command SAW rather than the one the code meant to pass.
+live_json "running"
+DC2_HO="$(NEWHO_DC dc2 'pwd -P')"
+GOF "$DC2_HO" "for the cwd half" >/dev/null 2>&1
+DC2_LANE="$(sed -n 's/^lane=//p' "$DC2_HO.dispatch" 2>/dev/null | tail -1)"
+DC2_CWD="$(sed -n 's/^cwd=//p' "$DC2_HO.dispatch" 2>/dev/null | tail -1)"
+[ -n "$DC2_CWD" ] || { echo "FAIL[DONE-2]: the record carries no cwd=, so there is nothing to compare against"; fail=1; }
+out="$(bash "$SCRIPT" --close "$DC2_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+assert_eq "$code" "0" DONE-2
+assert_eq "$(head -1 "$DC2_HO.dispatch.donecheck.out" 2>/dev/null)" "$DC2_CWD" DONE-2
+# The control: the hook's own cwd is NOT the lane's, so the assertion above
+# could not have passed by accident of where the suite happens to run.
+[ "$(pwd -P)" != "$DC2_CWD" ] || { echo "FAIL[DONE-2]: the suite is running IN the lane's cwd, so 'ran from the recorded cwd' and 'ran from wherever handoff.sh was invoked' are the same claim here and this case pins neither"; fail=1; }
+
+# ---- DONE-3. the DEADLINE is real, and a killed check is not a passed one ------
+# A wall-clock assertion would measure the machine. The signal status is the
+# artifact instead: `sleep 30` exits 0 when it is allowed to finish, so a 143
+# (SIGTERM) or 137 (SIGKILL) is proof that the deadline killed it rather than
+# that the command failed on its own.
+live_json "running"
+DC3_HO="$(NEWHO_DC dc3 'sleep 30')"
+GOF "$DC3_HO" "for the deadline" >/dev/null 2>&1
+DC3_LANE="$(sed -n 's/^lane=//p' "$DC3_HO.dispatch" 2>/dev/null | tail -1)"
+out="$(CLAUDE_HANDOFF_DONE_CHECK_TIMEOUT=1 bash "$SCRIPT" --close "$DC3_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[DONE-3]: a done-check killed on its deadline closed the lane anyway"; fail=1; }
+case "$out" in
+  *"the done-check exited 143"*|*"the done-check exited 137"*) ;;
+  *) echo "FAIL[DONE-3]: expected the refusal to report a signal status (143/137) from the deadline kill -- got: $out"; fail=1 ;;
+esac
+assert_contains "deadline killing it" "$out" DONE-3
+[ -L "$CLAUDE_OPS_DIR/dispatches/$DC3_LANE" ] || { echo "FAIL[DONE-3]: the lane was closed by a check that never finished"; fail=1; }
+bash "$SCRIPT" --close "$DC3_LANE" cancelled --lesson='none: a fixture lane, nothing general owed' "test cleanup" >/dev/null 2>&1
+
+# ---- DONE-4. no declaration refuses, and the WAIVER is the only way through ----
+live_json "running"
+DC4_HO="$(NEWHO_NODC dc4)"
+GOF "$DC4_HO" "for the no-declaration gate" >/dev/null 2>&1
+DC4_LANE="$(sed -n 's/^lane=//p' "$DC4_HO.dispatch" 2>/dev/null | tail -1)"
+out="$(bash "$SCRIPT" --close "$DC4_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[DONE-4]: a handoff declaring no done-check closed as completed on the seat's own word"; fail=1; }
+assert_contains "declares no done-check" "$out" DONE-4
+assert_contains "done-check: <shell command" "$out" DONE-4
+[ -L "$CLAUDE_OPS_DIR/dispatches/$DC4_LANE" ] || { echo "FAIL[DONE-4]: the refused lane's link was removed"; fail=1; }
+# a waiver that is a WORD and not a reason is refused too -- otherwise the flag
+# is a free pass with an extra keystroke, which is what `none` alone was.
+for dc4_bad in "" "n/a" "skip" "later" "nocheck"; do
+  out="$(bash "$SCRIPT" --close "$DC4_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' --no-done-check="$dc4_bad" 2>&1)"; code=$?
+  [ "$code" != "0" ] || { echo "FAIL[DONE-4]: --no-done-check='$dc4_bad' was accepted as a reason"; fail=1; }
+done
+# ...and a real reason closes it, and is RECORDED, so a later reader can see
+# that this lane closed on a judgement rather than on a check.
+out="$(bash "$SCRIPT" --close "$DC4_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' --no-done-check='the objective is a judgement call with no command that decides it' "waived" 2>&1)"; code=$?
+assert_eq "$code" "0" DONE-4
+assert_rec "$DC4_HO.dispatch" "disposition=completed" DONE-4
+assert_rec "$DC4_HO.dispatch" "no_done_check=the objective is a judgement call with no command that decides it" DONE-4
+[ ! -L "$CLAUDE_OPS_DIR/dispatches/$DC4_LANE" ] || { echo "FAIL[DONE-4]: the waived close left the lane link behind"; fail=1; }
+
+# ---- DONE-5. cancelled and superseded are UNCHANGED ---------------------------
+# They already say the work did not finish, so a check of whether it finished
+# has no question to answer -- and a gate that quietly spread to them would make
+# an abandoned lane unclosable, which is how a ledger stops being used.
+for dc5_disp in cancelled superseded; do
+  live_json "running"
+  DC5_HO="$(NEWHO_NODC "dc5$dc5_disp")"
+  GOF "$DC5_HO" "for the unchanged dispositions" >/dev/null 2>&1
+  DC5_LANE="$(sed -n 's/^lane=//p' "$DC5_HO.dispatch" 2>/dev/null | tail -1)"
+  out="$(bash "$SCRIPT" --close "$DC5_LANE" "$dc5_disp" --lesson='none: a fixture lane, nothing general owed' 2>&1)"; code=$?
+  assert_eq "$code" "0" "DONE-5 $dc5_disp"
+  assert_rec "$DC5_HO.dispatch" "disposition=$dc5_disp" "DONE-5 $dc5_disp"
+  assert_missing "done-check" "$out" "DONE-5 $dc5_disp"
+done
+
+# ---- DONE-6. the waiver cannot speak for a check that EXISTS -------------------
+# The one bypass that would retire the whole gate: a seat that does not want to
+# run the check passes the waiver instead. The waiver is for a handoff that
+# declares none, never for a declaration the closing seat would rather skip.
+live_json "running"
+DC6_HO="$(NEWHO_DC dc6 'false')"
+GOF "$DC6_HO" "for the waiver bypass" >/dev/null 2>&1
+DC6_LANE="$(sed -n 's/^lane=//p' "$DC6_HO.dispatch" 2>/dev/null | tail -1)"
+out="$(bash "$SCRIPT" --close "$DC6_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' --no-done-check='I would rather not run the suite right now' 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[DONE-6]: --no-done-check waived a done-check the handoff file DECLARES"; fail=1; }
+assert_contains "cannot waive it" "$out" DONE-6
+[ -L "$CLAUDE_OPS_DIR/dispatches/$DC6_LANE" ] || { echo "FAIL[DONE-6]: the refused lane's link was removed"; fail=1; }
+bash "$SCRIPT" --close "$DC6_LANE" cancelled --lesson='none: a fixture lane, nothing general owed' "test cleanup" >/dev/null 2>&1
+
+# ---- DONE-7. TWO declarations refuse rather than picking one -------------------
+# Picking one would pick the one nobody checked.
+live_json "running"
+DC7_HO="$(NEWHO_DC dc7 'true')"
+printf 'done-check: false\n' >> "$DC7_HO"
+GOF "$DC7_HO" "for the ambiguous declaration" >/dev/null 2>&1
+DC7_LANE="$(sed -n 's/^lane=//p' "$DC7_HO.dispatch" 2>/dev/null | tail -1)"
+out="$(bash "$SCRIPT" --close "$DC7_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[DONE-7]: two done-check lines were accepted, so one of them ran and the other was never checked"; fail=1; }
+assert_contains "declares 2 done-check lines" "$out" DONE-7
+[ -L "$CLAUDE_OPS_DIR/dispatches/$DC7_LANE" ] || { echo "FAIL[DONE-7]: the refused lane's link was removed"; fail=1; }
+bash "$SCRIPT" --close "$DC7_LANE" cancelled --lesson='none: a fixture lane, nothing general owed' "test cleanup" >/dev/null 2>&1
+
+# ---- DONE-8. an UNREADABLE handoff file is not a waiver ------------------------
+# `absence-needs-a-probe-that-could-see-presence`: with the file gone, "it
+# declares no done-check" is not an observation. And the waiver may not speak
+# for it either -- that would make deleting the handoff file the cheap way
+# around the gate. The only routes out are restoring the file or cancelled /
+# superseded, and this case pins BOTH halves of that.
+live_json "running"
+DC8_HO="$(NEWHO_DC dc8 'true')"
+GOF "$DC8_HO" "for the unreadable handoff" >/dev/null 2>&1
+DC8_LANE="$(sed -n 's/^lane=//p' "$DC8_HO.dispatch" 2>/dev/null | tail -1)"
+mv "$DC8_HO" "$DC8_HO.hidden"
+out="$(bash "$SCRIPT" --close "$DC8_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[DONE-8]: a close whose handoff file is gone was treated as a handoff that declares nothing"; fail=1; }
+assert_contains "is UNKNOWN" "$out" DONE-8
+out="$(bash "$SCRIPT" --close "$DC8_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' --no-done-check='the handoff file is gone and I cannot restore it' 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[DONE-8]: --no-done-check spoke for a declaration nobody could see -- deleting the handoff file is then the way around the gate"; fail=1; }
+[ -L "$CLAUDE_OPS_DIR/dispatches/$DC8_LANE" ] || { echo "FAIL[DONE-8]: the refused lane's link was removed"; fail=1; }
+# the control: restore the file and the same close succeeds, so the refusals
+# above are about the missing file and not about this lane.
+mv "$DC8_HO.hidden" "$DC8_HO"
+out="$(bash "$SCRIPT" --close "$DC8_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' "restored" 2>&1)"; code=$?
+assert_eq "$code" "0" DONE-8
+
+# ---- DONE-9. the dispatch path WARNS when the handoff declares no done-check ---
+# Said at close time this is three hours too late and lands on a seat that
+# cannot amend the objective it was given. Said at dispatch it reaches the
+# person who is still writing the objective down.
+live_json "running"
+DC9_HO="$(NEWHO_NODC dc9)"
+out="$(GOF "$DC9_HO" "for the dispatch warning" 2>&1)"; code=$?
+assert_eq "$code" "0" DONE-9
+assert_contains "WARNING" "$out" DONE-9
+assert_contains "declares no done-check" "$out" DONE-9
+assert_contains "done-check: <shell command" "$out" DONE-9
+DC9_LANE="$(sed -n 's/^lane=//p' "$DC9_HO.dispatch" 2>/dev/null | tail -1)"
+bash "$SCRIPT" --close "$DC9_LANE" cancelled --lesson='none: a fixture lane, nothing general owed' "test cleanup" >/dev/null 2>&1
+# the control: a handoff that DOES declare one is dispatched without the warning,
+# or the warning is noise that says nothing about any particular handoff.
+live_json "running"
+DC9_HO2="$(NEWHO_DC dc9b 'true')"
+out="$(GOF "$DC9_HO2" "for the quiet control" 2>&1)"; code=$?
+assert_eq "$code" "0" DONE-9
+assert_missing "WARNING" "$out" DONE-9
+DC9_LANE2="$(sed -n 's/^lane=//p' "$DC9_HO2.dispatch" 2>/dev/null | tail -1)"
+bash "$SCRIPT" --close "$DC9_LANE2" cancelled --lesson='none: a fixture lane, nothing general owed' "test cleanup" >/dev/null 2>&1
+
+# ---- DONE-10. the two pass/fail RULES are pure functions, swept ----------------
+# A prose rule in a refusal message invites one wordsmithing finding per review
+# round; a predicate can be swept. Both ends of each are asserted, because a
+# rule that cannot fail and a rule that cannot pass are the same defect seen
+# from two sides (`a-guard-must-be-satisfiable-not-just-failable`).
+DC10_SH="$tmp/dc10.sh"
+{
+  sed -n '/^why_ok() {$/,/^}$/p' "$SCRIPT"
+  sed -n '/^done_check_read() {$/,/^}$/p' "$SCRIPT"
+  printf 'DONE_CHECK_SCAN_BYTES=65536\n'
+  printf 'case "$1" in\n'
+  printf '  why) why_ok "$2" && echo ok || echo no ;;\n'
+  printf '  read) done_check_read "$2" && printf "%%s|%%s\\\\n" "$DONE_CHECK_N" "$DONE_CHECK_CMD" || echo unreadable ;;\n'
+  printf 'esac\n'
+} > "$DC10_SH"
+grep -q 'why_ok()' "$DC10_SH" || { echo "FAIL[DONE-10]: why_ok could not be lifted out of the hook, so this case tests nothing"; fail=1; }
+grep -q 'done_check_read()' "$DC10_SH" || { echo "FAIL[DONE-10]: done_check_read could not be lifted out of the hook, so this case tests nothing"; fail=1; }
+# why_ok: twelve bytes AND a space. Both conditions are swept at their boundary.
+assert_eq "$(bash "$DC10_SH" why '')" "no" DONE-10
+assert_eq "$(bash "$DC10_SH" why 'nocheckhere0')" "no" DONE-10
+assert_eq "$(bash "$DC10_SH" why 'a b')" "no" DONE-10
+assert_eq "$(bash "$DC10_SH" why 'no check he')" "no" DONE-10
+assert_eq "$(bash "$DC10_SH" why 'no check her')" "ok" DONE-10
+assert_eq "$(bash "$DC10_SH" why 'the objective is a judgement call')" "ok" DONE-10
+# done_check_read: counting, the blank-value form, and the unreadable file.
+DC10_D="$tmp/dc10files"; mkdir -p "$DC10_D"
+printf '# h\n\nbody\n' > "$DC10_D/none.md"
+assert_eq "$(bash "$DC10_SH" read "$DC10_D/none.md")" "0|" DONE-10
+printf '# h\n\ndone-check: make test\n' > "$DC10_D/one.md"
+assert_eq "$(bash "$DC10_SH" read "$DC10_D/one.md")" "1|make test" DONE-10
+printf '# h\n\ndone-check:   make test && npm run lint\n' > "$DC10_D/pipe.md"
+assert_eq "$(bash "$DC10_SH" read "$DC10_D/pipe.md")" "1|make test && npm run lint" DONE-10
+printf '# h\n\ndone-check: a\ndone-check: b\n' > "$DC10_D/two.md"
+assert_eq "$(bash "$DC10_SH" read "$DC10_D/two.md")" "2|a" DONE-10
+# a blank value declares nothing to run, so it is NOT a declaration -- the
+# no-declaration refusal prints the syntax, which is what the operator needs.
+printf '# h\n\ndone-check:\ndone-check:   \n' > "$DC10_D/blank.md"
+assert_eq "$(bash "$DC10_SH" read "$DC10_D/blank.md")" "0|" DONE-10
+# an indented line is not a declaration either: the body of a handoff file
+# quotes commands all the time, and a quoted example must not become the gate.
+printf '# h\n\n    done-check: rm -rf /\n' > "$DC10_D/indented.md"
+assert_eq "$(bash "$DC10_SH" read "$DC10_D/indented.md")" "0|" DONE-10
+# a CRLF file: the trailing carriage return would otherwise reach eval AND the
+# record, where a control character in a value is its own problem.
+printf '# h\r\n\r\ndone-check: make test\r\n' > "$DC10_D/crlf.md"
+assert_eq "$(bash "$DC10_SH" read "$DC10_D/crlf.md")" "1|make test" DONE-10
+assert_eq "$(bash "$DC10_SH" read "$DC10_D/absent.md")" "unreadable" DONE-10
+# the SCAN IS BOUNDED, pinned at its boundary from both sides: the declaration's
+# first non-blank byte lands at exactly the bound on the included side and one
+# past it on the excluded side, so the surviving set of bounds is {the bound}.
+# A far-out marker alone would pass for any bound at all.
+dc10_pad() { # $1=file  $2=exact byte size the content must reach
+  _p=$(( $2 - $(wc -c < "$1") - 4 ))
+  { printf 'p: '; head -c "$_p" /dev/zero | tr '\0' 'x'; printf '\n'; } >> "$1"
+}
+DC10_IN="$DC10_D/at-the-bound.md"
+printf '# h\n' > "$DC10_IN"
+dc10_pad "$DC10_IN" $(( 65536 - 13 ))
+printf 'done-check: X\n' >> "$DC10_IN"
+assert_eq "$(head -c 65536 "$DC10_IN" | tail -c 13)" "done-check: X" DONE-10
+assert_eq "$(bash "$DC10_SH" read "$DC10_IN")" "1|X" DONE-10
+DC10_OUT="$DC10_D/past-the-bound.md"
+printf '# h\n' > "$DC10_OUT"
+dc10_pad "$DC10_OUT" $(( 65536 - 12 ))
+printf 'done-check: X\n' >> "$DC10_OUT"
+assert_eq "$(head -c 65536 "$DC10_OUT" | tail -c 12)" "done-check: " DONE-10
+assert_eq "$(bash "$DC10_SH" read "$DC10_OUT")" "0|" DONE-10
+# MARKDOWN code formatting around the command is stripped, and it has to be:
+# a handoff file IS markdown, so writing the command in backticks is the likely
+# mistake rather than the unlikely one -- and it is the worst one available,
+# because `eval` reads a backtick as command substitution. The check RUNS, its
+# stdout is then executed as a command, and the close refuses with 127 naming
+# neither the check nor the quoting. Measured on a real lane whose check passed
+# all five of its own assertions in the same breath as the close refused it.
+printf '# h\n\ndone-check: `make test`\n' > "$DC10_D/fenced.md"
+assert_eq "$(bash "$DC10_SH" read "$DC10_D/fenced.md")" "1|make test" DONE-10
+# The negative control: UNSTRIPPED, that exact value makes eval exit 127, which
+# is what pins the stripping to the failure instead of to a preference. Without
+# this the case above passes for a parser that merely happens to drop backticks.
+dc10_eval() { ( eval "$1" ) >/dev/null 2>&1; echo "$?"; }
+assert_eq "$(dc10_eval '`bash -c "echo PASS"`')" "127" DONE-10
+assert_eq "$(dc10_eval 'bash -c "echo PASS"')" "0" DONE-10
+# Only a MATCHED outermost pair goes. An unmatched backtick is left exactly
+# alone, because guessing at it rewrites a command nobody can predict, and a
+# doubled pair loses exactly one layer -- which is the inner-backtick property
+# asserted without this test's own quoting being able to stand in for it.
+printf '# h\n\ndone-check: `make test\n' > "$DC10_D/halfopen.md"
+dc10_want='1|`make test'
+assert_eq "$(bash "$DC10_SH" read "$DC10_D/halfopen.md")" "$dc10_want" DONE-10
+printf '# h\n\ndone-check: make test`\n' > "$DC10_D/halfshut.md"
+dc10_want='1|make test`'
+assert_eq "$(bash "$DC10_SH" read "$DC10_D/halfshut.md")" "$dc10_want" DONE-10
+printf '# h\n\ndone-check: ``make test``\n' > "$DC10_D/doubled.md"
+dc10_want='1|`make test`'
+assert_eq "$(bash "$DC10_SH" read "$DC10_D/doubled.md")" "$dc10_want" DONE-10
+
+
+# ---- SL. a close that leaves open work SEATLESS says so ----------------------
+# The other half of the stranding. The seat that closed its own slice was right
+# that its slice was done; what nobody said was that the PARENT lane was still
+# open in lanes/ with no seat and no successor. A close is the one moment
+# somebody is looking at this ledger, so it is where that gets said -- in the
+# close's own output, by name, and on the alert channel the watchdog already
+# uses for a blocked successor.
+#
+# The repositories here are made with `mkdir .git`, not `git init`: the hook
+# walks for `.git` and never runs git, so a directory is a repository as far as
+# this code is concerned and the fixture needs no git at all. SL-2's worktree
+# is the matching trick -- a `.git` FILE with a `gitdir:` line.
+SL_A="$tmp/repoA"; SL_B="$tmp/repoB"
+mkdir -p "$SL_A/.git" "$SL_A/sub" "$SL_B/.git" "$SL_B/sub"
+# A lane FILE: the shape the stranded parent lane had. $1=slug $2=status $3=pointer
+SL_LANEFILE() {
+  printf -- '---\nlane: %s\nstatus: %s\npointer: %s\nobjective: %s\n---\n\nbody\n' \
+    "$1" "$2" "$3" "the $1 objective" > "$CLAUDE_OPS_DIR/lanes/$1.md"
+}
+mkdir -p "$CLAUDE_OPS_DIR/lanes"
+# $1=name $2=cwd -> dispatches a handoff IN that cwd and echoes its lane key
+SL_DISPATCH() {
+  _slh="$2/HANDOFF-$1.md"
+  printf '# Handoff\n\ndone-check: true\n\nDo %s.\n' "$1" > "$_slh"
+  rm -f "$_slh.dispatch" "$_slh.dispatch".* 2>/dev/null
+  live_json "running" "$2"
+  bash "$SCRIPT" "$_slh" "lane $1" --cwd "$2" >/dev/null 2>&1
+  sed -n 's/^lane=//p' "$_slh.dispatch" 2>/dev/null | tail -1
+}
+
+# ---- SL-1. an open lane FILE in the same repository is named, and alerted ----
+SL_LANEFILE sl-parent-open open "$SL_A/sub/progress.md"
+SL_LANEFILE sl-elsewhere-open open "$SL_B/sub/progress.md"
+SL_LANEFILE sl-parent-done completed "$SL_A/sub/progress.md"
+SL1_LANE="$(SL_DISPATCH sl1 "$SL_A/sub")"
+[ -n "$SL1_LANE" ] || { echo "FAIL[SL-1]: the fixture dispatch registered no lane, so this case asserts nothing"; fail=1; }
+live_json "running" "$SL_A/sub"
+out="$(bash "$SCRIPT" --close "$SL1_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+assert_eq "$code" "0" SL-1
+assert_contains "have NOBODY on them" "$out" SL-1
+assert_contains "sl-parent-open" "$out" SL-1
+assert_contains "no session was ever dispatched for it" "$out" SL-1
+# ...and the ALERT goes out on the watchdog's own channel. CLAUDE_HANDOFF_NOTIFY_DEBUG
+# makes notify() print what it delivered, so this is the delivery and not a
+# guess that one was attempted.
+assert_contains "NOTIFY: closed $SL1_LANE" "$out" SL-1
+assert_contains "have no live seat" "$out" SL-1
+# THE TWO CONTROLS, which are what make the assertions above about this repository
+# and this status rather than about "every lane file on disk":
+assert_missing "sl-elsewhere-open" "$out" SL-1
+assert_missing "sl-parent-done" "$out" SL-1
+
+# ---- SL-2. a closing seat in a WORKTREE is placed in its MAIN repository -----
+# This is the case the stranding actually happened in, and the reason the hook
+# walks `.git` by hand instead of asking for a toplevel: the closing seat was in
+# a worktree, so a worktree-local answer puts it and the lane it stranded in two
+# different "repositories" and the scan finds nothing.
+SL_W="$tmp/repoW"; SL_WT="$tmp/repoW-wt"
+mkdir -p "$SL_W/.git/worktrees/w1" "$SL_WT"
+printf 'gitdir: %s\n' "$SL_W/.git/worktrees/w1" > "$SL_WT/.git"
+SL_LANEFILE sl-main-open open "$SL_W/docs/plan.md"
+SL_LANEFILE sl-wt-open open "$SL_WT/docs/plan.md"
+SL2_LANE="$(SL_DISPATCH sl2 "$SL_WT")"
+live_json "running" "$SL_WT"
+out="$(bash "$SCRIPT" --close "$SL2_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+assert_eq "$code" "0" SL-2
+# both directions: a lane pointing into the MAIN repository and one pointing
+# into the worktree are the same repository, and the close names both.
+assert_contains "sl-main-open" "$out" SL-2
+assert_contains "sl-wt-open" "$out" SL-2
+# the control: the unrelated repository is still out
+assert_missing "sl-elsewhere-open" "$out" SL-2
+rm -f "$CLAUDE_OPS_DIR/lanes/sl-main-open.md" "$CLAUDE_OPS_DIR/lanes/sl-wt-open.md"
+
+# ---- SL-3. a dispatched lane whose SEAT is not live is named; a live one is not
+SL3_DEAD="$(SL_DISPATCH sl3dead "$SL_A/sub")"
+SL3_LIVE="$(SL_DISPATCH sl3live "$SL_A/sub")"
+SL3_SUBJ="$(SL_DISPATCH sl3subj "$SL_A/sub")"
+# Every fixture dispatch verifies against the one seat the shim lists, so the
+# three records all name it. Re-pointing ONE of them at a session the list does
+# not carry is what makes "its seat is gone" reachable -- rec_put appends and
+# the last write wins, which is the record's own rule.
+printf 'session_id=deadbeef\n' >> "$SL_A/sub/HANDOFF-sl3dead.md.dispatch"
+live_json "running" "$SL_A/sub"
+out="$(bash "$SCRIPT" --close "$SL3_SUBJ" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+assert_eq "$code" "0" SL-3
+assert_contains "$SL3_DEAD" "$out" SL-3
+assert_contains "seat deadbeef is not running" "$out" SL-3
+assert_missing "$SL3_LIVE" "$out" SL-3
+
+# ---- SL-4. an unreadable session list is UNKNOWN, never "no live seat" -------
+# The rule read_agents already enforces for the watchdog, in the one place a new
+# reader could have quietly broken it: a close that cannot see the session list
+# must not report every dispatched lane as abandoned OR as attended. It says it
+# could not tell.
+: > "$SHIM_AGENTS_FAIL"
+# the done-check itself needs no session list, so it still runs and passes here:
+# what is unreadable is only the thing the REPORT depends on.
+out="$(bash "$SCRIPT" --close "$SL3_LIVE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+rm -f "$SHIM_AGENTS_FAIL"
+assert_eq "$code" "0" SL-4
+assert_contains "the session list could not be read" "$out" SL-4
+assert_contains "UNKNOWN" "$out" SL-4
+assert_missing "is not running" "$out" SL-4
+
+# ---- SL-5. a lane file with NO POINTER is COUNTED, never silently dropped ----
+# Half the lane files on this machine name no pointer (45 of 95, measured
+# 2026-10-04), so the size of what this scan could not place is the one thing
+# that makes the rest of its answer readable.
+printf -- '---\nlane: sl-no-pointer\nstatus: open\nobjective: nowhere in particular\n---\n' \
+  > "$CLAUDE_OPS_DIR/lanes/sl-no-pointer.md"
+live_json "running" "$SL_A/sub"
+out="$(bash "$SCRIPT" --close "$SL3_DEAD" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+assert_eq "$code" "0" SL-5
+assert_contains "name no pointer" "$out" SL-5
+# the count is a NUMBER, not the word "some": one unplaceable lane file exists
+case "$out" in
+  *"and 1 other open lane file(s) name no pointer"*) ;;
+  *) echo "FAIL[SL-5]: the unplaceable lanes were not reported as a count -- got: $out"; fail=1 ;;
+esac
+assert_missing "sl-no-pointer [" "$out" SL-5
+rm -f "$CLAUDE_OPS_DIR/lanes/sl-no-pointer.md"
+
+# ---- SL-6. the quiet control: no false alarm when nobody is stranded ---------
+# A reporter that fires on every close is a reporter nobody reads, and it would
+# be green on every assertion above.
+rm -f "$CLAUDE_OPS_DIR/lanes/sl-parent-open.md" "$CLAUDE_OPS_DIR/lanes/sl-parent-done.md" \
+      "$CLAUDE_OPS_DIR/lanes/sl-elsewhere-open.md"
+SL6_LANE="$(SL_DISPATCH sl6 "$SL_B/sub")"
+live_json "running" "$SL_B/sub"
+out="$(bash "$SCRIPT" --close "$SL6_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+assert_eq "$code" "0" SL-6
+assert_contains "has a live seat" "$out" SL-6
+assert_missing "have NOBODY on them" "$out" SL-6
+assert_missing "NOTIFY: closed" "$out" SL-6
+
+# ---- SL-7. a lane FILE and its own DISPATCH are one lane, not two ------------
+# A lane file's `lane:` is the hand-written slug and its dispatch key is that
+# slug plus `-<8 hex>`, because lane_key hashes the resolved handoff path. Read
+# as two rows, every dispatched lane that also has a lane file would be reported
+# as seatless beside its own live seat -- which is the false alarm that teaches
+# people to ignore the report.
+SL7_LANE="$(SL_DISPATCH sl7 "$SL_A/sub")"
+SL_LANEFILE "${SL7_LANE%-*}" open "$SL_A/sub/progress.md"
+SL7_SUBJ="$(SL_DISPATCH sl7subj "$SL_A/sub")"
+live_json "running" "$SL_A/sub"
+out="$(bash "$SCRIPT" --close "$SL7_SUBJ" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+assert_eq "$code" "0" SL-7
+assert_missing "${SL7_LANE%-*} [open]" "$out" SL-7
+assert_missing "have NOBODY on them" "$out" SL-7
+# the control: the SAME lane file, with a slug that is NOT this dispatch's, is
+# reported -- so the suppression above is the twin-matching rule and not the
+# scan having stopped looking at lane files.
+rm -f "$CLAUDE_OPS_DIR/lanes/${SL7_LANE%-*}.md"
+SL_LANEFILE sl-unrelated-slug open "$SL_A/sub/progress.md"
+SL7_SUBJ2="$(SL_DISPATCH sl7subj2 "$SL_A/sub")"
+live_json "running" "$SL_A/sub"
+out="$(bash "$SCRIPT" --close "$SL7_SUBJ2" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+assert_contains "sl-unrelated-slug" "$out" SL-7
+rm -f "$CLAUDE_OPS_DIR/lanes/sl-unrelated-slug.md"
+
+# ---- SL-8. the scan can REFUSE NOTHING: a close is already done -------------
+# Everything in the report runs after the lane has left the open set, so a
+# failure in it may not fail the close. The cwd here is in no repository at all,
+# which is the one input that makes the placement itself impossible.
+SL8_HO="$tmp/nonrepo/HANDOFF-sl8.md"
+mkdir -p "$tmp/nonrepo"
+printf '# Handoff\n\ndone-check: true\n\nDo sl8.\n' > "$SL8_HO"
+live_json "running" "$tmp/nonrepo"
+bash "$SCRIPT" "$SL8_HO" "lane sl8" --cwd "$tmp/nonrepo" >/dev/null 2>&1
+SL8_LANE="$(sed -n 's/^lane=//p' "$SL8_HO.dispatch" 2>/dev/null | tail -1)"
+out="$(bash "$SCRIPT" --close "$SL8_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+assert_eq "$code" "0" SL-8
+assert_contains "in no git repository" "$out" SL-8
+assert_rec "$SL8_HO.dispatch" "disposition=completed" SL-8
+[ ! -L "$CLAUDE_OPS_DIR/dispatches/$SL8_LANE" ] || { echo "FAIL[SL-8]: the close did not finish although the report could not place its repository"; fail=1; }
+
+# ---- SL-9. the shared closed-status rule, swept, and its ONE home ------------
+# `lane_status_is_closed` is the value hooks/handoff.sh and inject-ops-lanes.sh
+# must agree about, so it lives in one file and is swept here. The sweep is both
+# directions at once: the six closed spellings measured on this machine, and the
+# statuses that must stay OPEN -- including one nobody has seen before, because
+# an unrecognised status has to surface as work in front of a human.
+SL9_LIB="$(cd "$(dirname "$SCRIPT")" && pwd -P)/lib/lane-status.sh"
+[ -r "$SL9_LIB" ] || { echo "FAIL[SL-9]: no shared lane-status rule at $SL9_LIB"; fail=1; }
+sl9() { ( . "$SL9_LIB"; lane_status_is_closed "$1" && echo closed || echo open ); }
+for sl9c in "closed" "closed-completed" "completed" "cancelled" "canceled" "superseded" \
+            "abandoned" "completed — PR #67 merged as 6891e31" "closed — completed 2026-09-11" \
+            "completed (2026-09-24, PR #64 merged; pinned at 320/360)"; do
+  assert_eq "$(sl9 "$sl9c")" "closed" "SL-9 [$sl9c]"
+done
+for sl9o in "open" "" "blocked-on-user" "in-progress" "needs-review" "completing" \
+            "closedish" "open — waiting on a decision"; do
+  assert_eq "$(sl9 "$sl9o")" "open" "SL-9 [$sl9o]"
+done
+# ...and it is written down ONCE. A second copy of the token list is the drift
+# this file exists to remove, and the only way to notice it is to count.
+# --exclude the suites: this file CONTAINS the pattern it searches for, so
+# without it the census counts itself and reads 2 for a rule written once --
+# `a-probe-is-part-of-the-population-it-measures`.
+SL9_N="$(grep -rl 'LANE_CLOSED_FIRST_TOKENS=' "$(cd "$(dirname "$SCRIPT")/.." && pwd -P)" \
+         --include='*.sh' --exclude='*.test.sh' 2>/dev/null | grep -c . | tr -d ' ')"
+assert_eq "$SL9_N" "1" SL-9
+
+
+# ---- SL-10. a COPY of this hook, away from its lib, still works -------------
+# The shared closed-status rule lives in one file beside this script, and three
+# cases in this very suite run a COPY of the hook from $tmp -- which is the
+# house rule for arming a fault, not an accident. A startup refusal on the
+# missing lib therefore broke `--watch`, `--status` and `dispatch` in every one
+# of them: a whole tool refusing over a dependency that one of its functions
+# has. The lib is loaded when present and its absence is reported at the ONE
+# place that needs it.
+SL10_COPY="$tmp/sl10-copy.sh"
+cp "$SCRIPT" "$SL10_COPY"
+[ ! -e "$tmp/lib/lane-status.sh" ] || { echo "FAIL[SL-10]: the copy has a lib beside it, so this case asserts nothing"; fail=1; }
+# (a) a mode that never asks about lane statuses runs normally from the copy
+out="$(bash "$SL10_COPY" --status 2>&1)"; code=$?
+assert_eq "$code" "0" SL-10
+assert_missing "lane-status.sh" "$out" SL-10
+# (b) ...and the close that DOES ask says it could not check the lane files,
+#     rather than reporting none or inventing an answer. The dispatched lanes
+#     are still checked, which is what makes this a degradation and not a hole.
+live_json "running" "$SL_A/sub"
+SL10_LANE="$(SL_DISPATCH sl10 "$SL_A/sub")"
+SL_LANEFILE sl10-stranded open "$SL_A/sub/progress.md"
+SL10_SUBJ="$(SL_DISPATCH sl10subj "$SL_A/sub")"
+live_json "running" "$SL_A/sub"
+out="$(bash "$SL10_COPY" --close "$SL10_SUBJ" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+assert_eq "$code" "0" SL-10
+assert_contains "were NOT checked" "$out" SL-10
+assert_missing "sl10-stranded" "$out" SL-10
+# the control, through the REAL script, which has its lib: the same lane file in
+# the same repository IS named -- so (b)'s silence is the missing lib and not
+# the fixture failing to be stranded in the first place.
+SL10_SUBJ2="$(SL_DISPATCH sl10subj2 "$SL_A/sub")"
+live_json "running" "$SL_A/sub"
+out="$(bash "$SCRIPT" --close "$SL10_SUBJ2" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+assert_eq "$code" "0" SL-10
+assert_contains "sl10-stranded" "$out" SL-10
+assert_missing "were NOT checked" "$out" SL-10
+rm -f "$CLAUDE_OPS_DIR/lanes/sl10-stranded.md"
+
+
+# ---- SL-11. a lane link with no record belongs to NO repository -------------
+# It has no cwd, so it cannot be placed — and counting it as a stranding in this
+# repository made every close in every repository report one, which is a
+# reporter nobody reads. It gets its own line and stays out of the count. Both
+# halves are asserted here, because the line alone would pass for a version
+# that also inflated the total.
+ln -sfn "$tmp/records/sl11-never-written.dispatch" "$CLAUDE_OPS_DIR/dispatches/HANDOFF-sl11dangle-abcdef01"
+SL11_LANE="$(SL_DISPATCH sl11 "$SL_B/sub")"
+live_json "running" "$SL_B/sub"
+out="$(bash "$SCRIPT" --close "$SL11_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+assert_eq "$code" "0" SL-11
+assert_contains "HANDOFF-sl11dangle-abcdef01" "$out" SL-11
+assert_contains "NO dispatch record" "$out" SL-11
+assert_contains "has a live seat" "$out" SL-11
+assert_missing "have NOBODY on them" "$out" SL-11
+# and the link SURVIVES: the report says "investigate", so a reporter that
+# tidied it away would be removing an open lane with no disposition -- the exact
+# disappearance the ledger exists to stop.
+[ -L "$CLAUDE_OPS_DIR/dispatches/HANDOFF-sl11dangle-abcdef01" ] || { echo "FAIL[SL-11]: the close deleted the dangling lane link it reported"; fail=1; }
+rm -f "$CLAUDE_OPS_DIR/dispatches/HANDOFF-sl11dangle-abcdef01"
+
+# ---- SL-12. --close writes the lane's OWN FILE, not only its record ----------
+# A dispatched lane's state lives in its dispatch record AND in the front matter
+# of its lane file, and the listings read the file. Closing wrote only the
+# record, so a lane closed correctly was listed as open by its own file for as
+# long as anybody looked. The file is written by the same call.
+SL12_LANE="$(SL_DISPATCH sl12 "$SL_A/sub")"
+[ -n "$SL12_LANE" ] || { echo "FAIL[SL-12]: the fixture dispatch registered no lane, so this case asserts nothing"; fail=1; }
+SL_LANEFILE "$SL12_LANE" open "$SL_A/sub/progress.md"
+# a second lane file that does NOT say it is this lane, under a name the close
+# has no reason to open: the control that the write is by identity, not by sweep
+SL_LANEFILE sl12-bystander open "$SL_A/sub/progress.md"
+SL12_BEFORE="$(cat "$CLAUDE_OPS_DIR/lanes/sl12-bystander.md")"
+live_json "running" "$SL_A/sub"
+out="$(bash "$SCRIPT" --close "$SL12_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+assert_eq "$code" "0" SL-12
+assert_eq "$(sed -n 's/^status: //p' "$CLAUDE_OPS_DIR/lanes/$SL12_LANE.md")" "completed — closed $(date +%Y-%m-%d) by handoff.sh --close" SL-12
+assert_eq "$( ( . "$SL9_LIB"; lane_file_read "$CLAUDE_OPS_DIR/lanes/$SL12_LANE.md" 8192; lane_status_is_closed "$LANE_FM_STATUS" && echo closed || echo open ) )" "closed" SL-12
+# everything else in the file survives the rewrite byte for byte
+assert_eq "$(grep -v '^status: ' "$CLAUDE_OPS_DIR/lanes/$SL12_LANE.md")" "$(printf -- '---\nlane: %s\npointer: %s\nobjective: %s\n---\n\nbody' "$SL12_LANE" "$SL_A/sub/progress.md" "the $SL12_LANE objective")" SL-12
+assert_eq "$(cat "$CLAUDE_OPS_DIR/lanes/sl12-bystander.md")" "$SL12_BEFORE" "SL-12 bystander"
+rm -f "$CLAUDE_OPS_DIR/lanes/$SL12_LANE.md" "$CLAUDE_OPS_DIR/lanes/sl12-bystander.md"
+# ...and a lane file that cannot be written REFUSES the close and leaves the
+# lane in the open set, rather than closing it in one record and not the other.
+SL12B_LANE="$(SL_DISPATCH sl12b "$SL_A/sub")"
+SL_LANEFILE "$SL12B_LANE" open "$SL_A/sub/progress.md"
+chmod a-w "$CLAUDE_OPS_DIR/lanes/$SL12B_LANE.md"
+live_json "running" "$SL_A/sub"
+out="$(bash "$SCRIPT" --close "$SL12B_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+[ "$code" != "0" ] || { echo "FAIL[SL-12]: a close whose lane file could not be written must refuse"; fail=1; }
+assert_contains "could not be given its status line" "$out" SL-12
+[ -L "$CLAUDE_OPS_DIR/dispatches/$SL12B_LANE" ] || { echo "FAIL[SL-12]: the lane left the open set although its file still says open"; fail=1; }
+chmod u+w "$CLAUDE_OPS_DIR/lanes/$SL12B_LANE.md"
+live_json "running" "$SL_A/sub"
+out="$(bash "$SCRIPT" --close "$SL12B_LANE" completed --lesson='wrote a-seat-closing-its-slice-can-strand-the-whole-arc' 2>&1)"; code=$?
+assert_eq "$code" "0" "SL-12 re-run"
+rm -f "$CLAUDE_OPS_DIR/lanes/$SL12B_LANE.md"
+
+# ---- SL-13. the one writer of a lane file's status, swept ---------------------
+# Replace a status line, add one where the file has none (which is also how a
+# file spelled `state:` gets a status it can be read by), and refuse anything
+# that is not a lane file -- leaving it byte-identical.
+sl13() { ( . "$SL9_LIB"; lane_file_set_status "$1" "$2"; echo "rc=$?" ); }
+SL13="$tmp/sl13.md"
+printf -- '---\nlane: x\nstatus: open\n---\nbody\nstatus: in the body\n' > "$SL13"
+assert_eq "$(sl13 "$SL13" "completed — a note")" "rc=0" "SL-13 replace"
+assert_eq "$(cat "$SL13")" "$(printf -- '---\nlane: x\nstatus: completed — a note\n---\nbody\nstatus: in the body')" "SL-13 replace"
+printf -- '---\nlane: x\nstate: open\npointer: /p\n---\nbody\n' > "$SL13"
+assert_eq "$(sl13 "$SL13" "cancelled")" "rc=0" "SL-13 add"
+assert_eq "$(cat "$SL13")" "$(printf -- '---\nlane: x\nstate: open\npointer: /p\nstatus: cancelled\n---\nbody')" "SL-13 add"
+for sl13_bad in 'no front matter\nstatus: open\n' '---\nobjective: a front matter with no lane\nstatus: open\n---\n' '---\nlane: x\nnever closed\n'; do
+  printf -- "$sl13_bad" > "$SL13"; SL13_B="$(cat "$SL13")"
+  assert_eq "$(sl13 "$SL13" "completed")" "rc=1" "SL-13 refuse"
+  assert_eq "$(cat "$SL13")" "$SL13_B" "SL-13 refuse leaves the file alone"
+done
+printf -- '---\nlane: x\nstatus: open\n---\n' > "$SL13"; SL13_B="$(cat "$SL13")"
+assert_eq "$(sl13 "$SL13" "$(printf 'completed\nlane: forged')")" "rc=1" "SL-13 one line"
+assert_eq "$(cat "$SL13")" "$SL13_B" "SL-13 one line"
+assert_eq "$(ls "$tmp" | grep -c '^sl13\.md\.status\.')" "0" "SL-13 no temporaries left"
 
 # Nothing below this line depends on a seat, and a seat left running would idle
 # for a minute after the suite has printed its verdict.

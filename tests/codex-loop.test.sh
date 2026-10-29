@@ -53,7 +53,7 @@ case "${CODEX_STUB_MODE:-}" in
   # is a real shape codex produces: a run that answered and then failed, a run that exited clean
   # having written nothing, and a run that exited clean leaving a zero-byte file behind.
   fail-with-output)
-    [ -n "$out" ] && printf '{"ok":true}\n' > "$out"
+    [ -n "$out" ] && printf '{"ok":true,"findings":[]}\n' > "$out"
     exit 3 ;;
   no-output)
     exit 0 ;;
@@ -66,16 +66,16 @@ case "${CODEX_STUB_MODE:-}" in
   # the watchdog test passing under a detector that kills EVERYTHING.
   silent)
     sleep "${CODEX_STUB_SLEEP:-30}"
-    [ -n "$out" ] && printf '{"ok":true}\n' > "$out"
+    [ -n "$out" ] && printf '{"ok":true,"findings":[]}\n' > "$out"
     exit 0 ;;
   chatty)
     i=0
     while [ $i -lt "${CODEX_STUB_TICKS:-8}" ]; do echo "tick $i"; sleep 1; i=$((i+1)); done
-    [ -n "$out" ] && printf '{"ok":true}\n' > "$out"
+    [ -n "$out" ] && printf '{"ok":true,"findings":[]}\n' > "$out"
     exit 0 ;;
 esac
 [ -n "${CODEX_STUB_TOUCH:-}" ] && : > "$CODEX_STUB_TOUCH"
-[ -n "$out" ] && printf '{"ok":true}\n' > "$out"
+[ -n "$out" ] && printf '{"ok":true,"findings":[]}\n' > "$out"
 exit 0
 STUB
 chmod +x "$SANDBOX/bin/codex"
@@ -209,7 +209,11 @@ check "round 2 runs once round 1 is closed and dispositioned (rc 0, got $rc)" [ 
 check "track B stays gated independently (rc 6)" bash -c "python3 '$SKILL/loop.py' gate --arc '$ARC' --track B --round 2 >/dev/null 2>&1; [ \$? -eq 6 ]"
 
 # --- 7. a verdict whose tree moved while it was read is quarantined, through the real launcher
-CODEX_STUB_TOUCH="$WORK/stray-write" launch --arc "$ARC" --track A --round 2 -- -p sol; rc=$?
+# `--name moved`: section 6 already landed a SUCCESSFUL review of track A round 2 under the
+# default name, and a name whose review succeeded is spent for the round. Without its own
+# name this launch is refused by `CLASH_AFTER_SUCCESS` -- which is also rc 5, so the rc
+# assertion below passes while nothing is quarantined and no tree move is ledgered.
+CODEX_STUB_TOUCH="$WORK/stray-write" launch --name moved --arc "$ARC" --track A --round 2 -- -p sol; rc=$?
 check "tree moved under the review → rc 5 (got $rc)" [ "$rc" -eq 5 ]
 check "moved-tree verdict is not left at its promised path" [ ! -e "$SANDBOX/art/out.json" ]
 check "moved-tree verdict is quarantined as .tree-moved" [ -e "$SANDBOX/art/out.json.tree-moved" ]
@@ -261,24 +265,72 @@ check "loop_test.py green (rc 0, got $rc)" [ "$rc" -eq 0 ]
 check "loop_test.py prints a vitest-shaped summary (so mutate.py's zero-match guard applies to it)" grep -q '^Tests  [0-9]* passed' "$SANDBOX/unit.out"
 
 # --- 12. mutation: every fail-closed rule dies under its NAMED test, armed on a COPY
-before="$(shasum -a 256 "$SKILL/loop.py" "$SKILL/loop_test.py" | shasum -a 256)"
+# Every Python module in the skill directory, DERIVED from the directory rather than named.
+# loop.py imports its siblings (`review_eval`, the one closed set of finding outcomes) and
+# mutate.py imports loop.py, so a scratch dir holding a HAND-WRITTEN subset starves whatever runs
+# in it: the probe dies `ModuleNotFoundError: No module named 'review_eval'` and exits 1, which
+# reads as a product refusal rather than as a missing file. MEASURED 2026-10-26, the round that
+# added that import: seven enumerated `cp` sites cost 74 of 85 failures at once, and the suite was
+# not in that round's diff, so nothing pointed at them.
+# The BATTERIES (`*.mutants.json`) are deliberately NOT copied -- section 12a's control needs a
+# copy with no batteries beside it, and that is the one property this helper must not break.
+# Narrower than copy_skill_py on purpose: every mutant this suite arms is a PYTHON edit, so the
+# claim being pinned is "no probe armed one in the tracked tree", and a sibling session editing
+# SKILL.md should not read as that.
+skill_py_hash() {   # one hash over every *.py in $SKILL
+  shasum -a 256 "$SKILL"/*.py | shasum -a 256
+}
+copy_skill_py() {   # copy_skill_py <dest>... -- the skill's source files into each dest
+  local d f
+  for d in "$@"; do
+    mkdir -p "$d" || return 1
+    for f in "$SKILL"/*; do
+      # The ONE exclusion, and the reason: section 12a's control needs a copy with no mutation
+      # BATTERY beside the source, or its real-battery legs pass instead of skipping and the skip
+      # branch has no probe at all. `loop_test.py:BATTERIES` names the two this covers.
+      case "$(basename "$f")" in *mutants*.json) continue ;; esac
+      [ -f "$f" ] && cp "$f" "$d/"
+    done
+  done
+}
+# The `--also-copy` set for one mutate.py run. mutate.py copies ONLY --src, --test and the
+# companions into the copy dir (`place_companions`), so the same starvation applies one level
+# down and the same derivation answers it.
+# Only the PYTHON siblings: `--also-copy` exists so a copy dir can IMPORT, and nothing imports a
+# markdown file or a shell script.
+also_copy_py() {   # also_copy_py <root> <src-basename> <test-basename>
+  local root="$1" src="$2" tst="$3" f b
+  for f in "$root"/*.py; do
+    b="$(basename "$f")"
+    [ "$b" = "$src" ] && continue
+    [ "$b" = "$tst" ] && continue
+    printf '%s\n' --also-copy "$b"
+  done
+}
+before="$(skill_py_hash)"
 # Pinned ONCE, here, before any probe runs. The section-16 assertion below used to compute this
 # hash and then compare it against the same expression evaluated a second time — a comparison of
 # a value with itself, which passes however badly the probes corrupt the skill directory.
-before_all="$(shasum -a 256 "$SKILL/loop.py" "$SKILL/loop_test.py" "$SKILL/mutate.py" | shasum -a 256)"
+before_all="$(skill_py_hash)"
 suite_started="$(date +%H:%M:%S)"
 # A --test-cmd standing in for a real suite. It must reach the COPY ({test}) AND report a
 # vitest-shaped summary: mutate.py now refuses a run that executed zero tests, and demands a
 # green baseline before arming anything, so a bare `true` is (correctly) no longer accepted.
 GREEN_CMD='printf "Tests  1 passed (1)\n"; true {test}'
 MUT="$SANDBOX/mut"; mkdir -p "$MUT"
-cp "$SKILL/loop.py" "$SKILL/loop_test.py" "$SKILL/mutate.py" "$MUT/"
-python3 "$MUT/mutate.py" --root "$MUT" --src loop.py --test loop_test.py --copy-dir copy \
+copy_skill_py "$MUT"
+# Computed HERE, from the pristine set, before any probe writes a `mutate-*.py` variant beside
+# it -- so the companion list is the skill's modules and never a probe's scratch file. bash 3.2
+# has no `mapfile`, hence the read loop.
+ALSO_LOOP=(); while IFS= read -r _a; do ALSO_LOOP+=("$_a"); done < <(also_copy_py "$MUT" loop.py loop_test.py)
+ALSO_HARNESS=(); while IFS= read -r _a; do ALSO_HARNESS+=("$_a"); done < <(also_copy_py "$MUT" loop_test.py loop_test.py)
+[ "${#ALSO_LOOP[@]}" -ge 2 ] || bad "the derived --also-copy set is empty; a copy dir would starve"
+python3 "$MUT/mutate.py" --root "$MUT" --src loop.py --test loop_test.py --copy-dir copy "${ALSO_LOOP[@]}" \
   --mutants "$SKILL/loop.mutants.json" --test-cmd 'python3 {test} {filter}' --filter-flag=-k --no-lock \
   >"$SANDBOX/mutants.out" 2>&1; rc=$?
 check "every loop.py mutant matched its expectation (rc 0, got $rc)" [ "$rc" -eq 0 ]
-after="$(shasum -a 256 "$SKILL/loop.py" "$SKILL/loop_test.py" | shasum -a 256)"
-check "the tracked loop.py / loop_test.py are byte-identical after mutation" [ "$before" = "$after" ]
+after="$(skill_py_hash)"
+check "every tracked *.py in the skill dir is byte-identical after mutation" [ "$before" = "$after" ]
 check "no mutant survived unexpectedly" bash -c "! grep -q '^SURVIVED .*expect killed' '$SANDBOX/mutants.out'"
 check "no mutant was MISARMED" bash -c "! grep -q '^MISARMED' '$SANDBOX/mutants.out'"
 if [ "$rc" -ne 0 ]; then sed -n '1,60p' "$SANDBOX/mutants.out"; fi
@@ -299,7 +351,7 @@ check "every one of its tests reported as passed" \
   bash -c "grep -qE '^Tests  [0-9]+ passed \\([0-9]+\\)\$' '$ARM/inrepo.out'"
 # CONTROL: with the batteries out of reach the real-battery legs must SKIP (visible), never pass
 # silently -- that is what makes the skip branch safe to have.
-cp "$SKILL/loop.py" "$SKILL/loop_test.py" "$ARM/"
+copy_skill_py "$ARM"
 ( cd "$ARM" && python3 loop_test.py -k TestEveryMutantIsStillArmable ) >"$ARM/nobattery.out" 2>&1
 check "control: with no batteries beside it the guard SKIPS loudly instead of passing" \
   grep -qE "skipped=|skipped [0-9]" "$ARM/nobattery.out"
@@ -310,7 +362,7 @@ check "control: the synthetic legs still ran, so the rule itself is never skippe
 # wait_path/deadline/reduce_samples live in loop_test.py, so nothing in the loop.py batch can pin
 # them; --src == --test is how a helper that lives beside its tests gets mutated at all.
 python3 "$MUT/mutate.py" --root "$MUT" --src loop_test.py --test loop_test.py --copy-dir copy \
-  --also-copy loop.py --mutants "$SKILL/loop_test.mutants.json" \
+  "${ALSO_HARNESS[@]}" --mutants "$SKILL/loop_test.mutants.json" \
   --test-cmd 'python3 {test} {filter}' --filter-flag=-k --no-lock \
   >"$SANDBOX/harness-mutants.out" 2>&1; rc=$?
 check "every loop_test.py harness mutant matched its expectation (rc 0, got $rc)" [ "$rc" -eq 0 ]
@@ -328,7 +380,7 @@ sed 's/^\( *\)if same_file:$/\1if False:  # control/' "$MUT/mutate.py" > "$MUT/m
 [ "$(grep -c 'if False:  # control' "$MUT/mutate-samefile-broken.py")" -eq 2 ] \
   || bad "same-file control mutant did not arm at both write sites"
 python3 "$MUT/mutate-samefile-broken.py" --root "$MUT" --src loop_test.py --test loop_test.py --copy-dir copy \
-  --also-copy loop.py --mutants "$SKILL/loop_test.mutants.json" \
+  "${ALSO_HARNESS[@]}" --mutants "$SKILL/loop_test.mutants.json" \
   --test-cmd 'python3 {test} {filter}' --filter-flag=-k --no-lock \
   >"$SANDBOX/harness-ctrl.out" 2>&1; rc=$?
 check "control: with same-file handling broken the SAME batch reads SURVIVED (rc $rc)" \
@@ -352,7 +404,7 @@ python3 "$MUT/mutate.py" --root "$MUT" --src loop.py --test loop_test.py --copy-
 check "--copy-dir outside root is refused as usage (rc 4, got $rc)" [ "$rc" -eq 4 ]
 check "nothing was created outside root" [ ! -e "$SANDBOX/outside" ]
 # control on a THROWAWAY root: with the guard's `or` turned into `and`, `.` is accepted and the root is destroyed
-CTRL="$SANDBOX/ctrl"; mkdir -p "$CTRL"; cp "$MUT/loop.py" "$MUT/loop_test.py" "$CTRL/"; echo keep > "$CTRL/sentinel.txt"
+CTRL="$SANDBOX/ctrl"; copy_skill_py "$CTRL"; echo keep > "$CTRL/sentinel.txt"
 sed 's/ != root or copy_dir == root:/ != root and copy_dir == root:/' "$MUT/mutate.py" > "$CTRL/mutate.py"
 grep -q 'and copy_dir == root' "$CTRL/mutate.py" || bad "control guard mutant did not arm"
 printf '[{"label":"C1","old":"SCOPED_MAX_FILES = 8\\n","new":"SCOPED_MAX_FILES = 100\\n","expect":"survived"}]\n' > "$SANDBOX/one.json"
@@ -363,7 +415,7 @@ check "control: the broken guard destroyed the root's sentinel (what the guard p
 
 # --- 16. a mutant whose named test selects NOTHING is MISARMED, never SURVIVED — with a broken-detector control
 printf '[{"label":"P1 misspelled selector","old":"SCOPED_MAX_FILES = 8\\n","new":"SCOPED_MAX_FILES = 100\\n","expect":"survived","test":"test_this_name_does_not_exist"}]\n' > "$SANDBOX/misarmed.json"
-python3 "$MUT/mutate.py" --root "$MUT" --src loop.py --test loop_test.py --copy-dir copy \
+python3 "$MUT/mutate.py" --root "$MUT" --src loop.py --test loop_test.py --copy-dir copy "${ALSO_LOOP[@]}" \
   --mutants "$SANDBOX/misarmed.json" --test-cmd 'python3 {test} {filter}' --filter-flag=-k --no-lock >"$SANDBOX/misarmed.out" 2>&1; rc=$?
 check "zero-match selector is MISARMED and the run fails (rc $rc)" bash -c "[ $rc -ne 0 ] && grep -q '^MISARMED' '$SANDBOX/misarmed.out'"
 check "zero-match selector is never reported SURVIVED" bash -c "! grep -q '^SURVIVED' '$SANDBOX/misarmed.out'"
@@ -375,13 +427,13 @@ check "zero-match selector is never reported SURVIVED" bash -c "! grep -q '^SURV
 # broken does the probe reach the shape they exist to prevent.
 sed 's/if tests_ran(out) == 0:/if tests_ran(out) < 0:/' "$MUT/mutate.py" > "$MUT/mutate-nomisarmed.py"
 grep -q 'if tests_ran(out) < 0:' "$MUT/mutate-nomisarmed.py" || bad "control detector mutant did not arm"
-python3 "$MUT/mutate-nomisarmed.py" --root "$MUT" --src loop.py --test loop_test.py --copy-dir copy \
+python3 "$MUT/mutate-nomisarmed.py" --root "$MUT" --src loop.py --test loop_test.py --copy-dir copy "${ALSO_LOOP[@]}" \
   --mutants "$SANDBOX/misarmed.json" --test-cmd 'python3 {test} {filter}' --filter-flag=-k --no-lock >"$SANDBOX/ctrl-a.out" 2>&1; rc=$?
 check "control A: with only the MISARMED check broken, MULTI-SELECT still refuses (rc $rc)" \
   bash -c "[ $rc -ne 0 ] && grep -q '^MULTI-SELECT' '$SANDBOX/ctrl-a.out' && ! grep -q '^SURVIVED' '$SANDBOX/ctrl-a.out'"
 sed 's/                    if n_sel != 1:/                    if False:/' "$MUT/mutate.py" > "$MUT/mutate-nomulti.py"
 grep -q '                    if False:' "$MUT/mutate-nomulti.py" || bad "control multi-select mutant did not arm"
-python3 "$MUT/mutate-nomulti.py" --root "$MUT" --src loop.py --test loop_test.py --copy-dir copy \
+python3 "$MUT/mutate-nomulti.py" --root "$MUT" --src loop.py --test loop_test.py --copy-dir copy "${ALSO_LOOP[@]}" \
   --mutants "$SANDBOX/misarmed.json" --test-cmd 'python3 {test} {filter}' --filter-flag=-k --no-lock >"$SANDBOX/ctrl-b.out" 2>&1; rc=$?
 check "control B: with only the MULTI-SELECT check broken, MISARMED still refuses (rc $rc)" \
   bash -c "[ $rc -ne 0 ] && grep -q '^MISARMED' '$SANDBOX/ctrl-b.out' && ! grep -q '^SURVIVED' '$SANDBOX/ctrl-b.out'"
@@ -389,31 +441,31 @@ sed -e 's/if tests_ran(out) == 0:/if tests_ran(out) < 0:/' -e 's/               
   "$MUT/mutate.py" > "$MUT/mutate-broken.py"
 grep -q 'if tests_ran(out) < 0:' "$MUT/mutate-broken.py" || bad "control detector mutant did not arm (both)"
 grep -q '                    if False:' "$MUT/mutate-broken.py" || bad "control multi-select mutant did not arm (both)"
-python3 "$MUT/mutate-broken.py" --root "$MUT" --src loop.py --test loop_test.py --copy-dir copy \
+python3 "$MUT/mutate-broken.py" --root "$MUT" --src loop.py --test loop_test.py --copy-dir copy "${ALSO_LOOP[@]}" \
   --mutants "$SANDBOX/misarmed.json" --test-cmd 'python3 {test} {filter}' --filter-flag=-k --no-lock >"$SANDBOX/misarmed-ctrl.out" 2>&1; rc=$?
 check "control C: with BOTH guards broken the same probe reads SURVIVED and exits 0 (rc $rc)" bash -c "[ $rc -eq 0 ] && grep -q '^SURVIVED' '$SANDBOX/misarmed-ctrl.out'"
-after2="$(shasum -a 256 "$SKILL/loop.py" "$SKILL/loop_test.py" "$SKILL/mutate.py" | shasum -a 256)"
+after2="$(skill_py_hash)"
 # The assertion stands; only its REPORT is widened. This skill lives in a tree several sessions edit
 # at once, so a bare "they differ" is two very different facts wearing one message: a probe armed a
 # mutant in the tracked tree (the thing this guard exists to catch), or a sibling session saved a
 # file while the suite ran. Name the changed file and when it changed so the reader can tell which.
 if [ "$after2" != "$before_all" ]; then
-  bad "tracked loop.py / loop_test.py / mutate.py untouched by every probe"
-  for f in loop.py loop_test.py mutate.py; do
-    echo "       $f last written $(stat -f '%Sm' -t '%H:%M:%S' "$SKILL/$f") (suite started $suite_started)"
+  bad "every tracked *.py in the skill dir untouched by every probe"
+  for f in "$SKILL"/*.py; do
+    echo "       $(basename "$f") last written $(stat -f '%Sm' -t '%H:%M:%S' "$f") (suite started $suite_started)"
   done
   echo "       a time AFTER the suite start with no armed mutant in the file is another session writing, not a probe"
 else
-  ok "tracked loop.py / loop_test.py / mutate.py untouched by every probe"
+  ok "every tracked *.py in the skill dir untouched by every probe"
 fi
 
 # --- 17. mutate.py refuses to arm a mutant inside a git worktree that does not ignore the copy dir
 #     (a tree that auto-commits — like ~/dotfiles/claude itself — would COMMIT the armed mutant)
 GITMUT="$SANDBOX/gitmut"; mkdir -p "$GITMUT"
-cp "$SKILL/loop.py" "$SKILL/loop_test.py" "$SKILL/mutate.py" "$GITMUT/"
+copy_skill_py "$GITMUT"
 ( cd "$GITMUT" && git init -q . && git config user.email t@t && git config user.name t \
-  && git add loop.py loop_test.py mutate.py && git commit -qm base )
-python3 "$GITMUT/mutate.py" --root "$GITMUT" --src loop.py --test loop_test.py --copy-dir copy \
+  && git add ./*.py && git commit -qm base )
+python3 "$GITMUT/mutate.py" --root "$GITMUT" --src loop.py --test loop_test.py --copy-dir copy "${ALSO_LOOP[@]}" \
   --mutants "$SANDBOX/one.json" --test-cmd "$GREEN_CMD" --no-lock >"$SANDBOX/git1.out" 2>&1; rc=$?
 check "a copy dir inside a git worktree, not ignored, is refused (rc 4, got $rc)" [ "$rc" -eq 4 ]
 check "the refusal names why (a commit would carry the armed mutant)" grep -q 'NOT git-ignored' "$SANDBOX/git1.out"
@@ -423,19 +475,19 @@ check "nothing was armed in the worktree" [ ! -e "$GITMUT/copy" ]
 for pat in 'copy/' 'copy'; do
   printf '%s\n' "$pat" > "$GITMUT/.gitignore"
   rm -rf "$GITMUT/copy"
-  python3 "$GITMUT/mutate.py" --root "$GITMUT" --src loop.py --test loop_test.py --copy-dir copy \
+  python3 "$GITMUT/mutate.py" --root "$GITMUT" --src loop.py --test loop_test.py --copy-dir copy "${ALSO_LOOP[@]}" \
     --mutants "$SANDBOX/one.json" --test-cmd "$GREEN_CMD" --no-lock >"$SANDBOX/git2.out" 2>&1; rc=$?
   check "gitignore pattern '$pat' lets the run proceed (rc 0, got $rc)" [ "$rc" -eq 0 ]
 done
 printf 'unrelated/\n' > "$GITMUT/.gitignore"
-python3 "$GITMUT/mutate.py" --root "$GITMUT" --src loop.py --test loop_test.py --copy-dir copy \
+python3 "$GITMUT/mutate.py" --root "$GITMUT" --src loop.py --test loop_test.py --copy-dir copy "${ALSO_LOOP[@]}" \
   --mutants "$SANDBOX/one.json" --test-cmd "$GREEN_CMD" --no-lock >"$SANDBOX/git3.out" 2>&1; rc=$?
 check "an ignore rule that does NOT cover the copy dir is still refused (rc 4, got $rc)" [ "$rc" -eq 4 ]
 # live control: with the worktree guard disabled, the same unignored run is accepted
 sed 's/if top and not git_ignored(top, copy_dir):/if False and not git_ignored(top, copy_dir):/' \
   "$GITMUT/mutate.py" > "$GITMUT/mutate-noguard.py"
 grep -q 'if False and not git_ignored' "$GITMUT/mutate-noguard.py" || bad "worktree-guard control did not arm"
-python3 "$GITMUT/mutate-noguard.py" --root "$GITMUT" --src loop.py --test loop_test.py --copy-dir copy \
+python3 "$GITMUT/mutate-noguard.py" --root "$GITMUT" --src loop.py --test loop_test.py --copy-dir copy "${ALSO_LOOP[@]}" \
   --mutants "$SANDBOX/one.json" --test-cmd "$GREEN_CMD" --no-lock >"$SANDBOX/git4.out" 2>&1; rc=$?
 check "control: with the guard disabled the unignored run is NOT refused (rc $rc)" [ "$rc" -ne 4 ]
 
@@ -444,7 +496,7 @@ check "control: with the guard disabled the unignored run is NOT refused (rc $rc
 #     ran the original file and reported a genuinely-killed mutant as SURVIVED. Every mutant would
 #     have. That is a total fail-open of the harness, and it looks exactly like a weak test suite.
 MC="$SANDBOX/mutcmd"; mkdir -p "$MC"
-cp "$SKILL/loop.py" "$SKILL/loop_test.py" "$SKILL/mutate.py" "$MC/"
+copy_skill_py "$MC"
 python3 "$MC/mutate.py" --root="$MC" --src=loop.py --test=loop_test.py --copy-dir=copy \
   --mutants="$SANDBOX/one.json" --test-cmd='python3 loop_test.py {filter}' --no-lock >"$SANDBOX/tc1.out" 2>&1; rc=$?
 check "a --test-cmd naming the original by literal path is refused (rc 4, got $rc)" [ "$rc" -eq 4 ]
@@ -578,7 +630,7 @@ check "round 0 and negative rounds do NOT pass the gate, round 1 still does ($GA
 #     the harness certifies itself green on zero evidence. Measured before this guard, on a file
 #     asserting 1 + 2 == 999: `KILLED OK M1 ... 1/1 mutants matched expectation` and exit 0.
 BASE="$SANDBOX/baseline"; mkdir -p "$BASE"
-cp "$SKILL/mutate.py" "$SKILL/loop.py" "$BASE/"
+copy_skill_py "$BASE"
 printf 'def f(a, b):\n    return a + b\n' > "$BASE/src.py"
 cat > "$BASE/mk_test.sh" <<'MK'
 want="$1"; out="$2"
@@ -750,7 +802,7 @@ check "5 identical runs of a same-size mutant all KILL it (green $pyc_green/5)" 
 #     bucket rather than against the job that spent it. The interrupt lands during the BASELINE,
 #     which is the harder case: zero mutants completed, and the row must exist anyway.
 INT="$SANDBOX/interrupt"; mkdir -p "$INT"
-cp "$SKILL/mutate.py" "$SKILL/loop.py" "$INT/"
+copy_skill_py "$INT"
 printf 'def f(a, b):\n    return a + b\n' > "$INT/src.py"
 cat > "$INT/src_test.py" <<'EOF'
 import os, sys, time, unittest
@@ -949,6 +1001,8 @@ check "control: a round whose every job ended DOES close (rc 0, got $rc)" [ "$rc
 #     not fail -- it silently subtracts from the arc's measured wait, so the profiler under-reports
 #     exactly the contention it exists to find. The clamps are the invariant; this pins them.
 CLK="$SANDBOX/clock"; mkdir -p "$CLK/arc-clamped" "$CLK/arc-unclamped" "$CLK/locks"
+# $CLK holds a sed'd COPY of loop.py, so it is a scratch dir like any other.
+copy_skill_py "$CLK"
 sed -e "s/end_ev\['span_s'\] = max(0.0, float(span_s))/end_ev['span_s'] = float(span_s)/" \
     -e 's/self.queued_s = max(0.0, time.monotonic() - t0)/self.queued_s = time.monotonic() - t0/' \
     -e 's/span_s = max(0.0, time.monotonic() - m_start)/span_s = time.monotonic() - m_start/' \
@@ -1699,12 +1753,18 @@ CC_ARC="$FRESH2" CC_TRACK=correctness CC_ROUND=1 launch -- -p sol; rc_gated=$?
 check "control: a real track in a fresh arc is still preflight-gated (rc 6, got $rc_gated)" \
   test "$rc_gated" -eq 6
 
-# The track name is written in two files and compared in a third. Pin them equal here so a rename
-# on one side cannot silently turn every one-off back into a gate refusal.
-RUN_ONEOFF="$(sed -n 's/^ *TRACK="\([^"]*\)"; ROUND=1$/\1/p' "$RUN" | head -1)"
-LOOP_ONEOFF="$(python3 -c "import sys; sys.path.insert(0, '$SKILL'); import loop; print(loop.ONE_OFF_TRACK)")"
-check "run-codex.sh's reserved track name is loop.py's ONE_OFF_TRACK ('$RUN_ONEOFF' vs '$LOOP_ONEOFF')" \
-  bash -c "[ -n '$RUN_ONEOFF' ] && [ '$RUN_ONEOFF' = '$LOOP_ONEOFF' ]"
+# The track name used to be written in two files and compared here. It now has ONE definition:
+# loop.py owns it and run-codex.sh ASKS for it. What this pins is that the launcher really does
+# ask -- a second literal would put the rename back and could silently turn every one-off into a
+# gate refusal -- and that the name it asks for is the one a one-off is actually ledgered under,
+# because the ask alone would pass on a launcher that asks and then ignores the answer.
+LOOP_ONEOFF="$(python3 "$SKILL/loop.py" one-off-track)"
+check "loop.py prints a reserved one-off track name ('$LOOP_ONEOFF')" [ -n "$LOOP_ONEOFF" ]
+check "run-codex.sh READS it rather than carrying its own copy" \
+  bash -c "grep -q 'loop.py\" one-off-track' '$RUN' && ! grep -qE '^ *TRACK=\"[a-z]' '$RUN'"
+ONEOFF_LEDGER="${CC_ONEOFF_ARC:-${TMPDIR:-/tmp}/cc-one-off-$(id -u)}/jobs.jsonl"
+check "and a one-off is really ledgered under that track" \
+  bash -c "grep -q '\"track\": \"$LOOP_ONEOFF\"' '$ONEOFF_LEDGER'"
 
 # --- 48. a mutation batch holds ONE lock set for its whole life, not one per mutant
 # The locks used to be taken per child, so between two mutants the tree was unlocked: a scheduled
@@ -1991,7 +2051,11 @@ check "control: the abstention names the way to enable the guard" grep -q 'RUN_C
 # Control 3 -- and it is the sibling's LIVENESS that decides, not the fact that a sibling once ran.
 kill -TERM "$sib_pid" 2>/dev/null; wait "$sib_pid" 2>/dev/null
 _w=0; while kill -0 "$sib_pid" 2>/dev/null && [ "$_w" -lt 20 ]; do sleep 0.5; _w=$((_w + 1)); done
-RUN_CODEX_JOB_PID=$$ launch --arc "$ARC" --track MINE --round 1 -- -p sol; rc_solo=$?
+# `--name solo`: this is the THIRD distinct review of track MINE round 1 in this section, and a
+# review name whose earlier run SUCCEEDED is spent for the round (`CLASH_AFTER_SUCCESS`, round 2's
+# accepted finding). Control 2 above succeeded under the default name, so reusing it here would be
+# refused by that rule and this control would stop testing the liveness guard it is about.
+RUN_CODEX_JOB_PID=$$ launch --name solo --arc "$ARC" --track MINE --round 1 -- -p sol; rc_solo=$?
 check "control: with the sibling gone the same launch runs (rc 0, got $rc_solo)" test "$rc_solo" -eq 0
 check "control: and was not refused by the guard" \
   bash -c "! grep -q 'ALREADY running track' '$SANDBOX/stderr'"

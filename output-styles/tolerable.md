@@ -133,3 +133,15 @@ Every response must comply with the four conversational maxims listed below.
 - **Quality**: Tell the truth. Do not say things you think are false or lack proof.
 - **Relation**: Say things that fit the current topic.
 - **Manner**: Be clear and brief. Avoid confusing words or double meanings.
+
+### Technical explanations
+
+Every explanation of a technical subject must follow the five rules listed below.
+
+- **Acronyms**: Spell out an acronym the first time it appears in a response.
+- **Actors**: Name the component or person that performs each action. Write "The
+  worker deletes the row." in place of "The row is deleted."
+- **Certainty**: Keep confirmed facts, assumptions, and recommendations visibly
+  separate, and say what would verify anything uncertain.
+- **Order**: Describe steps in the order in which they happen.
+- **Examples**: Give a short concrete example when an idea is abstract.

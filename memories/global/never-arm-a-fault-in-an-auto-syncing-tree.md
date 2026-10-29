@@ -25,6 +25,13 @@ damage was entirely in what a background hook captured in between.
   script. `mutate.sh` does exactly this, and it fails loudly when the expression matches nothing,
   because an unarmed mutant always survives and reads as a passing test.
 - If a fault genuinely must be armed in place, disable the hook first and re-enable it in a `trap`.
+- **Look for the copy the suite already makes.** A shell-function test often LIFTS the function out
+  of the script under test into a scratch file (`sed -n '/^fn() {$/,/^}$/p' "$SCRIPT" > "$tmp/x.sh"`)
+  so it can be called directly. That extraction is the mutation target, and it is already outside
+  the synced tree — so the negative control costs nothing and arms nothing. I reverted a hook in
+  place to prove a one-line parse fix was load-bearing, with a sync watcher committing every ~6
+  minutes, while the suite three lines away was already testing that exact function through a copy.
+  The commit that landed happened to catch the restored file, which is luck and not a method.
 
 **Auditing after the fact:** `for c in $(git log --format=%h -N -- <file>); do git show $c:<file> |
 grep -q '<mutant>' && echo $c; done`. Check the remote too — an auto-push means the window is not

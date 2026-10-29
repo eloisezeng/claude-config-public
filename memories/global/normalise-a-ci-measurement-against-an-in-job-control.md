@@ -21,6 +21,18 @@ the band every other sample sat in. Its runner was cheap at everything.
 else does. A "control run" dispatched separately is a second measurement on a second machine, which
 is exactly the thing you are trying to divide out — `[[a-control-must-match-the-probes-shape]]`.
 
+**A CI leg has TWO durations, and the cap applies to only one of them.** The JOB duration is what
+`timeout-minutes` kills on; the STEP duration is what the change under test actually moved. They
+differ by the whole prologue — checkout, toolchain setup, dependency install, build, typecheck —
+which is minutes, not noise. Measured 2026-10-09 on one `windows-latest` acceptance leg: job 37m05s
+against step 32m26s, a 4m33s prologue, and the pre-change samples were 39m22s / 33m39s and 39m15s /
+34m17s. A figure carried forward in a handoff or a report named neither unit, so the next session
+compared a fresh JOB duration against a recorded STEP duration and concluded the change had made
+things SLOWER when the step was 1 to 2 minutes faster and the job had gained 2m17s of headroom. Read
+both from the jobs API, label every duration with its unit in the same sentence, and quote the JOB
+number whenever the question is the cap — `[[surprising-result-check-metric-identity]]`,
+`[[a-setting-is-not-a-rate]]`.
+
 **How to apply:**
 - Pick a step in the SAME job that the change cannot affect (a typecheck, a build, a dependency
   install) and report `subject / control` alongside the raw seconds. Say which steps you summed.

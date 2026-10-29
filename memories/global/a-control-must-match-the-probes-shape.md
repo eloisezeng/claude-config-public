@@ -61,6 +61,23 @@ whole fake install under a sandbox `$HOME` and run with `HOME=` pointed at it. *
 DEREFERENCES, not what you executed** — and note this control was only diagnosable because it FAILED
 loudly; the same mistake in a passing direction is a green test of nothing.
 
+**A third shape, measured 2026-09-23: SIZE is part of the shape, and a quota refuses by size.** A
+Codex review panel was blocked by `You hit your spend cap set by the owner of your workspace`. The
+availability re-probe was a two-word prompt, and on the cheapest tier it answered cleanly — so I
+recorded that the cap had cleared and launched the two blocked lenses. They died in under a minute
+on that same error. Probing properly: the two-word prompt passes on `luna` and fails on `sol` and
+`solx`, while the REAL 10 KB lens prompt is refused on **every** tier, `luna` included. The cap does
+not gate on tier, it gates on the size of the request, so a trivially small call slips through and a
+green reading from it means nothing at all.
+
+The first read of that — "the cap is tier-scoped" — was also wrong, and for the same reason: I had
+varied the tier while holding the size fixed at the one value that was not representative. **Vary
+the axis you are making a claim about, and hold the probe at the WORKLOAD's shape while you do it.**
+For an availability or quota check that means sending something the size of the real job; anything
+smaller is a second measurement that happens to be green. The cost of getting this wrong is not just
+a wrong note — I wrote a false "unblocked" into a handoff file and had to take it back one launch
+later, and a successor acting on it would have reported a panel as buyable that was not.
+
 So: before trusting a control, state the exact shape of the thing that failed and check the control
 has that shape. And when a striking result rests on one probe you wrote yourself, re-read the probe's
 own full output before writing it up — the refutation is often already in it.

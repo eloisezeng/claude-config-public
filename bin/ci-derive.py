@@ -146,6 +146,59 @@ def file_runs(yml, event, changed):
     if kind == "paths": return any(hit(f) for f in changed)
     return any(not hit(f) for f in changed)
 
+# `on: pull_request: types: [...]`. A pull_request workflow with NO `types:` key runs on GitHub's
+# default set, which INCLUDES `synchronize` -- every push to the branch. One that NAMES its types and
+# omits `synchronize` runs ONCE PER PULL REQUEST and therefore CANNOT register a check against a head
+# produced by a later push, so requiring it reports NOT-GREEN forever: the same permanent
+# fail-closed that `paths:`-excluded and schedule-only workflows are dropped for.
+#
+# Measured 2026-10-08: a `claude-review.yml` carrying `types: [opened, reopened, ready_for_review]`
+# registered its `review` job on a pull request's OPENING head and never again. A one-line comment
+# fix pushed afterwards left the gate reading `workflow jobs never registered: ['review']` on a head
+# whose unit and acceptance jobs were green, with nothing any rerun could do about it. That repo's
+# ruleset agrees: it requires the two `unit` contexts and NOT `review`.
+#
+# Dropping such a file makes the required set SMALLER, which is only safe because PRESENCE still
+# counts: the verdict loop at the bottom walks every check-run on the sha, not just the expected
+# ones, so a check this file did register must still be successful. The drop therefore cannot excuse
+# a red -- it only stops demanding a check that cannot exist.
+PR_HEAD_MOVING_TYPE = "synchronize"
+
+def event_types(yml, event):
+    """-> [type, ...] | None (no `types:` key, i.e. GitHub's default set) | UNREADABLE."""
+    on = _get(yml.split("\n"), "on")
+    if on is None: return None
+    inline, kids = on
+    # `on: [push, pull_request]` / `on: pull_request` -- no filters of any kind.
+    if inline: return None
+    ev = _get(kids, event)
+    if ev is None: return None
+    ev_inline, ev_kids = ev
+    if ev_inline: return UNREADABLE          # a flow mapping, e.g. `pull_request: {types: [opened]}`
+    t = _get(ev_kids, "types")
+    if t is None: return None
+    t_inline, t_kids = t
+    vals = []
+    if t_inline:
+        if not (t_inline.startswith("[") and t_inline.endswith("]")): return UNREADABLE
+        vals = [x.strip().strip("\"'") for x in t_inline[1:-1].split(",") if x.strip()]
+    else:
+        for l in t_kids:
+            m = re.match(r"^\s*-\s*(.+?)\s*$", l)
+            if not m: return UNREADABLE
+            vals.append(m.group(1).strip().strip("\"'"))
+    return vals or UNREADABLE
+
+def file_reruns_on_push(yml, event):
+    """Can this file register a check on ANY head of a pull request? True/False, or None if the
+    `types:` list could not be read. Only `pull_request` has types; `push` has none."""
+    if event != "pull_request": return True
+    ts = event_types(yml, event)
+    if ts is None: return True
+    if ts is UNREADABLE: return None
+    return PR_HEAD_MOVING_TYPE in ts
+
+
 # The caller writes each workflow TWICE -- once from the head sha and once from the base ref, named
 # `head.<file>` and `base.<file>` -- because a pull_request run executes the MERGE ref, so a file
 # only the base defines still runs. Reading BOTH copies of the SAME file is a different thing, and
@@ -197,13 +250,20 @@ if os.path.exists(cpath):
     changed = [l.strip() for l in open(cpath) if l.strip()]
 
 path_skipped, unreadable_paths, admitted = set(), set(), []
+once_per_pr, unreadable_types = set(), set()
 for f in selected:
     r = file_runs(files[f], event, changed)
     if r is None:
         why_ = "no changed-file set" if changed is None else "unreadable filter"
         unreadable_paths.add(f"{wf_label(f)} ({why_})")
-    elif r: admitted.append(f)
-    else: path_skipped.add(wf_label(f))
+        continue
+    if not r:
+        path_skipped.add(wf_label(f))
+        continue
+    t = file_reruns_on_push(files[f], event)
+    if t is None: unreadable_types.add(wf_label(f))
+    elif t: admitted.append(f)
+    else: once_per_pr.add(wf_label(f))
 selected = admitted
 
 # A job-level `if:` asks the SAME question as the file-level `on:` block, one level down, and a
@@ -243,10 +303,20 @@ selected = admitted
 #     the unknown holds, so the evaluator is three-valued and refuses only when the answer depends on it.
 CONTEXT_TOKENS = ("github.event_name", "github.event", "github.ref", "github.head_ref", "github.base_ref")
 STATUS_FNS = ("always()", "success()", "!cancelled()", "!failure()")
+# The contexts whose value is a BOOLEAN rather than a string. A boolean literal is only readable
+# against one of these, and a string literal only against the others -- see `_evaluate`.
+BOOL_CONTEXTS = ("github.event.pull_request.draft",)
+# `true`/`false` are expression literals, not identifiers, so they must be tokenized BEFORE `ident`
+# and only at a word boundary -- `falsey` and `github.event.pull_request.draft` stay identifiers.
+# Measured 2026-10-08 on one of her repos: without this, its claude-review.yml's
+# `if: github.event.pull_request.draft == false` tokenized as ident-op-ident and read as
+# "expected <context> ==|!= '<literal>'", so EVERY sha in that repo answered NOT-GREEN -- the
+# permanent refusal this file exists to prevent, arriving by a fourth route.
 TOKEN = re.compile(
     r"(?P<lp>\()|(?P<rp>\))|(?P<and>&&)|(?P<or>\|\|)|(?P<op>==|!=)"
     r"|(?P<status>" + "|".join(re.escape(s) for s in STATUS_FNS) + r")"
-    r"|(?P<lit>'(?:[^']|'')*')|(?P<ident>[A-Za-z_][A-Za-z0-9_.-]*)")
+    r"|(?P<lit>'(?:[^']|'')*')|(?P<bool>(?:true|false)(?![A-Za-z0-9_.-]))"
+    r"|(?P<ident>[A-Za-z_][A-Za-z0-9_.-]*)")
 
 class Undecided:
     """Why a job condition could not be decided -- and deliberately NOT a truth value. `admits` answers
@@ -282,12 +352,21 @@ def base_branch(arg, full_name, remotes):
             if rest.startswith(r + "/"): return rest[len(r) + 1:]
     return Undecided(f"the [base-ref] argument {arg!r} is not a branch here, so `github.base_ref` is not known")
 
-def operand(name, event, base):
+def operand(name, event, base, draft):
     """The value of context `name` on `event` -- a str, a Partial or an Undecided -- or None for a
     context this does not evaluate. GitHub fills `base_ref` and `head_ref` on pull_request events only
     and leaves both EMPTY on a push, so those two are known outright there."""
     pr = event == "pull_request"
     if name == "github.event_name": return event
+    if name == "github.event.pull_request.draft":
+        # Off a pull_request, `github.event.pull_request` is absent and GitHub coerces the missing
+        # value, which this file does not model -- so that case is refused rather than answered.
+        if not pr:
+            return Undecided(f"`{name}` has no value on `{event}`, where there is no pull request")
+        return draft if draft is not None else Undecided(
+            f"the condition reads `{name}`, and the draft state of the pull request at this sha "
+            "was not determined (ci-green.sh writes it only when exactly one pull request has "
+            "this commit as its head)")
     if name == "github.base_ref": return base if pr else ""
     if name == "github.head_ref":
         return Undecided("`github.head_ref` is the pull request's head branch, which this tool is not given") if pr else ""
@@ -332,11 +411,11 @@ def _parse(e):
             return node
         st = take("status")
         if st: return ("status", st[1])
-        a, op, b = take("ident", "lit"), take("op"), take("ident", "lit")
-        if not (a and op and b) or {a[0], b[0]} != {"ident", "lit"}:
-            raise _Unreadable("expected <context> ==|!= '<literal>'")
-        ctx, lit = (a[1], b[1]) if a[0] == "ident" else (b[1], a[1])
-        return ("cmp", ctx, op[1], lit[1:-1].replace("''", "'"))
+        a, op, b = take("ident", "lit", "bool"), take("op"), take("ident", "lit", "bool")
+        if not (a and op and b) or sorted({a[0], b[0]}) not in (["ident", "lit"], ["bool", "ident"]):
+            raise _Unreadable("expected <context> ==|!= '<literal>'|true|false")
+        (_, ctx), (kind, lit) = (a, b) if a[0] == "ident" else (b, a)
+        return ("cmp", ctx, op[1], lit if kind == "bool" else lit[1:-1].replace("''", "'"), kind)
     node = group()
     if pos != len(toks): raise _Unreadable(f"unexpected {toks[pos][1]!r}")
     return node
@@ -357,13 +436,21 @@ def _or(vals):
     if any(v is True for v in vals): return True
     return _undecided(vals) if any(isinstance(v, Undecided) for v in vals) else False
 
-def _evaluate(node, event, base):
+def _evaluate(node, event, base, draft):
     kind = node[0]
     if kind == "status": return True
     if kind == "cmp":
-        _, name, op, lit = node
-        val = operand(name, event, base)
+        _, name, op, lit, lit_kind = node
+        val = operand(name, event, base, draft)
         if isinstance(val, Undecided): return val
+        # GitHub coerces across types (`'' == false` is TRUE there). That coercion is NOT modelled
+        # here, so a boolean literal is only compared against a boolean-valued context and a string
+        # literal only against a string-valued one; the mismatch is refused by name rather than
+        # answered by rules this file does not implement.
+        if (lit_kind == "bool") != (name in BOOL_CONTEXTS):
+            return Undecided(f"`{name}` is compared against "
+                             f"{'a boolean literal' if lit_kind == 'bool' else 'a string literal'}, "
+                             "and GitHub's cross-type coercion is not modelled here")
         if isinstance(val, Partial):
             if val.pattern.fullmatch(lit): return Undecided(val.why)
             equal = False
@@ -375,10 +462,10 @@ def _evaluate(node, event, base):
     # conjunction. Inside `||` it is refused: `always() || <x>` would put the job in the required set
     # on EVERY event, the fail-closed-forever bug wearing the opposite sign.
     if kind == "and":
-        return _and([_evaluate(k, event, base) for k in kids if k[0] != "status"])
+        return _and([_evaluate(k, event, base, draft) for k in kids if k[0] != "status"])
     if any(k[0] == "status" for k in kids):
         return Undecided("a status function joined by `||` is an outcome test, not an event test")
-    return _or([_evaluate(k, event, base) for k in kids])
+    return _or([_evaluate(k, event, base, draft) for k in kids])
 
 def job_if(body):
     """The JOB's own `if:` value, block scalars folded, or None. A step's `if:` is indented deeper
@@ -398,7 +485,7 @@ def job_if(body):
         return val
     return None
 
-def admits(if_expr, event, base):
+def admits(if_expr, event, base, draft):
     """True when a job carrying `if_expr` registers a check-run on `event`, False when it cannot, and
     an Undecided naming the reason when this cannot tell -- see the module comment for what is read.
     `base` is what `github.base_ref` holds on a pull_request: a branch name, or an Undecided.
@@ -415,10 +502,10 @@ def admits(if_expr, event, base):
         node = _parse(e)
     except _Unreadable as x:
         return Undecided(f"unreadable: {x}")
-    unknown = sorted(c for c in _contexts(node) if operand(c, event, base) is None)
+    unknown = sorted(c for c in _contexts(node) if operand(c, event, base, draft) is None)
     if unknown:
         return Undecided(f"{', '.join('`' + c + '`' for c in unknown)} is not a context this tool evaluates")
-    return _evaluate(node, event, base)
+    return _evaluate(node, event, base, draft)
 
 # What `github.base_ref` holds, from ci-green.sh's EXPLICIT [base-ref] argument: `base_ref.txt` is the
 # argument on line 1 and git's full ref name for it on line 2 (empty when it names no ref), and
@@ -433,6 +520,18 @@ if os.path.exists(bpath):
 else:
     base = base_branch(None, "", [])
 
+# What `github.event.pull_request.draft` holds, from `pr_draft.txt`: the literal `true` or `false`,
+# which ci-green.sh writes ONLY when the GitHub API names exactly one pull request having this sha as
+# its head. ABSENT means the fact was not established -- zero or several pull requests, a failed
+# read, or a repo with no such condition -- and is never the same as `false`, which would put a
+# draft-only job into the required set and report NOT-GREEN forever. `None` here is that absence,
+# and `operand` turns it into an Undecided naming the reason.
+dpath = os.path.join(D, "pr_draft.txt")
+draft = None
+if os.path.exists(dpath):
+    raw_draft = open(dpath).read().strip().lower()
+    if raw_draft in ("true", "false"): draft = raw_draft
+
 expected, unresolved, unreadable_if, off_event = set(), set(), set(), set()
 for f in selected:
     yml = files[f]
@@ -444,7 +543,7 @@ for f in selected:
         nm = re.search(r"^    name:\s*(.+?)\s*$", m.group(2), re.M)
         raw = nm.group(1) if nm else m.group(1)
         cond = job_if(m.group(2))
-        runs = admits(cond, event, base)
+        runs = admits(cond, event, base, draft)
         if isinstance(runs, Undecided):
             unreadable_if.add(f"{m.group(1)}: if: {cond} -- {runs.why}")
             continue
@@ -473,6 +572,7 @@ print(f"  expected_jobs={sorted(expected)}")
 # has no diff line to point at, and every entry here is a job this predicate has stopped requiring.
 if off_event: print(f"  not required on `{event}`: {sorted(off_event)}")
 if path_skipped: print(f"  workflow file(s) excluded by their own `paths:` filter: {sorted(path_skipped)}")
+if once_per_pr: print(f"  workflow file(s) that run once per pull request, not on a pushed head (no `{PR_HEAD_MOVING_TYPE}` in their `types:`): {sorted(once_per_pr)} -- any check they DID register is still required to be green")
 for n, st, cc, rid in sorted(rows):
     print(f"  {st:12} {cc or '-':10} {n}" + (f"  (check-run {rid})" if rid else ""))
 if len(rows) != len(names):
@@ -485,6 +585,7 @@ why = []
 # taking to serve a repo that path-filters ALL of its workflows.
 if not expected: why.append("derived an EMPTY required-job set (parser failure, not a pass)")
 if unresolved: why.append(f"could not resolve templated job name(s) {sorted(unresolved)} -- the required set is INCOMPLETE, which is a parser failure, not a pass")
+if unreadable_types: why.append(f"could not read the `types:` list of {sorted(unreadable_types)} -- cannot tell whether that workflow re-runs on a pushed head, which is a parser failure, not a pass")
 if unreadable_paths: why.append(f"could not read the file-level path filter of {sorted(unreadable_paths)} -- cannot tell whether `{event}` runs that workflow at all, which is a parser failure, not a pass")
 if unreadable_if: why.append(f"could not read job condition(s) {sorted(unreadable_if)} -- cannot tell whether `{event}` runs them, which is a failure to decide, not a pass")
 missing = expected - names
