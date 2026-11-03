@@ -65,8 +65,15 @@ done
 # that had grown too slow: run-codex.sh polled its child with a blind `sleep "$POLL"`, so each of
 # the ~33 launcher calls whose stub exits instantly sat out a full 10s poll, and each retry sat
 # out another. The fix is `poll_wait` in run-codex.sh, which returns as soon as the child is gone.
+#   tests/codex-loop.test.sh 1087s (2026-10-28) -- 72% of 1500s, 353 assertions, ec=0 standalone
+# 900 -> 1500 on 2026-10-28, against that measurement. This growth is honest, not a poll bug: until
+# that day both mutation batteries (99 loop.py mutants + 8 harness mutants, each a filtered
+# loop_test.py run) were REFUSED at a red baseline, so the suite finished early (756s) and red;
+# with the baseline green they run in full, beside ~40 new convergence-enforcement tests. Two
+# full-suite runs then hit 900s exactly. The lever, not taken here: every mutate.py invocation
+# (~10 in that suite) re-runs the unfiltered ~75s baseline.
 # Raise this number only against a fresh measurement written above it, never to quiet a red.
-SUITE_TIMEOUT="${RUN_ALL_TIMEOUT:-900}"
+SUITE_TIMEOUT="${RUN_ALL_TIMEOUT:-1500}"
 run_capped() {
   perl -e '
     use POSIX ();

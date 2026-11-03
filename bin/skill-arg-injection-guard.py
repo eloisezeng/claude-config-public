@@ -73,18 +73,49 @@ def findings_in(line):
             yield m.start() + 1, m.group(0), run
 
 
-def iter_md(root):
-    """Walk ``root`` following directory symlinks; raise on any traversal error."""
+# Containers the Claude Code HARNESS writes directly under a skills root, never this repo:
+# ``synced/<org>_<user>/`` holds the claude.ai-synced ``anthropic-skills:*`` set and
+# ``.trash/<stamp>/<org>_<user>/`` the generation a later sync replaced. Each holds a
+# ``manifest.json`` one level below a generation directory. Their bodies are re-written by the
+# harness on every sync, so a finding there is not fixable here, and measured 2026-10-28 they were
+# the ONLY findings in the live tree (pdf/xlsx/google-workspace reference prose). Skipped by
+# STRUCTURE as well as by name, so a hand-made skill called ``synced`` is still scanned, and the
+# skip is COUNTED in the report rather than silent.
+HARNESS_OWNED = ('synced', '.trash')
+
+
+def is_harness_owned(path):
+    """True iff ``path`` is a harness sync container: reserved name, real dir, no SKILL.md of its
+    own, and a ``manifest.json`` in a generation directory at depth 1 (synced) or 2 (.trash)."""
+    p = pathlib.Path(path)
+    if p.name not in HARNESS_OWNED or p.is_symlink() or not p.is_dir():
+        return False
+    if (p / 'SKILL.md').exists():
+        return False
+    return any(p.glob('*/manifest.json')) or any(p.glob('*/*/manifest.json'))
+
+
+def iter_md(root, skipped=None):
+    """Walk ``root`` following directory symlinks; raise on any traversal error.
+
+    Harness-owned containers directly under ``root`` are pruned; their names are appended to
+    ``skipped`` (when given) so the caller can report what it did not read."""
     def onerror(err):
         raise err
     for dirpath, dirnames, filenames in os.walk(root, followlinks=True, onerror=onerror):
+        if dirpath == str(root):  # os.walk yields `top` first, spelled exactly as passed
+            for n in list(dirnames):
+                if is_harness_owned(os.path.join(dirpath, n)):
+                    dirnames.remove(n)
+                    if skipped is not None:
+                        skipped.append(os.path.join(dirpath, n))
         dirnames.sort()
         for name in sorted(filenames):
             if name.endswith('.md'):
                 yield pathlib.Path(dirpath) / name
 
 
-def scan(dirs):
+def scan(dirs, skipped=None):
     seen, findings, errors, nfiles = set(), [], [], 0
     for d in dirs:
         root = pathlib.Path(d).expanduser()
@@ -92,7 +123,7 @@ def scan(dirs):
             errors.append(f'requested root is missing or not a directory: {root}')
             continue
         try:
-            files = list(iter_md(root))
+            files = list(iter_md(root, skipped))
         except OSError as e:
             errors.append(f'traversal failed under {root}: {e}')
             continue
@@ -120,8 +151,11 @@ def main():
     args = ap.parse_args()
     dirs = args.dirs if args.dirs else DEFAULT_DIRS
 
-    findings, errors, nfiles = scan(dirs)
+    skipped = []
+    findings, errors, nfiles = scan(dirs, skipped)
 
+    for s in skipped:
+        print(f'SKIP harness-owned sync container (not this repo, re-written on every sync): {s}')
     for f, lineno, col, tok, run in findings:
         why = 'unescaped' if run == 0 else f'{run} backslashes (only 1 escapes)'
         print(f'FAIL {f}:{lineno}:{col}: {tok} -- {why}')

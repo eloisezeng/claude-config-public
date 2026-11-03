@@ -296,12 +296,19 @@ copy_skill_py() {   # copy_skill_py <dest>... -- the skill's source files into e
 # The `--also-copy` set for one mutate.py run. mutate.py copies ONLY --src, --test and the
 # companions into the copy dir (`place_companions`), so the same starvation applies one level
 # down and the same derivation answers it.
-# Only the PYTHON siblings: `--also-copy` exists so a copy dir can IMPORT, and nothing imports a
-# markdown file or a shell script.
+# The PYTHON siblings, so a copy dir can IMPORT, plus every non-battery JSON sibling, because
+# loop.py also OPENS a data file beside itself: `review-output.schema.json` (REVIEW_SCHEMA_PATH,
+# read by `review_schema_contract`). MEASURED 2026-10-28: with only *.py companions the copy's
+# baseline went red -- 17 errors, every one `FileNotFoundError: copy/review-output.schema.json` --
+# so mutate.py refused both batteries as BASELINE NOT GREEN. Batteries (`*mutants*.json`) stay out
+# for the same reason copy_skill_py leaves them out. Nothing reads a markdown file or a shell
+# script from the copy dir, so those stay out too.
 also_copy_py() {   # also_copy_py <root> <src-basename> <test-basename>
   local root="$1" src="$2" tst="$3" f b
-  for f in "$root"/*.py; do
+  for f in "$root"/*.py "$root"/*.json; do
+    [ -f "$f" ] || continue
     b="$(basename "$f")"
+    case "$b" in *mutants*.json) continue ;; esac
     [ "$b" = "$src" ] && continue
     [ "$b" = "$tst" ] && continue
     printf '%s\n' --also-copy "$b"

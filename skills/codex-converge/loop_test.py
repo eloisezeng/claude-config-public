@@ -4709,6 +4709,21 @@ class TestAVerdictTheLedgerNeverHeardOfCannotBeOmittedFromConvergence(unittest.T
         self.assertEqual(loop.unledgered_verdicts(arc, loop.ledger_read(arc)),
                          [os.path.join(arc, 'oddly-named.json')])
 
+    def test_a_bare_array_counts_only_when_it_is_findings_shaped(self):
+        # A review can land a bare array of findings (`verdict_findings`), and an unledgered one is
+        # the same hole as an unledgered object. But an arc dir is a job's scratch tmp, full of
+        # lists that are not findings, so only a non-empty all-`severity` list counts.
+        f = self.converged_arc(self)
+        arc = f.s.arc
+        bare = os.path.join(arc, 'bare.json')
+        for doc, want in (([{'severity': 'high', 'title': 't'}], [bare]),
+                          ([{'severity': 'high'}, {'id': 'L1'}], []),   # one element is not one
+                          ([{'sev': 'high'}], []),                      # not the schema's field
+                          ([], [])):                                    # nothing to count
+            with io.open(bare, 'w', encoding='utf-8') as fh:
+                json.dump(doc, fh)
+            self.assertEqual(loop.unledgered_verdicts(arc, loop.ledger_read(arc)), want, doc)
+
     def test_a_verdict_named_only_by_a_one_off_track_event_is_still_unledgered(self):
         # `arc_rounds` excludes the one-off track, so its findings reach no gate: the same hole.
         f = self.converged_arc(self)

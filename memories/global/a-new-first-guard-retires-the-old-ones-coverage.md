@@ -1,6 +1,6 @@
 ---
 name: a-new-first-guard-retires-the-old-ones-coverage
-description: "adding a stronger guard IN FRONT of an existing one makes the older guard unreachable on every path its test drove, so the test now proves the new guard twice and the old guard's mutant goes quietly unobservable — reach the old guard explicitly from a state the new one cannot speak for, and expect the new guard to name the callers that were abusing the thing it protects"
+description: "a guard ordered IN FRONT of another silently takes its coverage, so the suite proves the new one twice and the old one's mutant goes quietly unobservable — and NARROWING a short-circuiting check runs the reverse, releasing every check behind it onto elements it never reached, whose latent findings arrive as a red against your change; reach the old guard from a state the new one cannot speak for, and read either direction's new reds as findings"
 metadata:
   node_type: memory
   scope: global
@@ -39,6 +39,26 @@ to this run's own id) would have survived, and read as "unobservable".
   abandoned transaction with no publish and no recovery that nothing could see before. The fix is
   to narrow the caller to what it actually needed, not to widen the guard.
 
+**The reverse direction, and it bites on the way OUT.** A check that `continue`s when it fires is
+also holding back every check after it. Narrow that check — scope it, or make it stop firing where
+it used to — and the checks behind it now run on elements they have never seen. Whatever was
+latent in them arrives as a RED attributed to your change, which is the one reading of it that is
+wrong.
+
+**Why:** the short-circuit was load-bearing for coverage nobody chose. Measured: a `cut-with-room`
+finding over every element clipping sideways was scoped down to the one stylesheet rule that claims
+a cut. The six findings it had been reporting went away as intended — and five elements it had been
+`continue`ing past immediately failed the *fade* pass behind it, reporting a 32px fade over nothing
+in all three engines. The class was latent across all seven cued regions and invisible only because
+nothing had ever been discovered inside one.
+
+**How to apply:** before narrowing a short-circuiting check, list the checks downstream of it and
+ask what each will now be asked about elements it has never been asked about. Then triage the reds
+by CAUSE, fix the instrument-side classes first, and date the class — "latent, not new" is a claim
+worth proving, because it decides whether the fix belongs in your diff or in a lane.
+
 Related: [[an-exclusion-set-must-not-include-the-catch-all]] ·
+[[a-new-detectors-first-run-measures-the-detector]] ·
+[[a-computed-custom-property-is-the-ancestors-value]] ·
 [[a-surviving-mutant-may-mean-the-property-is-unobservable]] ·
 [[fix-the-class-not-the-reported-instance]]

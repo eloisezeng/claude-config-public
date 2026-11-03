@@ -75,6 +75,44 @@ python3 "$GUARD" "$FARM" >/dev/null 2>&1
 check 'symlinked skill dir is traversed' 1 "$?"
 rm -rf "$FARM" "$REAL"
 
+# --- 7b. harness sync containers are skipped by STRUCTURE, and the skip is named --
+# ~/.claude/skills/synced and .trash are written by the Claude Code harness (claude.ai-synced
+# anthropic-skills:*), never by this repo, and are re-written on every sync. Each control below
+# forces the opposite answer, so the skip cannot quietly widen into "skip anything".
+HS=$(mktemp -d)
+mkdir -p "$HS/synced/org_user/pdf" "$HS/.trash/123/org_user/pdf" "$HS/ok"
+printf '{}\n' > "$HS/synced/org_user/manifest.json"
+printf '{}\n' > "$HS/.trash/123/org_user/manifest.json"
+printf 'cost $5\n' > "$HS/synced/org_user/pdf/SKILL.md"
+printf 'cost $5\n' > "$HS/.trash/123/org_user/pdf/SKILL.md"
+printf 'clean\n' > "$HS/ok/SKILL.md"
+HS_OUT="$(python3 "$GUARD" "$HS" 2>&1)"; HS_EC=$?
+check 'synced/ and .trash/ sync containers are skipped' 0 "$HS_EC"
+case "$HS_OUT" in *"SKIP harness-owned"*synced*) pass 'the synced skip is reported, not silent' ;; *) fail 'the synced skip is reported, not silent' ;; esac
+case "$HS_OUT" in *"SKIP harness-owned"*.trash*) pass 'the .trash skip is reported, not silent' ;; *) fail 'the .trash skip is reported, not silent' ;; esac
+# control: a hand-made skill NAMED synced (it has its own SKILL.md) is still scanned
+printf 'cost $5\n' > "$HS/synced/SKILL.md"
+python3 "$GUARD" "$HS" >/dev/null 2>&1
+check 'a skill named synced with its own SKILL.md is still scanned' 1 "$?"
+rm -f "$HS/synced/SKILL.md"
+# control: without the manifest it is not a sync container, so it is scanned
+rm -f "$HS/synced/org_user/manifest.json"
+python3 "$GUARD" "$HS" >/dev/null 2>&1
+check 'a synced dir with no manifest is still scanned' 1 "$?"
+printf '{}\n' > "$HS/synced/org_user/manifest.json"
+# control: the same manifest structure under a NON-reserved name is still scanned
+mkdir -p "$HS/vendored/org_user/pdf"; printf '{}\n' > "$HS/vendored/org_user/manifest.json"
+printf 'cost $5\n' > "$HS/vendored/org_user/pdf/SKILL.md"
+python3 "$GUARD" "$HS" >/dev/null 2>&1
+check 'a manifest-shaped dir under any other name is still scanned' 1 "$?"
+rm -rf "$HS/vendored"
+# control: the reserved name only counts directly under a root
+mkdir -p "$HS/ok/synced/org_user"; printf '{}\n' > "$HS/ok/synced/org_user/manifest.json"
+printf 'cost $5\n' > "$HS/ok/synced/org_user/x.md"
+python3 "$GUARD" "$HS" >/dev/null 2>&1
+check 'a nested synced/ below a skill is still scanned' 1 "$?"
+rm -rf "$HS"
+
 # --- 8. the live tree is clean --------------------------------------------------
 # Print the guard's own report on failure. This leg reads the LIVE skill tree, so
 # any session's throwaway probe skill reddens it for every other session -- and a

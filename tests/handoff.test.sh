@@ -4388,9 +4388,20 @@ live_json "running"
 # told once (round 6, L3 -- reproduced). "Nobody is watching now" is the last
 # alert you can afford to lose.
 DFD="$tmp/df"; mkdir -p "$DFD/bin"
+# The clock works for the watcher's FIRST epoch reading (watch_loop's entry, which
+# computes the deadline) and breaks from the SECOND on -- i.e. mid-loop. This was a
+# `( sleep 3; break the clock ) &` racing the watcher's boot, and under load a boot
+# slower than 3 s found the clock already broken AT ENTRY, took the silent
+# HandoffWatchNoClock exit, and printed nothing: measured 2026-10-28 in a full-suite
+# run, "FAIL[DO]: expected to contain: cannot read the clock -- got: " with one key
+# instead of two. Counting readings makes "after entry" an event, not a guess.
 cat > "$DFD/bin/date" <<'DFSH'
 #!/bin/sh
 [ -f "$DF_NOCLOCK" ] && exit 1
+if [ "$1" = +%s ] && [ -n "${DF_CLOCKSEEN:-}" ]; then
+  [ -f "$DF_CLOCKSEEN" ] && { : > "$DF_NOCLOCK"; exit 1; }
+  : > "$DF_CLOCKSEEN"
+fi
 exec /bin/date "$@"
 DFSH
 chmod +x "$DFD/bin/date"
@@ -4401,12 +4412,10 @@ df_gen() { # $1=script $2=generation -> DF_OUT
   rm -f "$DFD/noclock"
   # The clock has to work at entry and fail MID-LOOP: `watch_loop` refuses at its
   # very first `epoch` otherwise, and never reaches the stand-down under test.
-  ( sleep 3; : > "$DFD/noclock" ) &
-  _dfbg=$!
-  DF_OUT="$(env DF_NOCLOCK="$DFD/noclock" PATH="$DFD/bin:$PATH" \
+  rm -f "$DFD/clockseen"
+  DF_OUT="$(env DF_NOCLOCK="$DFD/noclock" DF_CLOCKSEEN="$DFD/clockseen" PATH="$DFD/bin:$PATH" \
               bash "$1" --watch "$DFREC" --watch-gen "$2" --poll-sec 1 2>&1)"
-  wait "$_dfbg" 2>/dev/null
-  rm -f "$DFD/noclock"
+  rm -f "$DFD/noclock" "$DFD/clockseen"
 }
 df_gen "$SCRIPT" g-df-1
 assert_contains "cannot read the clock" "$DF_OUT" DF
@@ -4426,12 +4435,10 @@ grep -q '^alerted_clocklost=' "$DFREC" && { echo "FAIL[DF]: the flat alerted_clo
 # generation, so the key falls back to its pid.
 df_bare() { # $1=script -> DF_OUT   (df_gen without the generation)
   rm -f "$DFD/noclock"
-  ( sleep 3; : > "$DFD/noclock" ) &
-  _dfbg=$!
-  DF_OUT="$(env DF_NOCLOCK="$DFD/noclock" PATH="$DFD/bin:$PATH" \
+  rm -f "$DFD/clockseen"
+  DF_OUT="$(env DF_NOCLOCK="$DFD/noclock" DF_CLOCKSEEN="$DFD/clockseen" PATH="$DFD/bin:$PATH" \
               bash "$1" --watch "$DFREC" --poll-sec 1 2>&1)"
-  wait "$_dfbg" 2>/dev/null
-  rm -f "$DFD/noclock"
+  rm -f "$DFD/noclock" "$DFD/clockseen"
 }
 DFHO3="$(NEWHO df-bare)"; DFREC3="$DFHO3.dispatch"
 live_json "running"; GOF "$DFHO3" "df-bare" >/dev/null 2>&1
@@ -4528,27 +4535,36 @@ DOD="$tmp/do"; mkdir -p "$DOD/bin"
 cat > "$DOD/bin/date" <<'DOSH'
 #!/bin/sh
 [ -f "$DO_NOCLOCK" ] && exit 1
+# See DF's shim: the entry reading works and a mid-loop one breaks. One more gate
+# here: the break also waits for $DO_GO, which do_run creates only AFTER it has
+# seeded the predecessor's marker, so the seed is in the record before the alert
+# can read it -- an ordering, where the old version had a 3-second hope.
+if [ "$1" = +%s ] && [ -n "${DO_CLOCKSEEN:-}" ]; then
+  if [ -f "$DO_CLOCKSEEN" ]; then
+    [ -f "$DO_GO" ] && { : > "$DO_NOCLOCK"; exit 1; }
+  else
+    : > "$DO_CLOCKSEEN"
+  fi
+fi
 exec /bin/date "$@"
 DOSH
 chmod +x "$DOD/bin/date"
 do_run() { # $1=script $2=record $3=1 to seed the dead predecessor's marker -> DO_OUT
-  rm -f "$DOD/noclock"
+  rm -f "$DOD/noclock" "$DOD/clockseen" "$DOD/go"
   # Same shape as DF: the clock must work at entry (watch_loop refuses at its
-  # first `epoch` otherwise) and fail mid-loop.
-  ( sleep 3; : > "$DOD/noclock" ) &
-  _dobg=$!
-  env DO_NOCLOCK="$DOD/noclock" PATH="$DOD/bin:$PATH" \
+  # first `epoch` otherwise) and fail mid-loop -- see the shim for how.
+  env DO_NOCLOCK="$DOD/noclock" DO_CLOCKSEEN="$DOD/clockseen" DO_GO="$DOD/go" PATH="$DOD/bin:$PATH" \
     bash "$1" --watch "$2" --poll-sec 1 > "$DOD/out" 2>&1 &
   _dopid=$!
   # THE RECYCLED PID, ARRANGED. `bash script &` makes $! the pid that script
   # sees as $$, so this is exactly the marker a dead watcher with this pid would
-  # have left behind. It is read by alert_once when the clock breaks at t+3s,
-  # so writing it now is inside the window.
+  # have left behind. It is read by alert_once when the clock breaks, which the
+  # shim holds off until $DOD/go exists -- so writing it first is an ordering.
   [ "$3" = 1 ] && printf 'alerted_clocklost_pid%s=1\n' "$_dopid" >> "$2"
+  : > "$DOD/go"
   wait "$_dopid" 2>/dev/null
-  wait "$_dobg" 2>/dev/null
   DO_OUT="$(cat "$DOD/out")"
-  rm -f "$DOD/noclock"
+  rm -f "$DOD/noclock" "$DOD/clockseen" "$DOD/go"
 }
 DOHO="$(NEWHO do-pidreuse)"; DOREC="$DOHO.dispatch"
 live_json "running"; GOF "$DOHO" "do" >/dev/null 2>&1

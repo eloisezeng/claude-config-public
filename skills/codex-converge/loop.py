@@ -777,6 +777,32 @@ def finding_id(job_name: str, index: int) -> str:
     return f'{job_name}#{index}'
 
 
+def verdict_findings(doc: object) -> list | None:
+    """A verdict document's findings list, for EITHER shape a review lands in, or `None`.
+
+    `review-output.schema.json` requires an object carrying `findings`, and that is what every
+    reader here wants. But a review prompt that also spells the format out in prose
+    ("Report findings as JSON: an array of objects with `severity`, `file`, ...") gets a BARE
+    TOP-LEVEL ARRAY back often enough to matter, and a bare array is not a malformed verdict: it
+    is a complete, countable list of findings in the one shape the prose asked for.
+
+    MEASURED 2026-10-28, arc `rows-all-majors`: `diff-micro` round 2's kept verdict
+    (`verdicts/diff-micro.r2.diff-micro-r2.*.json`) is a bare 4-element array, and
+    `round_findings` read it as `TypeError: list indices must be integers or slices, not str`.
+    That is the fail-closed branch, so the round could not be closed and no LATER round could be
+    launched — a paid review with four real findings held the whole track shut, and the obvious
+    repair (hand-editing the kept snapshot into an object) would have rewritten the audit record
+    to suit the reader. One normalizer here instead: every reader goes through it, the bare-array
+    case becomes a known count rather than an unknown one, and a document that is NEITHER shape
+    still falls through to fail closed.
+    """
+    if isinstance(doc, list):
+        return doc
+    if isinstance(doc, dict) and isinstance(doc.get('findings'), list):
+        return doc['findings']
+    return None
+
+
 def round_findings(events: Sequence[Mapping], track: str, rnd: int) -> tuple[list[str], list[str]]:
     """Every finding this round's reviewers reported, and every verdict that could not be read.
 
@@ -811,9 +837,10 @@ def round_findings(events: Sequence[Mapping], track: str, rnd: int) -> tuple[lis
         try:
             with open(out, encoding='utf-8') as fh:
                 verdict = json.load(fh)
-            findings = verdict['findings']
-            if not isinstance(findings, list):
-                raise TypeError('findings is not a list')
+            findings = verdict_findings(verdict)
+            if findings is None:
+                raise TypeError('neither an object carrying a `findings` array nor a bare array '
+                                'of findings')
         except (OSError, ValueError, KeyError, TypeError) as exc:
             unreadable.append(f'{out} ({exc.__class__.__name__}: {exc})')
             continue
@@ -841,8 +868,9 @@ def unledgered_verdicts(arc: str, events: Sequence[Mapping]) -> list[str]:
     notices the session that did not.
 
     A verdict is identified by CONTENT, never by file name: any top-level `*.json` in the arc that
-    parses as an object carrying a `findings` list, because that is exactly what `round_findings`
-    counts and a naming convention is something a caller can skip. It is LEDGERED when a `review`
+    `verdict_findings` can read — an object carrying a `findings` list, or a bare array of
+    findings — because that is exactly what `round_findings` counts and a naming convention is
+    something a caller can skip. It is LEDGERED when a `review`
     start event on a real (non-one-off) track names it as `out`. A one-off-track event does not
     count: `arc_rounds` excludes that track, so its findings reach no gate either and it is the
     same hole by another route.
@@ -864,7 +892,22 @@ def unledgered_verdicts(arc: str, events: Sequence[Mapping]) -> list[str]:
                 doc = json.load(fh)
         except (OSError, ValueError):
             continue
-        if not isinstance(doc, dict) or not isinstance(doc.get('findings'), list):
+        # Same two shapes `round_findings` counts, through the same normalizer — a bare-array
+        # verdict the ledger never heard of is the same hole by another route, and recognising it
+        # in one place and not the other would leave exactly that gap.
+        if verdict_findings(doc) is None:
+            continue
+        # ...but a BARE array is only a verdict here when it is findings-shaped. `round_findings`
+        # reads a file the LEDGER says is a review's output, so any list there is a verdict; this
+        # reads EVERY top-level JSON in an arc directory, and an arc directory is a job's scratch
+        # tmp. MEASURED 2026-10-28 over every `jobs/*/tmp/*.json` on this machine: 23 top-level
+        # lists, 21 of them not findings at all (10 mutant batteries, site lists, commit records,
+        # CI run rows) -- each of which would have held `converge` shut as an "unledgered verdict"
+        # -- and 2 hand-kept finding notes in a private `sev` shape no review emits. None carried
+        # the schema's `severity`. A list counts when it is non-empty and every element is an
+        # object carrying that field; anything else is not a review's output.
+        if isinstance(doc, list) and not (
+                doc and all(isinstance(x, Mapping) and 'severity' in x for x in doc)):
             continue
         if os.path.realpath(path) not in named:
             found.append(path)

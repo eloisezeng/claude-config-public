@@ -13,7 +13,7 @@ metadata:
 **Why:** Any state that another process can rewrite (queues, cards, lists, files, DB rows) can drift between your read and your act. A positional reference (index, line number, ordinal) silently rebinds to different content; a check done minutes early is a hypothesis, not a fact, at act time.
 
 **How to apply:**
-- Reference mutable collections by **stable identity** (domain name, primary key, hash), never by index/position, whenever the action mutates or spends.
+- Reference mutable collections by **stable identity** (a unique name, primary key, hash), never by index/position, whenever the action mutates or spends.
 - Re-read and re-verify **immediately before** the irreversible step — same script/transaction, not a separate earlier step ([[verify-claims-against-artifacts]] extended to act-time).
 - Prefer **compare-and-swap**: send a fingerprint (hash/version) of the state you decided on; have the mutator reject on mismatch (HTTP 409 / conditional UPDATE ... WHERE status='expected' with a changed-rows check). Build this into any human-in-the-loop approval surface you design — the human's render is a snapshot too.
 - When an API accepts an explicit payload (editedPayload-style), prefer it over a selection into server state — it pins exactly what you intend regardless of rewrites.

@@ -1,6 +1,6 @@
 ---
 name: a-procedure-validated-small-stops-scaling-silently
-description: A documented recovery procedure validated at a handful of items stops being executable somewhere between that number and production scale, with no edit and no alarm — it worked at 5 domains and could not reach the end of its own list at 47; state the size a runbook was proven at, and drive the per-item interface when it breaks
+description: A documented recovery procedure validated at a handful of items stops being executable somewhere between that number and production scale, with no edit and no alarm — it worked at 5 items and could not reach the end of its own list at 47; state the size a runbook was proven at, and drive the per-item interface when it breaks
 metadata:
   type: reference
   scope: global
@@ -8,7 +8,7 @@ metadata:
 
 A runbook step reading "re-run `--apply` until it exits 0" is a claim about a loop that terminates. It stops being true the moment the list is long enough for a per-request limit to bite, and nothing announces the transition: the document is unchanged, the code is unchanged, and the command simply dies partway through.
 
-Measured 2026-08-31 on a live box (the affiliate-DNS throttle lane in the ops ledger): the documented sweep died on the **THIRD** domain with an HTTP 503 from the registrar's API. It was not that domain and not the credentials — a direct probe of the same four domains spaced 1,500 ms apart succeeded for every one, and the credential check passed. It was rate limiting, and a grep for `sleep|setTimeout|delay|throttle|retry|backoff|429|503` over the module returned **zero matches**: no throttle, no retry, no backoff anywhere. **It worked at 5 items and silently stopped scaling somewhere between 5 and 47.**
+Measured 2026-08-31 on a live box (a vendor-throttle lane in the ops ledger): the documented sweep died on the **THIRD** item with an HTTP 503 from the vendor's API. It was not that item and not the credentials — a direct probe of the same four items spaced 1,500 ms apart succeeded for every one, and the credential check passed. It was rate limiting, and a grep for `sleep|setTimeout|delay|throttle|retry|backoff|429|503` over the module returned **zero matches**: no throttle, no retry, no backoff anywhere. **It worked at 5 items and silently stopped scaling somewhere between 5 and 47.**
 
 
 What to do:

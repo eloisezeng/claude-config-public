@@ -10,7 +10,7 @@ When a test replaces a component and then asserts about behaviour that component
 the assertion cannot fail — however many cases you enumerate. Not a weak test: a **structurally
 blind** one, and it reads as thorough while it does it.
 
-Measured (2026-08-11, your-data-product registrar): money commands must never be re-sent, because the
+Measured (2026-08-11, a vendor purchase API): money commands must never be re-sent, because the
 vendor has no idempotency. Two retry layers were found and fixed, with tests stubbing `fetch` and
 asserting "exactly one fetch" across network errors, timeouts, 429 and 5xx. A third path — **native
 `fetch` following redirects by itself**, 20 hops, and a 307/308 preserving the method — put one

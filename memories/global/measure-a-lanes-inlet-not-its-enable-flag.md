@@ -17,7 +17,7 @@ So the health question is `SELECT count(*)` on the inlet predicate — never "is
 
 **Then, before backfilling into that inlet, measure where the stage's EXIT lands.**
 Pipelines are chains of status predicates, so a stage's completion status is usually the NEXT stage's entry condition, and that next stage may be the expensive one.
-Here the exit status was the appraiser's paid deep-valuation queue: a naive backfill would have silently bought 535 valuations nobody asked for.
+Here the exit status was the entry to a paid stage: a naive backfill would have silently charged for every item, and nobody had asked for that.
 The cure is to record where an item came from and send it home on completion (a nullable `*_return_status` column, advanced with `COALESCE`), not to reuse the forward path's exit.
 
 The general rule: **a status value is an interface, and it usually has more than one reader.** Grep for every predicate that names it before you write it.

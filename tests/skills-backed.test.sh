@@ -61,6 +61,18 @@ disposition() {
   esac
 }
 
+# harness_owned <dir> -> exit 0 iff <dir> is the Claude Code HARNESS's sync container, which no
+# commit of this repo could ever back: ~/.claude/skills/synced/<org>_<user>/ holds the claude.ai-
+# synced anthropic-skills:* set beside its manifest.json, re-written on every sync. (Its sibling
+# .trash/ is a dot-dir, which section 3's `*/` glob never matches.) Decided by STRUCTURE as well as
+# by name, so a skill hand-dropped under the name `synced` -- it would carry its own SKILL.md -- is
+# still the 2026-09-08 defect and still fails.
+harness_owned() {
+  local d="${1%/}"
+  [ "$(basename "$d")" = synced ] && [ ! -L "$d" ] && [ ! -e "$d/SKILL.md" ] || return 1
+  ls "$d"/*/manifest.json >/dev/null 2>&1
+}
+
 # ------------------------------------------------- control: prove it can do --
 # A guard is only worth the alternatives its fixture makes reachable, so each
 # verdict is forced on a throwaway tree. A predicate that can only fail gets
@@ -84,6 +96,18 @@ for probe in "ok ok" "missing fail" "copy fail" "wrong-target fail"; do
   got="$(disposition "$1")"
   [ "$got" = "$2" ] || { echo "FAIL[control]: disposition $1 -> '$got', expected '$2'"; fail=1; }
 done
+
+# ...and harness_owned, each case forcing the opposite answer of its neighbour.
+mkdir -p "$t/h/synced/org_user" "$t/h/named/org_user" "$t/h/bare/synced" "$t/h/hand/synced"
+: > "$t/h/synced/org_user/manifest.json"; : > "$t/h/named/org_user/manifest.json"
+mkdir -p "$t/h/hand/synced/org_user"; : > "$t/h/hand/synced/org_user/manifest.json"; : > "$t/h/hand/synced/SKILL.md"
+for probe in "synced 0" "named 1" "bare/synced 1" "hand/synced 1"; do
+  set -- $probe
+  harness_owned "$t/h/$1"; got=$?
+  [ "$got" = "$2" ] || { echo "FAIL[control]: harness_owned $1 -> $got, expected $2"; fail=1; }
+done
+mkdir -p "$t/h/l"; ln -s "$t/h/synced" "$t/h/l/synced"
+harness_owned "$t/h/l/synced" && { echo "FAIL[control]: harness_owned accepted a SYMLINK named synced"; fail=1; }
 
 # ------------------------------------------- 1. derived set, both directions --
 # Read ITEMS out of install.sh itself rather than re-deriving it here: a test
@@ -139,7 +163,9 @@ if [ "$(classify "$REPO" "$CFG" CLAUDE.md)" = ok ]; then
   for d in "$CFG"/skills/*/; do
     [ -d "$d" ] || continue
     n="$(basename "$d")"
-    if [ ! -L "${d%/}" ]; then
+    if harness_owned "$d"; then
+      echo "SKIP: $CFG/skills/$n is the harness's claude.ai sync container (manifest.json inside), not repo config"
+    elif [ ! -L "${d%/}" ]; then
       echo "FAIL: $CFG/skills/$n is a real directory -- it is in no commit and exists only on this machine"; fail=1
     elif [ ! -d "$REPO/skills/$n" ]; then
       echo "FAIL: $CFG/skills/$n is a link to something that is not $REPO/skills/$n"; fail=1

@@ -98,6 +98,15 @@
             "command": "node \"$HOME/dotfiles/claude/hooks/ci-cost-reaudit-prompt.mjs\""
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$HOME/dotfiles/claude/hooks/codex-converge-reminder.mjs\"",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Notification": [
